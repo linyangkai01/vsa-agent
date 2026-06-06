@@ -1,0 +1,21 @@
+﻿model:
+  mode: dev
+  dev:
+    provider: openai_compatible
+    base_url: https://api.openai.com/v1
+    llm_model: gpt-4o
+    vlm_model: gpt-4o
+  prod:
+    provider: vllm
+    base_url: http://localhost:8000/v1
+    llm_model: Qwen3-VL-8B-Instruct
+    vlm_model: Qwen3-VL-8B-Instruct
+
+agent:
+  max_iterations: 15
+  planning_enabled: true
+  postprocessing_enabled: true
+
+server:
+  host: "0.0.0.0"
+  port: 8000
