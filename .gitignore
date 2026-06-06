@@ -1,0 +1,8 @@
+﻿__pycache__/
+*.pyc
+.env
+.venv/
+uv.lock
+dist/
+*.egg-info/
+_nvidia-original/
