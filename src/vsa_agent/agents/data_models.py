@@ -1,4 +1,4 @@
-﻿import enum
+import enum
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel

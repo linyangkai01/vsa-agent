@@ -1,4 +1,4 @@
-﻿# vsa-agent 改造设计文档
+# vsa-agent 改造设计文档
 
 > 从 NVIDIA VSS Blueprint 到工业安全视频分析Agent的全面改造方案
 

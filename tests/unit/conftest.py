@@ -1,4 +1,4 @@
-﻿'''Shared pytest fixtures for vsa-agent unit tests.'''
+'''Shared pytest fixtures for vsa-agent unit tests.'''
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

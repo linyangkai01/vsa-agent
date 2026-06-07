@@ -1,4 +1,4 @@
-﻿# CONFIG.md
+# CONFIG.md
 
 ## Project Overview
 

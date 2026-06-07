@@ -1,4 +1,4 @@
-﻿# vsa-agent Implementation Plan — Part 2: Tools & Agents
+# vsa-agent Implementation Plan — Part 2: Tools & Agents
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 

@@ -1,4 +1,4 @@
-﻿from fastmcp import FastMCP
+from fastmcp import FastMCP
 from langchain_core.messages import HumanMessage
 
 from vsa_agent.agents.data_models import AgentState

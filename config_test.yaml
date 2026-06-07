@@ -1,4 +1,4 @@
-﻿model:
+model:
   mode: dev
   dev:
     provider: openai_compatible

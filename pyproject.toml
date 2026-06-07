@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "vsa_agent"
 version = "0.1.0"
 description = "Video Safety Analysis Agent"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "langchain>=0.3",
     "langchain-openai>=0.3",

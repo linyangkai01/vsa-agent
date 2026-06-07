@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 import asyncio
 from vsa_agent.registry import ToolRegistry, register_tool, _TOOLS
 

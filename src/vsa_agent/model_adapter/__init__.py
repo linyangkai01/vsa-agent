@@ -1,4 +1,4 @@
-﻿from vsa_agent.model_adapter.base import BaseModelAdapter
+from vsa_agent.model_adapter.base import BaseModelAdapter
 
 
 def create_model_adapter(model_name: str | None = None) -> BaseModelAdapter:

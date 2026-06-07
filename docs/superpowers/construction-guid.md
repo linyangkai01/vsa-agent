@@ -1,4 +1,4 @@
-﻿# vsa-agent Construction Guide
+# vsa-agent Construction Guide
 
 > 建设指南：从NVIDIA VSS Blueprint学到的框架设计 + 开源替代方案 + 开发惯例
 
