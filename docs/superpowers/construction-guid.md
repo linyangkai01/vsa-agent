@@ -86,7 +86,8 @@ Import触发模块顶层的nat装饰器或框架钩子执行注册。
 
 | 文件模式 | 职责 | 不做什么 |
 |---|---|---|
-| egister.py | 只做import触发注册 | 不写业务逻辑 |
+| 
+egister.py | 只做import触发注册 | 不写业务逻辑 |
 | __init__.py | 空文件或导出公共API | 不做import依赖树 |
 | data_models.py | Pydantic模型定义 | 不写业务逻辑 |
 | conftest.py | pytest fixtures | 不写测试用例 |
@@ -140,7 +141,8 @@ MCP (mcp/server.py)      →  build_graph()       │
 `
 
 **依赖方向规则：**
-- pi/ → gents/ → model_adapter/ + egistry/ → config/
+- pi/ → gents/ → model_adapter/ + 
+egistry/ → config/
 - 不允许反向依赖（config不能import agents）
 - utils/ 被所有人import，但不import任何人
 
@@ -154,7 +156,8 @@ MCP (mcp/server.py)      →  build_graph()       │
 |---|---|---|
 | 配置系统 | config.py, config.yaml | #2 配置驱动 |
 | 模型适配 | model_adapter/{base,openai,vllm}_adapter.py | #15 多模型适配 + #13 策略模式 |
-| 工具注册 | egistry.py, 	ools/{register,echo_tool}.py | #1 插件注册 + #10 注册表 |
+| 工具注册 | 
+egistry.py, 	ools/{register,echo_tool}.py | #1 插件注册 + #10 注册表 |
 | Agent DAG | gents/{data_models,register,top_agent}.py | #3 类型决策 + #17 DAG + #18 Streaming |
 | API层 | pi/{routes,health}.py | — |
 | MCP层 | mcp/server.py | fastmcp工具暴露 |
@@ -163,8 +166,8 @@ MCP (mcp/server.py)      →  build_graph()       │
 
 | 优先级 | 模块 | 对应设计理念 |
 |---|---|---|
-| P0 | 	ools/video_understanding.py | VLM视频理解工具 |
-| P0 | 	ools/frame_extract.py | 视频帧提取（OpenCV） |
+| P0 | 	ools/video_understanding.py | VLM视频理解工具 ✅ **DONE** |
+| P0 | 	ools/frame_extract.py | 视频帧提取（OpenCV） ✅ **DONE** |
 | P0 | gents/search_agent.py | #13 三路搜索策略 |
 | P0 | gents/summary_agent.py | 长视频摘要 + 安全报告 |
 | P1 | gents/critic_agent.py | #7 Critic自检环 |
