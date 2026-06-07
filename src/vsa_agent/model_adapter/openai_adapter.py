@@ -1,4 +1,4 @@
-﻿from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI
 
 from vsa_agent.config import get_config
 from vsa_agent.model_adapter.base import BaseModelAdapter

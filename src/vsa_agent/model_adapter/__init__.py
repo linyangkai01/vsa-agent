@@ -1,4 +1,4 @@
-﻿from vsa_agent.config import get_config
+from vsa_agent.config import get_config
 from vsa_agent.model_adapter.base import BaseModelAdapter
 from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
 from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter

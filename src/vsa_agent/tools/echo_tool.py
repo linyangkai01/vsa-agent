@@ -1,4 +1,4 @@
-﻿from vsa_agent.registry import register_tool
+from vsa_agent.registry import register_tool
 
 @register_tool('echo', description='Echo back the input message')
 async def echo_tool(message: str) -> str:
