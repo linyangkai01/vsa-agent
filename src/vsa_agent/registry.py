@@ -1,4 +1,4 @@
-from typing import Callable, Any
+﻿from typing import Callable, Any
 
 _TOOLS: dict[str, Callable] = {}
 
@@ -16,7 +16,11 @@ _loaded = False
 def _ensure_loaded():
     global _loaded
     if not _loaded:
-        from vsa_agent.tools import register  # noqa: F401
+        from vsa_agent.config import get_config
+        import importlib
+        cfg = get_config()
+        for module_path in cfg.tools.enabled_modules:
+            importlib.import_module(module_path)
         _loaded = True
 
 

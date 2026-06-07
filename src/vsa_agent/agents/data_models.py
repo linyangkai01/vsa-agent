@@ -1,5 +1,6 @@
-import enum
+﻿import enum
 
+from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -8,13 +9,13 @@ from pydantic import Field
 
 
 class AgentDecision(enum.StrEnum):
-    '''Decision of the agent node — drives LangGraph conditional edges.'''
+    """Decision of the agent node — drives LangGraph conditional edges."""
     CALL_TOOL = 'call_tool'
     RESPOND = 'respond'
 
 
 class AgentMessageChunkType(enum.StrEnum):
-    '''Type of the streaming message chunk emitted by DAG nodes.'''
+    """Type of the streaming message chunk emitted by DAG nodes."""
     THOUGHT = 'thought'
     TOOL_CALL = 'tool_call'
     FINAL = 'final'
@@ -22,23 +23,39 @@ class AgentMessageChunkType(enum.StrEnum):
 
 
 class AgentMessageChunk(BaseModel):
-    '''Streaming chunk emitted by agent nodes during graph traversal.
+    """Streaming chunk emitted by agent nodes during graph traversal."""
+    type: AgentMessageChunkType = Field(default=AgentMessageChunkType.THOUGHT)
+    content: str = Field(default='')
 
-    Each DAG node writes chunks of these types so the frontend can
-    render thoughts, tool calls, and final responses differently.
-    Ref: NVIDIA original uses identical pattern with get_stream_writer().
-    '''
-    type: AgentMessageChunkType = Field(default=AgentMessageChunkType.THOUGHT, description='The type of the message chunk')
-    content: str = Field(default='', description='The content of the message chunk')
+
+class AgentState(BaseModel):
+    """State for the Top Agent conversation tracking.
+
+    Mirrors NVIDIA's TopAgentState pattern:
+    - current_message: latest user query as a BaseMessage
+    - agent_scratchpad: AI thought steps + tool results during a tool-call loop
+    - conversation_history: finished HumanMessage/AIMessage pairs between turns
+    - iteration_count: how many LLM calls so far
+    - final_answer: terminal answer string
+    - plan / previous_conversation / reasoning fields: reserved for future features
+    """
+    current_message: BaseMessage | None = Field(default=None)
+    agent_scratchpad: list[BaseMessage] = Field(default_factory=list)
+    conversation_history: list[BaseMessage] = Field(default_factory=list)
+    iteration_count: int = Field(default=0)
+    final_answer: str = Field(default='')
+
+    # --- Reserved for future features ---
+    plan: str = Field(default='')
+    previous_conversation: str = Field(default='')
+    llm_reasoning: bool = Field(default=False)
+    vlm_reasoning: bool | None = Field(default=None)
+    search_source_type: str = Field(default='video_file')
 
 
 class AgentOutput(BaseModel):
-    '''Standardized output model for agents.
-
-    Separates conversational messages from generated artifacts (reports,
-    charts, media URLs) and execution metadata (timing, tool calls, etc.).
-    '''
-    messages: list[str] = Field(default_factory=list, description='Conversational output for the user')
-    side_effects: dict = Field(default_factory=dict, description='Generated artifacts')
-    metadata: dict = Field(default_factory=dict, description='Execution metadata')
-    status: str = Field(default='success', description='Execution status')
+    """Standardized output model for agents."""
+    messages: list[str] = Field(default_factory=list)
+    side_effects: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+    status: str = Field(default='success')

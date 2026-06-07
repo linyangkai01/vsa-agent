@@ -1,27 +1,29 @@
 ﻿import pytest
 import asyncio
-from vsa_agent.agents.top_agent import (
-    AgentState, build_graph, agent_node, tool_node, finalize_node, decide_next
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from vsa_agent.agents.data_models import (
+    AgentDecision, AgentMessageChunk, AgentMessageChunkType, AgentState
 )
-from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType
+from vsa_agent.agents.top_agent import (
+    build_graph, agent_node, tool_node, finalize_node, decide_next
+)
 
 
 class TestAgentState:
     def test_default_state(self):
         state = AgentState()
-        assert state.messages == []
-        assert state.current_message == ''
+        assert state.current_message is None
+        assert state.agent_scratchpad == []
+        assert state.conversation_history == []
         assert state.final_answer == ''
-        assert state.retry_count == 0
+        assert state.iteration_count == 0
 
-    def test_build_prompt(self):
-        from langchain_core.messages import SystemMessage, HumanMessage
-        state = AgentState(current_message='what is safety?')
-        prompt = state.build_prompt('You are an assistant.')
-        assert len(prompt) == 2
-        assert isinstance(prompt[0], SystemMessage)
-        assert isinstance(prompt[1], HumanMessage)
-        assert prompt[1].content == 'what is safety?'
+    def test_state_with_message(self):
+        msg = HumanMessage(content='hello')
+        state = AgentState(current_message=msg)
+        assert state.current_message is not None
+        assert state.current_message.content == 'hello'
 
 
 class TestAgentDecision:
@@ -46,7 +48,7 @@ class TestAgentMessageChunk:
 
 class TestAgentDAG:
     def test_build_graph(self):
-        '''build_graph compiles a DAG with all 3 nodes.'''
+        """build_graph compiles a DAG with all 3 nodes."""
         async def _run():
             return await build_graph()
         graph = asyncio.run(_run())
@@ -57,10 +59,19 @@ class TestAgentDAG:
         assert '__start__' in nodes
         assert '__end__' in nodes
 
-    def test_decide_next_no_tools(self):
+    def test_decide_next_no_scratchpad(self):
         state = AgentState()
         assert decide_next(state) == AgentDecision.RESPOND.value
 
-    def test_decide_next_with_tools(self):
-        state = AgentState(pending_tool_calls=[{'name': 'echo', 'args': {}, 'id': '1'}])
+    def test_decide_next_no_tool_calls(self):
+        """Scratchpad has only ToolMessage -> no pending tool calls -> RESPOND."""
+        from langchain_core.messages import ToolMessage
+        state = AgentState()
+        state.agent_scratchpad.append(ToolMessage(content='done', tool_call_id='1'))
+        assert decide_next(state) == AgentDecision.RESPOND.value
+
+    def test_decide_next_with_tool_calls(self):
+        """Scratchpad ends with AIMessage containing tool_calls -> CALL_TOOL."""
+        ai_msg = AIMessage(content='', tool_calls=[{'name': 'echo', 'args': {}, 'id': '1'}])
+        state = AgentState(agent_scratchpad=[ai_msg])
         assert decide_next(state) == AgentDecision.CALL_TOOL.value

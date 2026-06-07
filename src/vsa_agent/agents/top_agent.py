@@ -6,71 +6,64 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, Field
 
-from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType
-from vsa_agent.prompt import DEFAULT_SYSTEM_PROMPT
+from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType, AgentState
+from vsa_agent.config import get_config
 
 logger = logging.getLogger(__name__)
-
-
-# ===== State =====
-
-
-class AgentState(BaseModel):
-    '''Typed state flowing through all DAG nodes.'''
-    messages: list[BaseMessage] = Field(default_factory=list)
-    current_message: str = ''
-    final_answer: str = ''
-    pending_tool_calls: list[dict] = Field(default_factory=list)
-    retry_count: int = 0
-
-    def build_prompt(self, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> list[BaseMessage]:
-        '''Assemble the full LLM prompt from conversation history + current message.'''
-        prompt: list[BaseMessage] = [SystemMessage(content=system_prompt)]
-        prompt.extend(self.messages)
-        prompt.append(HumanMessage(content=self.current_message))
-        return prompt
 
 
 # ===== Nodes =====
 
 
 async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    '''Main reasoning node — invoke the LLM and decide next action.'''
+    """Main reasoning node — invoke the LLM and decide next action."""
     from vsa_agent.model_adapter import create_model_adapter
 
     writer = get_stream_writer()
     logger.debug('Starting agent node')
 
-    prompt = state.build_prompt()
+    # Build prompt in the original pattern:
+    # system + conversation_history + current_message + agent_scratchpad
+    cfg = get_config()
+    prompt: list[BaseMessage] = [SystemMessage(content=cfg.prompts.default_system)]
+
+    if state.conversation_history:
+        prompt.extend(state.conversation_history)
+
+    if state.current_message:
+        prompt.append(state.current_message)
+
+    if state.agent_scratchpad:
+        prompt.extend(state.agent_scratchpad)
+
     writer(AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content='Analyzing...'))
 
     response = await create_model_adapter().invoke(prompt)
+    state.iteration_count += 1
 
     if isinstance(response, AIMessage) and response.tool_calls:
-        state.pending_tool_calls = [
-            {'name': tc['name'], 'args': tc['args'], 'id': tc['id']}
-            for tc in response.tool_calls
-        ]
-        state.messages.append(response)
+        state.agent_scratchpad.append(response)
     else:
         content = response.content if isinstance(response, AIMessage) else str(response)
         state.final_answer = content
-        state.messages.append(response)
 
     return state
 
 
 async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    '''Execute pending tool calls and record results in messages.'''
+    """Execute pending tool calls and record results in scratchpad."""
     from vsa_agent.registry import ToolRegistry
 
     writer = get_stream_writer()
     logger.debug('Starting tool node')
     tools = ToolRegistry.get_all()
 
-    for tc in state.pending_tool_calls:
+    last_msg = state.agent_scratchpad[-1] if state.agent_scratchpad else None
+    if not last_msg or not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+        return state
+
+    for tc in last_msg.tool_calls:
         name, args, call_id = tc['name'], tc['args'], tc['id']
         writer(AgentMessageChunk(type=AgentMessageChunkType.TOOL_CALL, content=f'Calling: {name}'))
 
@@ -79,16 +72,21 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
         except Exception as e:
             result = f'Error: {e}'
 
-        state.messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+        state.agent_scratchpad.append(ToolMessage(content=str(result), tool_call_id=call_id))
 
-    state.pending_tool_calls = []
     return state
 
 
 async def finalize_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    '''Emit final answer and reset per-round state.'''
+    """Emit final answer and record the turn in conversation history."""
     writer = get_stream_writer()
     writer(AgentMessageChunk(type=AgentMessageChunkType.FINAL, content=state.final_answer))
+
+    if state.current_message:
+        state.conversation_history.append(HumanMessage(content=state.current_message.content))
+        state.conversation_history.append(AIMessage(content=state.final_answer))
+
+    state.agent_scratchpad = []
     logger.debug('Finalize node: conversation complete')
     return state
 
@@ -97,8 +95,11 @@ async def finalize_node(state: AgentState, config: RunnableConfig) -> AgentState
 
 
 def decide_next(state: AgentState) -> str:
-    '''Conditional edge: route agent_node to tool or finalize.'''
-    if state.pending_tool_calls:
+    """Conditional edge: route agent_node to tool or finalize."""
+    if not state.agent_scratchpad:
+        return AgentDecision.RESPOND.value
+    last = state.agent_scratchpad[-1]
+    if isinstance(last, AIMessage) and last.tool_calls:
         return AgentDecision.CALL_TOOL.value
     return AgentDecision.RESPOND.value
 
@@ -107,7 +108,7 @@ def decide_next(state: AgentState) -> str:
 
 
 async def build_graph() -> CompiledStateGraph:
-    '''Build and compile the top agent DAG.'''
+    """Build and compile the top agent DAG."""
     graph = StateGraph(AgentState)
     graph.add_node('agent', agent_node)
     graph.add_node('tool', tool_node)
