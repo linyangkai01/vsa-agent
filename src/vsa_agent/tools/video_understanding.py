@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 # ===== Constants =====
 
+SYSTEM_PROMPT = (
+    "You are an expert at video understanding and description. "
+    "Your task is to capture, in as much detail as possible, the events "
+    "from the video frames related to the user's query. "
+    "Be sure to capture details about the environment, people, objects, "
+    "and actions. For example, describe attire, vehicle types, object colors. "
+    "The frames are sampled from the video in sequence. "
+    "DO NOT make up anything not visible in the frames. "
+    "DO NOT hallucinate."
+)
+
 DEFAULT_MAX_FRAMES = 24
 
 
@@ -63,12 +74,6 @@ async def video_understanding_tool(
         config = get_config()
         model_name = config.model.dev.vlm_model if config.model.mode == "dev" else config.model.prod.vlm_model
         model_adapter = create_model_adapter(model_name=model_name)
-    else:
-        # When model_adapter is injected, still try to get the format instruction from config
-        from vsa_agent.config import get_config
-        config = get_config()
-
-    system_prompt = config.prompts.vlm_format_instruction
 
     # Build the vision-language prompt
     image_parts = [
@@ -89,7 +94,7 @@ async def video_understanding_tool(
     ]
 
     messages = [
-        SystemMessage(content=system_prompt),
+        SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=human_prompt_parts),
     ]
 
