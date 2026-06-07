@@ -1,4 +1,4 @@
-"""Tests for the frame_extract tool — video frame extraction with OpenCV."""
+﻿"""Tests for the frame_extract tool — video frame extraction with OpenCV."""
 
 import asyncio
 import os
@@ -101,6 +101,25 @@ class TestFrameExtract:
             result = asyncio.run(fn(video_path=video_path, max_frames=20))
 
             assert len(result["frames"]) <= 5
+        finally:
+            os.unlink(video_path)
+
+    def test_extract_frames_reversed_timestamps(self):
+        """When end_timestamp < start_timestamp, return empty frames with metadata."""
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            video_path = f.name
+        try:
+            _create_test_video(video_path, duration_sec=3.0, fps=10)
+
+            fn = ToolRegistry.get("frame_extract")
+            result = asyncio.run(fn(video_path=video_path, max_frames=5,
+                                     start_timestamp=2.0, end_timestamp=1.0))
+
+            assert result["frames"] == []
+            assert result["extracted_count"] == 0
+            assert result["duration_sec"] > 0
+            assert result["fps"] > 0
+            assert result["frame_count"] > 0
         finally:
             os.unlink(video_path)
 

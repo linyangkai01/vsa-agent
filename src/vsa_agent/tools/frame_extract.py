@@ -1,4 +1,4 @@
-"""Video frame extraction tool — extracts evenly-spaced frames from a video file.
+﻿"""Video frame extraction tool — extracts evenly-spaced frames from a video file.
 
 Uses OpenCV to read video frames and returns them as base64-encoded JPEG strings,
 suitable for feeding into VLM models for video understanding tasks.
@@ -26,15 +26,19 @@ DEFAULT_START_TIMESTAMP = 0.0
 
 
 def _extract_frames(
-    video_path: str,
+    cap: cv2.VideoCapture,
+    fps: float,
+    total_frames: int,
     start_timestamp: float,
     end_timestamp: float,
     step_size: float,
 ) -> list[str]:
-    """Select frames from a video at evenly-spaced intervals using OpenCV.
+    """Select frames from an already-opened video at evenly-spaced intervals.
 
     Args:
-        video_path: Path to the video file.
+        cap: An opened cv2.VideoCapture instance positioned at the start.
+        fps: Frames per second of the source video.
+        total_frames: Total number of frames in the source video.
         start_timestamp: Start time in seconds.
         end_timestamp: End time in seconds.
         step_size: Time interval between frames in seconds.
@@ -42,43 +46,30 @@ def _extract_frames(
     Returns:
         List of base64-encoded JPEG frame images.
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        logger.error("Could not open video file: %s", video_path)
-        raise ValueError(f"Could not open video file: {video_path}")
+    start_frame = min(total_frames - 1, math.floor(start_timestamp * fps))
+    end_frame = min(total_frames - 1, math.ceil(end_timestamp * fps))
+    step_size_frame = max(1, math.floor(step_size * fps))
 
-    try:
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_indices = list(range(start_frame, end_frame, step_size_frame))
+    if not frame_indices:
+        logger.warning(
+            "No frames selected from %.2fs to %.2fs (step=%.2fs)",
+            start_timestamp, end_timestamp, step_size,
+        )
+        return []
 
-        start_frame = min(total_frames - 1, math.floor(start_timestamp * fps))
-        end_frame = min(total_frames - 1, math.ceil(end_timestamp * fps))
-        step_size_frame = max(1, math.floor(step_size * fps))
+    base64_frames: list[str] = []
+    for frame_idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
 
-        frame_indices = list(range(start_frame, end_frame, step_size_frame))
-        if not frame_indices:
-            logger.warning(
-                "No frames selected for video %s from %.2fs to %.2fs",
-                video_path, start_timestamp, end_timestamp,
-            )
-            return []
+        if not ret:
+            raise RuntimeError(f"Could not read frame {frame_idx}")
 
-        base64_frames: list[str] = []
-        for frame_idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
+        _, buffer = cv2.imencode(".jpg", frame)
+        base64_frames.append(base64.b64encode(buffer.tobytes()).decode("utf-8"))
 
-            if ret:
-                _, buffer = cv2.imencode(".jpg", frame)
-                base64_frames.append(base64.b64encode(buffer.tobytes()).decode("utf-8"))
-            else:
-                raise RuntimeError(f"Could not read frame {frame_idx} from {video_path}")
-
-        return base64_frames
-    except Exception:
-        raise
-    finally:
-        cap.release()
+    return base64_frames
 
 
 # ===== Registered Tool =====
@@ -117,37 +108,46 @@ async def frame_extract_tool(
     try:
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration_sec = total_frames / fps if fps > 0 else 0.0
-    finally:
-        cap.release()
 
-    if end_timestamp is None:
-        end_timestamp = duration_sec
+        if total_frames <= 0:
+            raise ValueError(f"Video has no frames: {video_path}")
 
-    # Clamp timestamps to valid range
-    start_timestamp = max(0.0, start_timestamp)
-    end_timestamp = min(duration_sec, end_timestamp)
+        duration_sec = total_frames / fps if fps > 0 else total_frames / 30.0
 
-    time_window = end_timestamp - start_timestamp
-    if time_window <= 0:
-        logger.warning("Empty time window for %s: start=%.2f end=%.2f", video_path, start_timestamp, end_timestamp)
+        if end_timestamp is None:
+            end_timestamp = duration_sec
+
+        # Clamp timestamps to valid range
+        start_timestamp = max(0.0, start_timestamp)
+        end_timestamp = min(duration_sec, end_timestamp)
+
+        time_window = end_timestamp - start_timestamp
+        if time_window <= 0:
+            logger.warning(
+                "Empty time window for %s: start=%.2f end=%.2f",
+                video_path, start_timestamp, end_timestamp,
+            )
+            return {
+                "frames": [],
+                "duration_sec": duration_sec,
+                "fps": fps,
+                "frame_count": total_frames,
+                "extracted_count": 0,
+            }
+
+        # Calculate step_size to get evenly-spaced frames
+        step_size = time_window / max_frames
+
+        frames = _extract_frames(
+            cap, fps, total_frames, start_timestamp, end_timestamp, step_size,
+        )
+
         return {
-            "frames": [],
+            "frames": frames,
             "duration_sec": duration_sec,
             "fps": fps,
             "frame_count": total_frames,
-            "extracted_count": 0,
+            "extracted_count": len(frames),
         }
-
-    # Calculate step_size to get exactly max_frames evenly-spaced
-    step_size = time_window / max_frames
-
-    frames = _extract_frames(video_path, start_timestamp, end_timestamp, step_size)
-
-    return {
-        "frames": frames,
-        "duration_sec": duration_sec,
-        "fps": fps,
-        "frame_count": total_frames,
-        "extracted_count": len(frames),
-    }
+    finally:
+        cap.release()
