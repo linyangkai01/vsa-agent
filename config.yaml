@@ -1,4 +1,4 @@
-﻿model:
+model:
   mode: dev
   dev:
     provider: openai_compatible
@@ -21,6 +21,7 @@ agent:
 tools:
   enabled_modules:
     - vsa_agent.tools.echo_tool
+    - vsa_agent.tools.frame_extract
 
 server:
   host: "0.0.0.0"
@@ -43,6 +44,7 @@ prompts:
     2. 追踪涉事人员的行动轨迹
     3. 分析可能的触发因素
     按时间顺序描述完整事件链，标注每个阶段的关键证据
+
   vlm_format_instruction: |
     DON'T MAKE UP ANYTHING THAT NOT FROM THE VIDEO.
     DON'T HALLUCINATE ANYTHING.
