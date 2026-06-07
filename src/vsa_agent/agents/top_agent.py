@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
@@ -9,27 +9,16 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType
+from vsa_agent.prompt import DEFAULT_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# ===== Constants =====
-
-DEFAULT_SYSTEM_PROMPT = (
-    'You are an industrial safety video analysis agent. '
-    'Use tools to analyze videos and generate safety reports. '
-    'Respond directly when no tools are needed.'
-)
 
 # ===== State =====
 
 
 class AgentState(BaseModel):
-    '''Typed state flowing through all DAG nodes.
-
-    messages stores full conversation history as LangChain BaseMessage objects.
-    LangGraph serializes them natively for checkpointing via Pydantic.
-    pending_tool_calls holds only the current round's tool requests.
-    '''
+    '''Typed state flowing through all DAG nodes.'''
     messages: list[BaseMessage] = Field(default_factory=list)
     current_message: str = ''
     final_answer: str = ''
@@ -108,10 +97,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig) -> AgentState
 
 
 def decide_next(state: AgentState) -> str:
-    '''Conditional edge: route agent_node to tool or finalize.
-
-    Uses pending_tool_calls to determine if the LLM requested tools.
-    '''
+    '''Conditional edge: route agent_node to tool or finalize.'''
     if state.pending_tool_calls:
         return AgentDecision.CALL_TOOL.value
     return AgentDecision.RESPOND.value
@@ -121,13 +107,7 @@ def decide_next(state: AgentState) -> str:
 
 
 async def build_graph() -> CompiledStateGraph:
-    '''Build and compile the top agent DAG.
-
-    DAG structure (Design Pattern #17):
-        agent ──(tool_calls)──> tool ──> agent  ...
-          │                                        │
-          └────(no tool_calls)──> finalize ──> END
-    '''
+    '''Build and compile the top agent DAG.'''
     graph = StateGraph(AgentState)
     graph.add_node('agent', agent_node)
     graph.add_node('tool', tool_node)
