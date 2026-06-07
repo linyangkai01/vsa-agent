@@ -6,3 +6,5 @@ uv.lock
 dist/
 *.egg-info/
 _nvidia-original/
+.conda-env/
+.conda-pkgs/
