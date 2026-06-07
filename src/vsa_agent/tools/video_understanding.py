@@ -17,16 +17,7 @@ logger = logging.getLogger(__name__)
 
 # ===== Constants =====
 
-SYSTEM_PROMPT = (
-    "You are an expert at video understanding and description. "
-    "Your task is to capture, in as much detail as possible, the events "
-    "from the video frames related to the user's query. "
-    "Be sure to capture details about the environment, people, objects, "
-    "and actions. For example, describe attire, vehicle types, object colors. "
-    "The frames are sampled from the video in sequence. "
-    "DO NOT make up anything not visible in the frames. "
-    "DO NOT hallucinate."
-)
+DEFAULT_MAX_FRAMES = 24
 
 
 # ===== Registered Tool =====
@@ -57,6 +48,14 @@ async def video_understanding_tool(
     if not frames:
         raise ValueError("At least one frame is required for video understanding")
 
+    if len(frames) > DEFAULT_MAX_FRAMES:
+        logger.warning(
+            "Trimming %d frames to max %d to avoid token limits",
+            len(frames), DEFAULT_MAX_FRAMES,
+        )
+        step = max(1, len(frames) // DEFAULT_MAX_FRAMES)
+        frames = frames[::step][:DEFAULT_MAX_FRAMES]
+
     # Lazily create model adapter from config if not injected
     if model_adapter is None:
         from vsa_agent.model_adapter import create_model_adapter
@@ -64,6 +63,12 @@ async def video_understanding_tool(
         config = get_config()
         model_name = config.model.dev.vlm_model if config.model.mode == "dev" else config.model.prod.vlm_model
         model_adapter = create_model_adapter(model_name=model_name)
+    else:
+        # When model_adapter is injected, still try to get the format instruction from config
+        from vsa_agent.config import get_config
+        config = get_config()
+
+    system_prompt = config.prompts.vlm_format_instruction
 
     # Build the vision-language prompt
     image_parts = [
@@ -84,12 +89,17 @@ async def video_understanding_tool(
     ]
 
     messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=human_prompt_parts),
     ]
 
     logger.info("Sending %d frames to VLM for query: %s", len(frames), query[:80])
-    response = await model_adapter.invoke(messages)
+    try:
+        response = await model_adapter.invoke(messages)
+    except Exception as e:
+        logger.error("VLM invocation failed: %s", e)
+        raise RuntimeError(f"VLM call failed for query '{query[:60]}...': {e}") from e
+
     result = str(response.content) if response.content is not None else ""
 
     logger.info("VLM response length: %d chars", len(result))
