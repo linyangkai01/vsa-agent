@@ -1,4 +1,4 @@
-﻿import enum
+import enum
 
 from pydantic import BaseModel
 from pydantic import Field

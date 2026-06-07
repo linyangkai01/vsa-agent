@@ -1,4 +1,4 @@
-﻿import uvicorn
+import uvicorn
 from vsa_agent.api.routes import app
 from vsa_agent.config import get_config
 
