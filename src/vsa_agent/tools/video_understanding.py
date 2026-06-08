@@ -1,4 +1,4 @@
-﻿"""Video understanding tool — sends frames to a VLM for captioning and analysis.
+"""Video understanding tool — sends frames to a VLM for captioning and analysis.
 
 Takes base64-encoded JPEG frames (from frame_extract) and a user query,
 constructs a vision-language prompt, and returns the VLM's response.
@@ -172,3 +172,29 @@ async def video_understanding_tool(
 
     logger.info("VLM response length: %d chars", len(result))
     return result
+
+
+# ===== VLM Message Builder (Phase C) =====
+
+
+def _build_vlm_messages(frames, query, system_prompt=None):
+    """Build VLM messages from frames and query. Independent, testable function."""
+    image_parts = [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}}
+        for frame in frames
+    ]
+    human_prompt_parts = [
+        {"type": "text", "text": (
+            f"The following images are frames from a video, sampled in sequence. "
+            f"Analyze them and answer the user's query.\n\n"
+            f"User query: {query}\n\n"
+            f"Start and end each observation with a relative timestamp if you can "
+            f"infer timing from the sequence. "
+            f"Use the format: <timestamp> observation_content </timestamp>."
+        )},
+        *image_parts,
+    ]
+    return [
+        SystemMessage(content=system_prompt or SYSTEM_PROMPT),
+        HumanMessage(content=human_prompt_parts),
+    ]
