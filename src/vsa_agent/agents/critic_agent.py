@@ -1,4 +1,4 @@
-﻿"""Critic Agent — VLM-based search result verification.
+"""Critic Agent — VLM-based search result verification.
 
 Evaluates video search results against the original query by sending
 each result to a VLM for criteria checking. Returns confirmed, rejected,

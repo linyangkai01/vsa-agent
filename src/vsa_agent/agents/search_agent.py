@@ -64,6 +64,11 @@ def _to_search_results(raw: list) -> list:
     for r in raw:
         if isinstance(r, SearchResult):
             out.append(r)
+        elif hasattr(r, "model_dump"):
+            d = r.model_dump()
+            d.setdefault("similarity", d.pop("similarity_score", 0.0))
+            d.setdefault("object_ids", [])
+            out.append(SearchResult(**d))
         elif isinstance(r, dict):
             d = dict(r)
             d.setdefault("description", d.get("description", ""))
