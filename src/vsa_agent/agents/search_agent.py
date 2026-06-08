@@ -1,4 +1,4 @@
-﻿"""Search Agent — orchestrates search workflow via three-path routing.
+"""Search Agent — orchestrates search workflow via three-path routing.
 
 Accepts SearchAgentInput, calls tools/search.decompose_query(), then
 routes through embed/attribute/fusion search paths.
@@ -33,10 +33,13 @@ class SearchAgentInput(BaseModel):
 
     query: str = Field(description="Natural language search query")
     agent_mode: bool = Field(default=True, description="Enable LLM query decomposition")
+    use_attribute_search: bool | None = Field(default=None, description="Enable fusion reranking with attribute search (overrides config if provided)")
     max_results: int = Field(default=5, description="Maximum number of results to return")
     top_k: int | None = Field(default=None, description="Override top_k for embed search")
     start_time: str | None = Field(default=None, description="Start time filter (ISO format)")
     end_time: str | None = Field(default=None, description="End time filter (ISO format)")
+    source_type: str = Field(default="video_file", description="Type of video source: video_file or rtsp")
+    use_critic: bool = Field(default=True, description="Whether to verify search results with VLM critic agent")
 
 
 class SearchAgentConfig(BaseModel):

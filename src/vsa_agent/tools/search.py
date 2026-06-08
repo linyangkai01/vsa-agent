@@ -90,6 +90,8 @@ class SearchInput(BaseModel):
     timestamp_start: str | None = Field(default=None)
     timestamp_end: str | None = Field(default=None)
     top_k: int | None = Field(default=None)
+    min_cosine_similarity: float = Field(default=0.0, description="Minimum cosine similarity filter")
+    use_critic: bool = Field(default=True, description="Whether to verify results with VLM critic")
     agent_mode: bool = Field(default=True)
 
 
@@ -546,3 +548,20 @@ async def search_tool(
 
     combined = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
     return SearchOutput(data=combined[:top_k])
+
+
+# ===== Non-Streaming Wrapper (Phase B) =====
+
+
+async def execute_core_search_wrapper(
+    search_input, embed_search, agent_llm=None, config=None,
+    builder=None, attribute_search_fn=None, critic_agent=None,
+):
+    """Non-streaming wrapper: collects generator output, returns final SearchOutput."""
+    async for update in execute_core_search(
+        search_input=search_input, embed_search=embed_search,
+        agent_llm=agent_llm, config=config, attribute_search_fn=attribute_search_fn,
+    ):
+        if isinstance(update, SearchOutput):
+            return update
+    return SearchOutput(data=[])

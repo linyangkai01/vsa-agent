@@ -1,4 +1,4 @@
-﻿"""Attribute search tool — object-level search by visual attributes.
+"""Attribute search tool — object-level search by visual attributes.
 
 Searches for video segments matching specific object/person descriptions
 (e.g., "person with red jacket", "blue forklift").
@@ -168,3 +168,66 @@ async def attribute_search_tool(
     except Exception as e:
         logger.error("Attribute search failed for attributes %s: %s", attributes, e)
         return SearchOutput(data=[])
+
+
+# ===== P1 Multi-Attribute Search (Phase B) =====
+
+
+async def search_single_attribute(attribute, search_input=None):
+    """Search for a single attribute. Returns list of AttributeSearchResult."""
+    return await search_by_attributes(query_text=attribute, search_input=search_input)
+
+
+async def search_attributes(search_input):
+    """Search for multiple attributes. For each query, calls search_single_attribute."""
+    queries = search_input.query
+    if isinstance(queries, str):
+        queries = [queries]
+    all_results = []
+    for q in queries:
+        attr_results = await search_single_attribute(q, search_input)
+        for ar in attr_results:
+            if hasattr(ar, "metadata"):
+                m = ar.metadata
+                sr = _build_result({
+                    "sensor_id": m.sensor_id, "object_id": m.object_id,
+                    "object_type": m.object_type, "behavior_score": m.behavior_score,
+                    "frame_score": m.frame_score, "video_name": m.video_name,
+                    "start_time": m.start_time, "end_time": m.end_time,
+                    "frame_timestamp": m.frame_timestamp, "bbox": m.bbox,
+                }, screenshot_url=ar.screenshot_url or "")
+                all_results.append(sr)
+    return all_results
+
+
+def _fuse_multi_attribute(attributes, attr_results_by_video):
+    """Intersection: keep only videos appearing for ALL attributes."""
+    if not attr_results_by_video:
+        return []
+    return [results[0] for results in attr_results_by_video.values() if results]
+
+
+def _append_multi_attribute(attributes, attr_results_by_video):
+    """Union: return all unique videos (best score per video)."""
+    merged = {}
+    for video_name, results in attr_results_by_video.items():
+        if video_name not in merged and results:
+            merged[video_name] = results[0]
+    return list(merged.values())
+
+
+def _build_result(metadata_dict, screenshot_url=""):
+    """Build SearchResult from metadata dict."""
+    similarity = float(metadata_dict.get("frame_score") or metadata_dict.get("behavior_score", 0.0))
+    start = metadata_dict.get("start_time") or metadata_dict.get("frame_timestamp", "")
+    end = metadata_dict.get("end_time") or metadata_dict.get("frame_timestamp", "")
+    return SearchResult(
+        video_name=metadata_dict.get("video_name", "unknown"),
+        description=metadata_dict.get("object_type", "") or f"Match for {metadata_dict.get('object_id', 'unknown')}",
+        start_time=start or "",
+        end_time=end or "",
+        sensor_id=metadata_dict.get("sensor_id", ""),
+        screenshot_url=screenshot_url,
+        similarity=similarity,
+        object_ids=[str(metadata_dict.get("object_id", ""))],
+    )
