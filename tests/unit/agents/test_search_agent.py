@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vsa_agent.agents.search_agent import decompose_query
+from vsa_agent.tools.search import decompose_query
 from vsa_agent.agents.search_agent import execute_search
 from vsa_agent.agents.search_agent import SearchAgentInput
 from vsa_agent.tools.search import DecomposedQuery
