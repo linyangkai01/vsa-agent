@@ -72,6 +72,20 @@ def _extract_frames(
     return base64_frames
 
 
+
+
+# ===== GPU Detection =====
+
+
+def has_nvidia_gpu() -> bool:
+    """Check for NVIDIA GPU availability. Mirrors NVIDIA has_nvidia_gpu()."""
+    import shutil
+    import subprocess
+    return (
+        shutil.which("nvidia-smi") is not None
+        and subprocess.run(["nvidia-smi"], capture_output=True).returncode == 0
+    )
+
 # ===== Registered Tool =====
 
 

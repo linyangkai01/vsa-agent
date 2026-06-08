@@ -11,6 +11,9 @@ import logging
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import SystemMessage
 
+from pydantic import BaseModel
+from pydantic import Field
+
 from vsa_agent.registry import register_tool
 
 logger = logging.getLogger(__name__)
@@ -33,6 +36,44 @@ DEFAULT_MAX_FRAMES = 24
 
 # ===== Registered Tool =====
 
+
+
+# ===== Data Model =====
+
+
+class VideoUnderstandingInput(BaseModel):
+    """Input for video understanding. Mirrors NVIDIA VideoUnderstandingInput."""
+
+    sensor_id: str = Field(default="", description="Sensor ID or video file name")
+    start_timestamp: str = Field(default="", description="Start timestamp (ISO format)")
+    end_timestamp: str = Field(default="", description="End timestamp (ISO format)")
+    user_prompt: str = Field(default="", description="Query/prompt for VLM analysis")
+
+
+# ===== Thinking Parser =====
+
+
+def _parse_thinking_from_content(content: str) -> tuple:
+    """Parse thinking traces from VLM responses. Mirrors NVIDIA _parse_thinking_from_content.
+
+    Extracts <think>...</think> and <answer>...</answer> blocks from VLM output.
+    Returns (thinking_content, answer_content) tuple.
+    """
+    if not content:
+        return None, content
+    if "<think>" in content and "</think>" in content:
+        think_start = content.find("<think>") + 7
+        think_end = content.find("</think>")
+        thinking = content[think_start:think_end].strip() if think_end != -1 else None
+        after = content[think_end + 8:].strip() if think_end != -1 else content
+        if "<answer>" in after and "</answer>" in after:
+            ans_start = after.find("<answer>") + 8
+            ans_end = after.find("</answer>")
+            answer = after[ans_start:ans_end].strip() if ans_end != -1 else after
+        else:
+            answer = after
+        return thinking, answer
+    return None, content
 
 @register_tool(
     "video_understanding",

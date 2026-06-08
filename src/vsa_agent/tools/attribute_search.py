@@ -8,11 +8,84 @@ Design Pattern: #10 Registry Table, #13 Search Strategy.
 
 import logging
 
+from pydantic import BaseModel
+from pydantic import Field
+
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.search import SearchOutput
 from vsa_agent.tools.search import SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+# ===== Data Models =====
+
+
+class AttributeSearchInput(BaseModel):
+    """Input for attribute-based search. Mirrors NVIDIA AttributeSearchInput."""
+
+    query: str | list[str] = Field(..., description="Attribute query or list of queries")
+    source_type: str = Field(default="video_file", description="video_file or rtsp")
+    timestamp_start: str | None = Field(default=None, description="Start time filter")
+    timestamp_end: str | None = Field(default=None, description="End time filter")
+    video_sources: list[str] | None = Field(default=None, description="Filter by video source names")
+    top_k: int = Field(default=1, description="Number of results to return")
+    min_similarity: float = Field(default=0.3, description="Minimum cosine similarity threshold")
+    exclude_videos: list[dict[str, str]] = Field(default_factory=list, description="Videos to exclude")
+
+
+class AttributeSearchMetadata(BaseModel):
+    """Metadata for attribute search result. Mirrors NVIDIA AttributeSearchMetadata."""
+
+    sensor_id: str = Field(..., description="Sensor/camera ID")
+    object_id: str = Field(..., description="Object ID")
+    object_type: str = Field(default="", description="Object type")
+    frame_timestamp: str = Field(default="", description="Best frame timestamp")
+    start_time: str | None = Field(default=None, description="Start time")
+    end_time: str | None = Field(default=None, description="End time")
+    bbox: dict | None = Field(default=None, description="Bounding box")
+    behavior_score: float = Field(default=0.0, description="Behavior-level similarity")
+    frame_score: float | None = Field(default=None, description="Frame-level similarity")
+    video_name: str | None = Field(default=None, description="Video name")
+
+
+class AttributeSearchResult(BaseModel):
+    """Single attribute search result. Mirrors NVIDIA AttributeSearchResult."""
+
+    screenshot_url: str | None = Field(default=None, description="Screenshot URL")
+    metadata: AttributeSearchMetadata = Field(..., description="Search result metadata")
+
+
+# ===== Core Search =====
+
+
+async def search_by_attributes(
+    query_text: str,
+    search_input: AttributeSearchInput | None = None,
+) -> list[AttributeSearchResult]:
+    """Search for objects by visual attributes. Mock implementation.
+
+    NVIDIA original uses Elasticsearch behavior index + frame lookup +
+    cosine similarity with Painless scripts. Returns mock results for now.
+    """
+    if search_input is None:
+        search_input = AttributeSearchInput(query=query_text)
+    
+    # Mock: return a single result with deterministic scoring
+    seed = sum(ord(c) for c in str(query_text)) % 100
+    return [
+        AttributeSearchResult(
+            screenshot_url="",
+            metadata=AttributeSearchMetadata(
+                sensor_id=f"sensor-{seed % 10}",
+                object_id=f"obj-{seed}",
+                object_type="person" if "person" in str(query_text).lower() else "object",
+                frame_timestamp="2025-01-01T10:00:00Z",
+                behavior_score=0.5 + seed * 0.005,
+                video_name=f"camera_{seed % 5}.mp4",
+            ),
+        )
+    ]
 
 
 # ===== Helpers =====

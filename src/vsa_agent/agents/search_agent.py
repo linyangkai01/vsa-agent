@@ -38,6 +38,74 @@ class SearchAgentInput(BaseModel):
     end_time: str | None = Field(default=None, description="End time filter (ISO format)")
 
 
+class SearchAgentConfig(BaseModel):
+    """Configuration for the search agent. Mirrors NVIDIA SearchAgentConfig."""
+
+    embed_search_tool: str = Field(default="embed_search")
+    attribute_search_tool: str | None = Field(default=None)
+    agent_mode_llm: str | None = Field(default=None)
+    use_attribute_search: bool = Field(default=False)
+    default_max_results: int = Field(default=10)
+    embed_confidence_threshold: float = Field(default=0.1)
+    enable_critic: bool = Field(default=False)
+    search_max_iterations: int = Field(default=1, ge=1)
+
+
+# ===== Presentation Converters =====
+
+
+def _to_search_results(raw: list) -> list:
+    """Convert raw results to SearchResult list. Mirrors NVIDIA _to_search_results."""
+    out = []
+    for r in raw:
+        if isinstance(r, SearchResult):
+            out.append(r)
+        elif isinstance(r, dict):
+            d = dict(r)
+            d.setdefault("description", d.get("description", ""))
+            d.setdefault("start_time", d.get("start_time", ""))
+            d.setdefault("end_time", d.get("end_time", ""))
+            d.setdefault("sensor_id", d.get("sensor_id", ""))
+            d.setdefault("screenshot_url", d.get("screenshot_url", ""))
+            d.setdefault("similarity", d.get("similarity_score", d.get("similarity", 0.0)))
+            d.setdefault("object_ids", d.get("object_ids", []))
+            d.setdefault("video_name", d.get("video_name", ""))
+            out.append(SearchResult(**d))
+    return out
+
+
+def _to_incidents_output(search_output) -> str:
+    """Format SearchOutput as incidents JSON. Mirrors NVIDIA _to_incidents_output."""
+    import json
+    incidents = []
+    for result in (search_output.data if hasattr(search_output, "data") else search_output):
+        try:
+            name = getattr(result, "video_name", "unknown")
+            desc = getattr(result, "description", "")
+            sim = getattr(result, "similarity", 0.0)
+            start = getattr(result, "start_time", "")
+            end = getattr(result, "end_time", "")
+            incident = {
+                "Alert Details": {
+                    "Alert Triggered": name,
+                    "video_description": desc,
+                    "similarity_score": round(sim, 2),
+                    "description": desc,
+                },
+                "Clip Information": {
+                    "Timestamp": start,
+                    "video_id": name,
+                    "start_time": start,
+                    "end_time": end,
+                },
+            }
+            incidents.append(incident)
+        except Exception:
+            continue
+    return "<incidents>\n" + json.dumps({"incidents": incidents}, indent=2) + "\n</incidents>"
+
+
+
 # ===== Three-Path Routing =====
 
 
