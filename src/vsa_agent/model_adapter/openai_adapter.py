@@ -14,6 +14,7 @@ class OpenAIModelAdapter(BaseModelAdapter):
             model=model_name or dev.llm_model,
             base_url=dev.base_url,
             temperature=0,
+            max_retries=2,
         )
 
     async def invoke(self, messages):

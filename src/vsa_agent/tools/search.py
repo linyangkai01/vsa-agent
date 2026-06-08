@@ -1,4 +1,4 @@
-﻿"""Core search — data models, query decomposition, and three-path routing.
+"""Core search — data models, query decomposition, and three-path routing.
 
 Matches the NVIDIA original structure where data models (DecomposedQuery,
 SearchResult, SearchOutput), decompose_query(), and the core search
@@ -228,6 +228,239 @@ async def decompose_query(user_query: str, model_adapter) -> DecomposedQuery:
         logger.warning("Failed to decompose query, using raw input: %s", e)
         return DecomposedQuery(query=user_query)
 
+
+
+# ===== Fusion Algorithms (Phase A) =====
+
+
+def attribute_result_to_search_result(
+    attr_result,
+    video_name=None,
+    description="",
+):
+    """Convert AttributeSearchResult to SearchResult. Matches NVIDIA original.
+
+    Uses frame_score if available (>0), otherwise behavior_score.
+    Uses start_time/end_time from metadata, falling back to frame_timestamp.
+    """
+    from vsa_agent.tools.attribute_search import AttributeSearchResult
+
+    if isinstance(attr_result, dict):
+        validated = AttributeSearchResult.model_validate(attr_result)
+    elif isinstance(attr_result, AttributeSearchResult):
+        validated = attr_result
+    else:
+        validated = AttributeSearchResult.model_validate(attr_result)
+
+    metadata = validated.metadata
+    similarity = (
+        float(metadata.frame_score)
+        if (metadata.frame_score is not None and metadata.frame_score > 0.0)
+        else float(metadata.behavior_score)
+    )
+    start_time = metadata.start_time or metadata.frame_timestamp
+    end_time = metadata.end_time or metadata.frame_timestamp
+    result_video_name = video_name or metadata.video_name or metadata.sensor_id
+    if not description:
+        description = f"Attribute match at {metadata.frame_timestamp}"
+
+    return SearchResult(
+        video_name=result_video_name,
+        description=description,
+        start_time=start_time,
+        end_time=end_time,
+        sensor_id=metadata.sensor_id,
+        screenshot_url=validated.screenshot_url or "",
+        similarity=similarity,
+        object_ids=[str(metadata.object_id)],
+    )
+
+
+def _apply_weighted_linear_fusion(video_data, w_embed, w_attribute):
+    """Weighted linear fusion: (w_embed * embed_score) + (w_attribute * normalised_attribute_score).
+
+    Returns list of SearchResult sorted by fusion score descending.
+    """
+    reranked = []
+    for video in video_data:
+        fusion_score = w_embed * video["embed_score"] + w_attribute * video["normalised_attribute_score"]
+        er = video["embed_result"]
+        reranked.append((
+            fusion_score,
+            SearchResult(
+                video_name=er.video_name,
+                description=er.description,
+                start_time=er.start_time,
+                end_time=er.end_time,
+                sensor_id=er.sensor_id,
+                screenshot_url=video.get("screenshot_url", ""),
+                similarity=fusion_score,
+                object_ids=video.get("object_ids", []),
+            ),
+        ))
+    reranked.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in reranked]
+
+
+def _apply_rrf_fusion(video_data, rrf_k, rrf_w):
+    """Reciprocal Rank Fusion: 1/(rank_embed + k) + w * normalised_attribute_score.
+
+    Sorts by embed_score descending to determine rank, then applies RRF.
+    Returns list of SearchResult sorted by RRF score descending.
+    """
+    sorted_data = sorted(video_data, key=lambda x: x["embed_score"], reverse=True)
+    reranked = []
+    for rank, video in enumerate(sorted_data, start=1):
+        rrf_score = 1.0 / (rank + rrf_k) + rrf_w * video["normalised_attribute_score"]
+        er = video["embed_result"]
+        reranked.append((
+            rrf_score,
+            SearchResult(
+                video_name=er.video_name,
+                description=er.description,
+                start_time=er.start_time,
+                end_time=er.end_time,
+                sensor_id=er.sensor_id,
+                screenshot_url=video.get("screenshot_url", ""),
+                similarity=rrf_score,
+                object_ids=video.get("object_ids", []),
+            ),
+        ))
+    reranked.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in reranked]
+
+
+def _apply_rrf_fusion_with_attribute_rank(video_data, rrf_k, rrf_w):
+    """RRF using both embed and attribute ranks: 1/(rank_embed + k) + w * 1/(rank_attribute + k).
+
+    Sorts by both scores independently to determine ranks.
+    Returns list of SearchResult sorted by RRF score descending.
+    """
+    sorted_by_embed = sorted(video_data, key=lambda x: x["embed_score"], reverse=True)
+    embed_ranks = {id(v): rank for rank, v in enumerate(sorted_by_embed, start=1)}
+    sorted_by_attr = sorted(video_data, key=lambda x: x["normalised_attribute_score"], reverse=True)
+    attr_ranks = {id(v): rank for rank, v in enumerate(sorted_by_attr, start=1)}
+
+    reranked = []
+    for video in video_data:
+        rank_embed = embed_ranks[id(video)]
+        rank_attribute = attr_ranks[id(video)]
+        rrf_score = 1.0 / (rank_embed + rrf_k) + rrf_w * (1.0 / (rank_attribute + rrf_k))
+        er = video["embed_result"]
+        reranked.append((
+            rrf_score,
+            SearchResult(
+                video_name=er.video_name,
+                description=er.description,
+                start_time=er.start_time,
+                end_time=er.end_time,
+                sensor_id=er.sensor_id,
+                screenshot_url=video.get("screenshot_url", ""),
+                similarity=rrf_score,
+                object_ids=video.get("object_ids", []),
+            ),
+        ))
+    reranked.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in reranked]
+
+
+async def fusion_search_rerank(
+    embed_results,
+    attributes,
+    attribute_search_fn,
+    fusion_method="rrf",
+    rrf_k=60,
+    rrf_w=0.5,
+    w_attribute=0.55,
+    w_embed=0.35,
+    source_type="video_file",
+):
+    """Rerank embed results using fusion with attribute search.
+
+    For each embed result:
+    1. Run attribute_search for each attribute
+    2. Compute normalised_attribute_score
+    3. Apply fusion method (weighted_linear, rrf, or rrf_with_attribute_rank)
+    """
+    video_data = []
+    for embed_result in embed_results:
+        try:
+            attr_results = await attribute_search_fn()
+            if isinstance(attr_results, list):
+                attr_list = attr_results
+            elif hasattr(attr_results, "data"):
+                attr_list = list(attr_results.data)
+            else:
+                attr_list = []
+
+            search_results = []
+            for ar in attr_list:
+                try:
+                    sr = attribute_result_to_search_result(ar)
+                    search_results.append(sr)
+                except Exception:
+                    continue
+
+            attr_count = len(attributes) if attributes else 1
+            if search_results:
+                attr_score_sum = sum(r.similarity for r in search_results)
+                normalised_attr_score = attr_score_sum / attr_count
+            else:
+                normalised_attr_score = 0.0
+
+            video_data.append({
+                "embed_result": embed_result,
+                "embed_score": embed_result.similarity,
+                "normalised_attribute_score": normalised_attr_score,
+                "screenshot_url": "",
+                "object_ids": embed_result.object_ids or [],
+            })
+        except Exception:
+            continue
+
+    if fusion_method == "weighted_linear":
+        return _apply_weighted_linear_fusion(video_data, w_embed, w_attribute)
+    elif fusion_method == "rrf":
+        return _apply_rrf_fusion(video_data, rrf_k, rrf_w)
+    elif fusion_method == "rrf_with_attribute_rank":
+        return _apply_rrf_fusion_with_attribute_rank(video_data, rrf_k, rrf_w)
+    else:
+        raise ValueError(
+            f"Unknown fusion_method: {fusion_method}. Must be 'weighted_linear', 'rrf', or 'rrf_with_attribute_rank'"
+        )
+
+
+async def _run_attribute_only_search(
+    attributes,
+    attribute_search_fn,
+    top_k=10,
+    source_type="video_file",
+):
+    """Run attribute-only search and convert results to SearchResult.
+
+    Filters single-word attributes (like NVIDIA _is_single_word).
+    """
+    if not attributes:
+        return []
+
+    attr_results = await attribute_search_fn()
+    if isinstance(attr_results, list):
+        result_list = attr_results
+    elif hasattr(attr_results, "data"):
+        result_list = list(attr_results.data)
+    else:
+        return []
+
+    search_results = []
+    for ar in result_list:
+        try:
+            sr = attribute_result_to_search_result(ar)
+            search_results.append(sr)
+        except Exception:
+            continue
+
+    search_results.sort(key=lambda x: x.similarity, reverse=True)
+    return search_results[:top_k]
 
 # ===== Helper =====
 
