@@ -224,14 +224,14 @@ async def execute_search(
             from vsa_agent.registry import ToolRegistry
             critic_fn = ToolRegistry.get("critic_agent")
             if critic_fn and combined:
-                import json as _json
+                import json as json_
                 videos_data = [
                     {"sensor_id": r.sensor_id, "start_timestamp": r.start_time, "end_timestamp": r.end_time}
                     for r in combined
                 ]
                 critic_result = await critic_fn(
                     query=search_input.query,
-                    videos_json=_json.dumps(videos_data),
+                    videos_json=json_.dumps(videos_data),
                 )
                 logger.info("Critic verification completed: %s", str(critic_result)[:200])
         except Exception:

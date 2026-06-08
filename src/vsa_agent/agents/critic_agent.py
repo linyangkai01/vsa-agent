@@ -156,7 +156,6 @@ async def execute_critic(
 
         try:
             # Call VLM with the criteria prompt
-            from langchain_core.messages import HumanMessage
             response = await model_adapter.invoke([HumanMessage(content=formatted_prompt)])
             content = str(response.content) if hasattr(response, "content") else str(response)
 
