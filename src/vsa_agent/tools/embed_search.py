@@ -9,7 +9,7 @@ Design Pattern: #10 Registry Table, #13 Search Strategy.
 import logging
 
 from vsa_agent.registry import register_tool
-from vsa_agent.agents.search_agent import SearchOutput
+from vsa_agent.tools.search import SearchOutput
 
 logger = logging.getLogger(__name__)
 
