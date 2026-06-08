@@ -1,94 +1,99 @@
-﻿# vsa-agent Implementation Plan — Part 2: Tools & Agents
+﻿# vsa-agent Implementation Plan — Part 2: Completion Sprint
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
-
-**Goal:** 实现工业安全视频分析的核心工具和Agent工作流（视频帧提取、VLM理解、搜索Agent、摘要Agent、Critic自检环、后处理管线）。
-
-**Architecture:** TDD驱动，每个模块先从测试开始。工具用@register_tool注册，Agent用LangGraph StateGraph构建DAG。
-
-**Tech Stack:** Python 3.13, LangChain, LangGraph, langchain-openai, OpenCV, FFmpeg, Pydantic
+> 基于三个审计文档 (2026-06-08) 重新编排的任务序列。
+> 全项目基线: 34/93 = 37%
+> 每个 task 完成后更新完成率。
 
 ---
 
-## Task 8: ✅ **DONE** 视频帧提取工具 (Design Pattern #1 #10)
+## 已完成的 Task (8-10)
 
-**Files:**
-- Create: tests/unit/test_frame_extract.py
-- Create: src/vsa_agent/tools/frame_extract.py
-
-**Learning:** OpenCV视频处理、帧采样策略
-
-- [x] **Step 1: Write failing test**
-
-`python
-# tests/unit/test_frame_extract.py
-import os, tempfile
-import numpy as np
-import cv2
-import pytest
-import asyncio
-from vsa_agent.registry import ToolRegistry
-
-def _create_test_video(path: str, duration_sec=3, fps=10):
-    '''Create a simple test MP4 with colored frames.'''
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(path, fourcc, fps, (320, 240))
-    for i in range(duration_sec * fps):
-        frame = np.full((240, 320, 3), (i * 10, 100, 200), dtype=np.uint8)
-        out.write(frame)
-    out.release()
-
-class TestFrameExtract:
-    def test_extract_frames_basic(self):
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
-            _create_test_video(f.name, duration_sec=3, fps=10)
-            video_path = f.name
-
-        fn = ToolRegistry.get('frame_extract')
-        result = asyncio.run(fn(video_path=video_path, max_frames=5))
-        assert len(result['frames']) == 5
-        assert result['duration_sec'] == 3
-        os.unlink(video_path)
-`
-
-- [x] **Step 2: Write implementation**
-- [x] **Step 3: Run tests → pass**
-- [x] **Step 4: Commit**
+| Task | 模块 | 完成率 | 审计文档 |
+|------|------|--------|----------|
+| 8 | frame_extract.py | 1/2 = 50% | task6-10-audit.md |
+| 9 | video_understanding.py | 1/7 = 14% | task6-10-audit.md |
+| 10a | search_agent.py + search.py | 9/24 = 38% | search-module-audit.md |
+| 10b | embed/attribute search tools | 3/25 = 12% | search-module-audit.md |
 
 ---
 
-## Task 9: ✅ **DONE** VLM视频理解工具 (Design Pattern #2 #11)
+## Phase A: 补齐已有模块的缺失函数 (P0)
 
-**Files:**
-- Create: tests/unit/test_video_understanding.py
-- Create: src/vsa_agent/tools/video_understanding.py
+目标: 三大模块完成率从 12-38% 提升到 60%+
 
-**Learning:** VLM多模态调用、意图感知prompt模板
+### Task 14: 补齐 tools/search.py — 搜索核心函数
 
-- [x] **Step 1: Write test with mock VLM adapter**
-- [x] **Step 2: Implement frame → VLM → caption pipeline**
-- [x] **Step 3: Run tests → pass**
-- [x] **Step 4: Commit**
+**审计:** 当前 6/15 = 40%，缺失 9 项
+**目标:** 10/15 = 67%
+
+- [ ] **14.1** `class SearchConfig` — 20+ 配置字段 (w_embed, w_attribute, rrf_k, rrf_w, fusion_method, embed_confidence_threshold)
+- [ ] **14.2** `class SearchInput` — 输入模型 (query, source_type, video_sources, timestamp, top_k, agent_mode, use_critic)
+- [ ] **14.3** `execute_core_search()` — async generator，替代 agents/search_agent.py 的 execute_search()
+- [ ] **14.4** `_run_attribute_only_search()` — 独立化属性搜索封装 (当前逻辑在 agents/ 中)
+
+### Task 15: 补齐 tools/embed_search.py — 语义搜索
+
+**审计:** 当前 1/9 = 11%，缺失 8 项
+**目标:** 5/9 = 56%
+
+- [ ] **15.1** `class EmbedSearchResultItem` — 7 字段 Pydantic 模型
+- [ ] **15.2** `class EmbedSearchOutput` — query_embedding + results
+- [ ] **15.3** `class QueryInput` — params/prompts/embeddings/source_type/exclude_videos
+- [ ] **15.4** `_generate_query_embedding()` — 文本→向量 (先 mock,后续接 ES)
+- [ ] **15.5** `_process_search_hit()` — ES hit → EmbedSearchResultItem (先 mock)
+
+### Task 16: 补齐 tools/attribute_search.py — 属性搜索
+
+**审计:** 当前 2/16 = 13%，缺失 14 项
+**目标:** 6/16 = 38% (核心缺失太多,分两批)
+
+- [ ] **16.1** `class AttributeSearchInput` — 8 字段 Pydantic 模型
+- [ ] **16.2** `class AttributeSearchMetadata` — 8 字段 (sensor_id, object_id, bbox, scores 等)
+- [ ] **16.3** `class AttributeSearchResult` — screenshot_url + metadata
+- [ ] **16.4** `search_by_attributes()` — 属性搜索核心函数 (先 mock)
 
 ---
 
-## Task 10: ✅ **DONE** Search Agent (Design Pattern #13 #9)
+## Phase B: 补齐已有模块的缺失函数 (P1)
 
-**Files:**
-- Create: tests/unit/agents/test_search_agent.py
-- Create: src/vsa_agent/agents/search_agent.py
-- Create: src/vsa_agent/tools/query_builders.py
+### Task 17: 补齐 agents/search_agent.py
 
-**Learning:** 三路搜索策略、ES查询构建器
+**审计:** 当前 3/9 = 33%
+**目标:** 6/9 = 67%
 
-- [x] **Step 1: Write test with mock tools**
-- [x] **Step 2: Implement three-path routing (embed/attribute/fusion)**
-- [x] **Step 3: Run tests → pass**
-- [x] **Step 4: Commit**
+- [ ] **17.1** `class SearchAgentConfig` — 20+ 字段 (embed_search_tool, attribute_search_tool, agent_mode_llm 等)
+- [ ] **17.2** `_to_incidents_output()` — SearchOutput → JSON (presentation converter)
+- [ ] **17.3** `_to_search_results()` — 原始结果 → SearchResult 列表 (presentation converter)
+
+### Task 18: 补齐 tools/video_understanding.py
+
+**审计:** 当前 1/11 = 9% (含 video_caption 合并)
+**目标:** 4/11 = 36%
+
+- [ ] **18.1** `class VideoUnderstandingInput` — Pydantic 输入模型 (sensor_id, start/end_timestamp, user_prompt)
+- [ ] **18.2** VLM retry logic — max_retries + 提示改写
+- [ ] **18.3** `_parse_thinking_from_content()` — 解析 &lt;think&gt;/&lt;answer&gt; 标签
+
+### Task 19: 补齐 tools/frame_extract.py
+
+**审计:** 当前 1/2 = 50%
+**目标:** 2/2 = 100%
+
+- [ ] **19.1** `has_nvidia_gpu()` — nvidia-smi 检测 (subprocess)
+
+### Task 20: 补齐 api/
+
+**审计:** 当前 2/7 = 29%
+**目标:** 4/7 = 57%
+
+- [ ] **20.1** `video_upload_url.py` — 视频上传接口
+- [ ] **20.2** `video_search_ingest.py` — 视频检索录入接口
 
 ---
 
-## Task 11: Summary Agent (Design Pattern #11 #20)
+## Phase C: 新 Agent 实现 (原 Plan Tasks 11-13)
+
+### Task 11: Summary Agent (长视频摘要)
 
 **Files:**
 - Create: tests/unit/agents/test_summary_agent.py
@@ -96,14 +101,12 @@ class TestFrameExtract:
 
 **Learning:** 长视频分片策略、VLM聚合、安全报告生成
 
-- [x] **Step 1: Write test with mock VLM**
-- [x] **Step 2: Implement chunk → caption → aggregate → report pipeline**
-- [x] **Step 3: Run tests → pass**
-- [x] **Step 4: Commit**
+- [ ] **Step 1: Write test with mock VLM**
+- [ ] **Step 2: Implement chunk → caption → aggregate → report pipeline**
+- [ ] **Step 3: Run tests → pass**
+- [ ] **Step 4: Commit**
 
----
-
-## Task 12: Critic Agent (Design Pattern #7)
+### Task 12: Critic Agent (自检环)
 
 **Files:**
 - Create: tests/unit/agents/test_critic_agent.py
@@ -111,14 +114,12 @@ class TestFrameExtract:
 
 **Learning:** 自检环、LLM评估
 
-- [x] **Step 1: Write test — Critic must reject incomplete reports**
-- [x] **Step 2: Implement safety checklist validator**
-- [x] **Step 3: Run tests → pass**
-- [x] **Step 4: Commit**
+- [ ] **Step 1: Write test — Critic must reject incomplete reports**
+- [ ] **Step 2: Implement safety checklist validator**
+- [ ] **Step 3: Run tests → pass**
+- [ ] **Step 4: Commit**
 
----
-
-## Task 13: Postprocessing管线 (Design Pattern #4 #10)
+### Task 13: Postprocessing管线
 
 **Files:**
 - Create: tests/unit/agents/postprocess/test_pipeline.py
@@ -127,116 +128,35 @@ class TestFrameExtract:
 
 **Learning:** 责任链模式、验证器注册表
 
-- [x] **Step 1: Write test for each validator**
-- [x] **Step 2: Implement ValidationPipeline + validators**
-- [x] **Step 3: Run tests → pass**
-- [x] **Step 4: Commit**
+- [ ] **Step 1: Write test for each validator**
+- [ ] **Step 2: Implement ValidationPipeline + validators**
+- [ ] **Step 3: Run tests → pass**
+- [ ] **Step 4: Commit**
 
 ---
 
-> Next: Part 3 covers evaluators, integrations, and server deployment.
+## Phase D: 融合算法补齐 (P1)
 
+### Task 21: fusion_search_rerank()
 
----
-
-# Part 3: 进阶功能完善 (Advanced Features)
-
-> 简化审计：当前完成的核心功能大部分是对 NVIDIA 原版的简化实现。本部分列出所有简化项。
-> 标注: 🔷 = 简化 (Simplified), ✅ = 与原版一致 (Matches Original)
-
-## 各模块简化审计
-
-### Task 0-6
-
-| 文件 | 审计 |
-|------|------|
-| config.py | 🔷 PromptsConfig空桩化，SearchConfig 20+字段省略 |
-| registry.py | 🔷 原版NAT框架，vsa-agent用简单ToolRegistry |
-| model_adapter/ | 🔷 原版多模型+retry+streaming，vsa仅OpenAI+vLLM |
-| top_agent.py | 🔷 原版planning/reasoning，vsa简化版 |
-| data_models.py | ✅ 结构对应 |
-| api/routes.py | 🔷 原版streaming/video_upload/RTSP，vsa仅POST/chat |
-| mcp/server.py | ✅ 对应原版 |
-
-### Task 8: frame_extract.py
-
-| 功能 | 审计 |
-|------|------|
-| frame_select() | ✅ 对应原版 |
-| has_nvidia_gpu() | 🔷 省略 |
-| 单次VideoCapture | 🔷 简化(review后修复) |
-| 批量帧处理 | 🔷 省略(partition分批调VLM) |
-
-### Task 9: video_understanding.py
-
-| 功能 | 审计 |
-|------|------|
-| VLM调用 | ✅ 一致 |
-| VSS backend | 🔷 省略 |
-| retry logic | 🔷 省略 |
-| thinking tag解析 | 🔷 省略 |
-| Cosmos model | 🔷 省略 |
-| max_frames保护 | ✅ 已添加 |
-
-### Task 10: search_agent.py + search tools
-
-| 功能 | 审计 |
-|------|------|
-| DecomposedQuery | ✅ 一致 |
-| SearchResult/SearchOutput | ✅ 一致 |
-| decompose_query() | 🔷 简化 |
-| 三路由(Path1/2/3) | ✅ 一致 |
-| fusion_search_rerank() | 🔷 省略(RRF+weighted_linear) |
-| embed_confidence_threshold | 🔷 省略 |
-| critic agent循环 | 🔷 省略 |
-| SearchConfig(20+fields) | 🔷 省略 |
-| execute_core_search async gen | 🔷 省略 |
-| InMemoryVectorStore | 🔷 placeholder(生产需替换ES) |
+- [ ] **21.1** `_apply_weighted_linear_fusion()` — w_embed * embed + w_attribute * attribute
+- [ ] **21.2** `_apply_rrf_fusion()` — 1/(rank + k) + w * norm_attr_score
+- [ ] **21.3** `fusion_search_rerank()` — 整合调用上述融合 + attribute search + vst
+- [ ] **21.4** `attribute_result_to_search_result()` — 属性搜结果 → SearchResult 转换
 
 ---
 
-## 进阶功能清单
+## 完成率约束
 
-### P0: 必须完善
-- [ ] fusion_search_rerank() -- RRF + weighted_linear融合算法
-- [ ] SearchConfig完整字段 -- w_embed,w_attribute,rrf_k,rrf_w
-- [ ] execute_core_search async generator -- 流式输出AgentMessageChunk
-- [ ] Elasticsearch backend -- 替换InMemoryVectorStore
-- [ ] ES Query Builders -- Incident/Frames/Behavior QueryBuilder
+每个 task 完成后报告:
+```
+Search模块完成率: N/61 = P% (本task: +M项)
+全项目完成率: N/93 = P%
+```
 
-### P1: 重要完善
-- [ ] critic agent -- VLM校验+重新搜索循环
-- [ ] VLM retry logic -- max_retries+提示改写
-- [ ] thinking tag解析 -- parse_content_blocks()
-- [ ] Cosmos model支持 -- mm_processor_kwargs/media_io_kwargs
-- [ ] VSS backend -- 视频上传+摘要通过VSS
-- [ ] attribute_result_to_search_result()转换函数
-- [ ] has_nvidia_gpu() -- GPU检测
-- [ ] top_agent流式输出 -- 完整streaming
-- [ ] API完善 -- video_upload, RTSP endpoints
-
-### P2: 可选完善
-- [ ] evaluators -- customized_qa, trajectory, report
-- [ ] video_analytics -- ES client, embeddings
-- [ ] embed/模块 -- CosmosEmbedClient, RTVI CV Embed
-- [ ] utils/工具 -- async_mixin, url_translation, retry
-- [ ] vst/工具 -- duration, sensor_list, snapshot, timeline
+跟踪文档: docs/superpowers/reviews/
 
 ---
 
-> 更新日期: 2026-06-08
-> 当前进度: Task 8/9/10 完成, 待开始 Task 11
-
-
----
-
-## ????? Task ?????????
-
-**???** ?? task ???????
-
-1. ?? docs/superpowers/reviews/search-module-audit.md ???????
-2. ? commit message ? response ??????
-   Search?????: N/61 = P% (?task: +M?)
-3. ?????????
-
-**??????:** docs/superpowers/reviews/search-module-audit.md
+> 更新日期: 2026-06-08 (审计后重排)
+> 当前: Phase A (Task 14 开始)
