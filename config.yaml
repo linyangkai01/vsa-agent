@@ -21,6 +21,9 @@ tools:
   - vsa_agent.tools.echo_tool
   - vsa_agent.tools.frame_extract
   - vsa_agent.tools.video_understanding
+  - vsa_agent.tools.embed_search
+  - vsa_agent.tools.attribute_search
+  - vsa_agent.tools.search
 server:
   host: 0.0.0.0
   port: 8000

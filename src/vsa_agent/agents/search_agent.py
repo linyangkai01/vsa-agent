@@ -47,6 +47,27 @@ Examples:
 User query: {user_query}"""
 
 
+# ===== Helpers =====
+
+
+def _resolve_search_callable(tool_name: str, **kwargs):
+    """Resolve a search tool from the registry when callable is not injected.
+
+    Returns an async callable that wraps the registered tool.
+    """
+    from vsa_agent.registry import ToolRegistry
+
+    fn = ToolRegistry.get(tool_name)
+    if fn is None:
+        raise RuntimeError(f"Search tool '{tool_name}' is not registered. "
+                           f"Make sure it is in config.tools.enabled_modules.")
+
+    async def _callable():
+        return await fn(**kwargs)
+
+    return _callable
+
+
 # ===== Query Decomposition =====
 
 
@@ -122,6 +143,9 @@ async def execute_search(
 
     Fusion combines embed results with attribute reranking for higher precision.
 
+    When embed_search/attribute_search callables are None, resolves them
+    from the ToolRegistry via the registered search tools.
+
     Args:
         decomposed: Decomposed query with structured parameters.
         embed_search: Async callable for semantic embed search.
@@ -133,11 +157,20 @@ async def execute_search(
     has_attributes = bool(decomposed.attributes)
     has_action = decomposed.has_action
 
+    # Resolve callables from registry if not injected (production path)
+    if embed_search is None and not has_attributes is False:  # needed for paths 2 and 3
+        embed_search = _resolve_search_callable("embed_search", query=decomposed.query)
+
+    if attribute_search is None and has_attributes:
+        attribute_search = _resolve_search_callable("attribute_search", attributes=decomposed.attributes)
+
     # Path 1: Attribute-only (no action, attributes present)
     if not has_action and has_attributes and attribute_search is not None:
         logger.info("Path 1: attribute-only search")
         try:
             results = await attribute_search()
+            if isinstance(results, SearchOutput):
+                return results
             if isinstance(results, list):
                 return SearchOutput(data=results)
             return SearchOutput(data=getattr(results, "data", []))
@@ -150,6 +183,8 @@ async def execute_search(
         logger.info("Path 2: embed-only search")
         try:
             results = await embed_search()
+            if isinstance(results, SearchOutput):
+                return results
             if hasattr(results, "data"):
                 return SearchOutput(data=results.data)
             return SearchOutput(data=results if isinstance(results, list) else [])
@@ -173,7 +208,12 @@ async def execute_search(
         if attribute_search is not None:
             try:
                 r = await attribute_search()
-                attr_results = list(r) if isinstance(r, list) else list(getattr(r, "data", []))
+                if isinstance(r, SearchOutput):
+                    attr_results = r.data
+                elif isinstance(r, list):
+                    attr_results = r
+                elif hasattr(r, "data"):
+                    attr_results = r.data
             except Exception as e:
                 logger.error("Attribute search in fusion failed: %s", e)
 
