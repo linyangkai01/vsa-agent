@@ -44,10 +44,32 @@ DEFAULT_MAX_FRAMES = 24
 class VideoUnderstandingInput(BaseModel):
     """Input for video understanding. Mirrors NVIDIA VideoUnderstandingInput."""
 
-    sensor_id: str = Field(default="", description="Sensor ID or video file name")
-    start_timestamp: str = Field(default="", description="Start timestamp (ISO format)")
-    end_timestamp: str = Field(default="", description="End timestamp (ISO format)")
-    user_prompt: str = Field(default="", description="Query/prompt for VLM analysis")
+    sensor_id: str = Field(
+        ...,
+        description="The sensor ID or the name of the video file in VST to understand",
+        min_length=1,
+    )
+    start_timestamp: str = Field(
+        ...,
+        description="The start timestamp in UTC ISO 8601 format (e.g., '2025-08-25T03:05:55.752Z')",
+    )
+    end_timestamp: str = Field(
+        ...,
+        description="The end timestamp in UTC ISO 8601 format (e.g., '2025-08-25T03:06:15.752Z')",
+    )
+    user_prompt: str = Field(
+        ...,
+        description="The prompt that is used to query the VLM to understand the video",
+        min_length=1,
+    )
+    object_ids: list[str] | None = Field(
+        default=None,
+        description="Optional list of object IDs to display as overlays in the video",
+    )
+    vlm_reasoning: bool | None = Field(
+        default=None,
+        description="Enable VLM reasoning mode. If None, uses config.reasoning default.",
+    )
 
 
 # ===== Thinking Parser =====

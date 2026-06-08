@@ -8,6 +8,7 @@ Design Pattern: #10 Registry Table, #13 Search Strategy.
 
 import logging
 
+from datetime import datetime
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -24,13 +25,20 @@ logger = logging.getLogger(__name__)
 class AttributeSearchInput(BaseModel):
     """Input for attribute-based search. Mirrors NVIDIA AttributeSearchInput."""
 
-    query: str | list[str] = Field(..., description="Attribute query or list of queries")
-    source_type: str = Field(default="video_file", description="video_file or rtsp")
+    query: str | list[str] = Field(
+        ...,
+        description="Attribute query or list of queries (e.g., 'person with red hat' or ['person', 'red hat'])",
+    )
+    source_type: str = Field(
+        default="video_file",
+        description="Type of video source: 'video_file' for uploaded videos, 'rtsp' for live/camera streams.",
+    )
     timestamp_start: str | None = Field(default=None, description="Start time filter")
     timestamp_end: str | None = Field(default=None, description="End time filter")
     video_sources: list[str] | None = Field(default=None, description="Filter by video source names")
     top_k: int = Field(default=1, description="Number of results to return")
     min_similarity: float = Field(default=0.3, description="Minimum cosine similarity threshold")
+    fuse_multi_attribute: bool = Field(default=True, description="Fuse multiple attributes for single screenshot")
     exclude_videos: list[dict[str, str]] = Field(default_factory=list, description="Videos to exclude")
 
 
