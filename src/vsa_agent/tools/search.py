@@ -9,6 +9,7 @@ Design Pattern: #13 Three-Path Search Strategy.
 
 import json
 import logging
+from collections.abc import AsyncGenerator
 
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import SystemMessage
@@ -56,6 +57,110 @@ class SearchOutput(BaseModel):
     """Container for a list of search results."""
 
     data: list[SearchResult] = Field(default_factory=list, description="List of search results matching the query")
+
+
+# ===== Configuration =====
+
+
+class SearchConfig(BaseModel):
+    """Configuration for the search tool. Mirrors NVIDIA SearchConfig fields."""
+
+    embed_search_tool: str = Field(default="embed_search")
+    attribute_search_tool: str | None = Field(default=None)
+    embed_confidence_threshold: float = Field(default=0.2)
+    agent_mode_llm: str | None = Field(default=None)
+    use_attribute_search: bool = Field(default=False)
+    default_max_results: int = Field(default=10)
+    fusion_method: str = Field(default="rrf")
+    w_embed: float = Field(default=0.35)
+    w_attribute: float = Field(default=0.55)
+    rrf_k: int = Field(default=60)
+    rrf_w: float = Field(default=0.5)
+
+
+class SearchInput(BaseModel):
+    """Input for the search tool. Mirrors NVIDIA SearchInput fields."""
+
+    model_config = {"extra": "forbid"}
+
+    query: str = Field(..., description="Description of the item to search from")
+    source_type: str = Field(default="video_file", description="rtsp or video_file")
+    video_sources: list[str] | None = Field(default=None)
+    description: str | None = Field(default=None)
+    timestamp_start: str | None = Field(default=None)
+    timestamp_end: str | None = Field(default=None)
+    top_k: int | None = Field(default=None)
+    agent_mode: bool = Field(default=True)
+
+
+# ===== Core Search (async generator) =====
+
+
+async def execute_core_search(
+    search_input: SearchInput,
+    embed_search,
+    agent_llm=None,
+    config: SearchConfig | None = None,
+    attribute_search_fn=None,
+):
+    """Core search with three-path routing. Yields SearchOutput."""
+    if config is None:
+        config = SearchConfig()
+    top_k = search_input.top_k if search_input.top_k is not None else config.default_max_results
+    if search_input.agent_mode and agent_llm is not None:
+        decomposed = await decompose_query(search_input.query, agent_llm)
+        attributes = decomposed.attributes
+        has_action = decomposed.has_action
+    else:
+        attributes = []
+        has_action = None
+    has_attributes = bool(attributes)
+    if not has_action and has_attributes and attribute_search_fn is not None:
+        logger.info("Path 1: attribute-only search")
+        try:
+            results = await attribute_search_fn()
+            if isinstance(results, SearchOutput):
+                yield results; return
+            if isinstance(results, list):
+                yield SearchOutput(data=results); return
+        except Exception as e:
+            logger.error("Attribute search failed: %s", e)
+    if not has_attributes:
+        logger.info("Path 2: embed-only search")
+        try:
+            results = await embed_search()
+            if isinstance(results, SearchOutput):
+                yield results; return
+            if hasattr(results, "data"):
+                yield SearchOutput(data=results.data); return
+        except Exception as e:
+            logger.error("Embed search failed: %s", e)
+    if has_action and has_attributes:
+        logger.info("Path 3: fusion search")
+        embed_results = []
+        attr_results = []
+        try:
+            r = await embed_search()
+            embed_results = list(r.data) if hasattr(r, "data") else []
+        except Exception as e:
+            logger.error("Embed in fusion failed: %s", e)
+        if attribute_search_fn is not None:
+            try:
+                r = await attribute_search_fn()
+                if isinstance(r, SearchOutput):
+                    attr_results = r.data
+                elif isinstance(r, list):
+                    attr_results = r
+            except Exception as e:
+                logger.error("Attribute in fusion failed: %s", e)
+        merged = {}
+        for r in embed_results + attr_results:
+            if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
+                merged[r.video_name] = r
+        combined = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
+        yield SearchOutput(data=combined[:top_k])
+        return
+    yield SearchOutput(data=[])
 
 
 # ===== Constants =====
