@@ -8,6 +8,7 @@ Design Pattern: #11 Long-Form Video Analysis, #20 Safety Report Generation.
 
 import logging
 
+from vsa_agent.registry import register_tool
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -26,6 +27,42 @@ class SummaryAgentInput(BaseModel):
 
 
 # ===== Core Orchestration =====
+
+# ===== Registered Tool Wrapper =====
+
+
+@register_tool(
+    "summary_agent",
+    description="Summarize a long video by chunking it, analyzing each chunk "
+                "with VLM, and aggregating into a safety report.",
+)
+async def summary_agent_tool(
+    query: str,
+    video_path: str = "",
+    chunk_duration_sec: int = 30,
+    max_chunks: int = 10,
+) -> str:
+    """Tool wrapper: converts simple args, calls execute_summary."""
+    search_input = SummaryAgentInput(
+        query=query, video_path=video_path,
+        chunk_duration_sec=chunk_duration_sec, max_chunks=max_chunks,
+    )
+    # Need video_duration ? try to get from frame_extract
+    video_duration_sec = 300.0  # default 5 min
+    if video_path:
+        try:
+            from vsa_agent.registry import ToolRegistry
+            fn = ToolRegistry.get("frame_extract")
+            if fn:
+                info = await fn(video_path=video_path, max_frames=1)
+                video_duration_sec = info.get("duration_sec", 300.0)
+        except Exception:
+            pass
+    return await execute_summary(
+        search_input=search_input,
+        video_duration_sec=video_duration_sec,
+    )
+
 
 
 async def execute_summary(

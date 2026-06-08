@@ -12,6 +12,7 @@ import logging
 from pydantic import BaseModel
 from pydantic import Field
 
+from vsa_agent.registry import register_tool
 from vsa_agent.tools.search import DecomposedQuery
 from vsa_agent.tools.search import SearchOutput
 from vsa_agent.tools.search import SearchResult
@@ -108,6 +109,34 @@ def _to_incidents_output(search_output) -> str:
 
 # ===== Three-Path Routing =====
 
+# ===== Registered Tool Wrapper =====
+
+
+@register_tool(
+    "search_agent",
+    description="Search for video clips matching a description. "
+                "Three-path routing: embed-only, attribute-only, or fusion.",
+)
+async def search_agent_tool(
+    query: str,
+    agent_mode: bool = True,
+    max_results: int = 5,
+) -> str:
+    """Tool wrapper: converts simple args to SearchAgentInput, calls execute_search."""
+    search_input = SearchAgentInput(query=query, agent_mode=agent_mode, max_results=max_results)
+    result = await execute_search(search_input=search_input)
+    # Convert SearchOutput to readable string for LLM
+    if not result.data:
+        return "No matching videos found."
+    lines = [f"Found {len(result.data)} result(s):"]
+    for r in result.data:
+        lines.append(
+            f"- {r.video_name} (similarity: {r.similarity:.2f}, "
+            f"time: {r.start_time} to {r.end_time})"
+        )
+    return "\n".join(lines)
+
+
 
 async def execute_search(
     search_input: SearchAgentInput,
@@ -188,6 +217,26 @@ async def execute_search(
             if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
                 merged[r.video_name] = r
         combined = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
-        return SearchOutput(data=combined)
+        result = SearchOutput(data=combined)
+
+        # Optional: run critic verification if critic_agent is registered
+        try:
+            from vsa_agent.registry import ToolRegistry
+            critic_fn = ToolRegistry.get("critic_agent")
+            if critic_fn and combined:
+                import json as _json
+                videos_data = [
+                    {"sensor_id": r.sensor_id, "start_timestamp": r.start_time, "end_timestamp": r.end_time}
+                    for r in combined
+                ]
+                critic_result = await critic_fn(
+                    query=search_input.query,
+                    videos_json=_json.dumps(videos_data),
+                )
+                logger.info("Critic verification completed: %s", str(critic_result)[:200])
+        except Exception:
+            pass  # Critic is optional; failure doesn't block search
+
+        return result
 
     return SearchOutput(data=[])

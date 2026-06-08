@@ -24,6 +24,9 @@ tools:
   - vsa_agent.tools.embed_search
   - vsa_agent.tools.attribute_search
   - vsa_agent.tools.search
+  - vsa_agent.agents.search_agent
+  - vsa_agent.agents.summary_agent
+  - vsa_agent.agents.critic_agent
 server:
   host: 0.0.0.0
   port: 8000

@@ -13,6 +13,7 @@ import json
 import logging
 from enum import Enum
 
+from vsa_agent.registry import register_tool
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from langchain_core.messages import HumanMessage
@@ -86,6 +87,39 @@ def _get_json_from_string(string: str) -> str:
     if "```json" in string:
         return string.split("```json")[1].split("```")[0].strip()
     return string
+
+# ===== Registered Tool Wrapper =====
+
+
+@register_tool(
+    "critic_agent",
+    description="Verify search results against the original query using VLM. "
+                "Returns confirmed/rejected/unverified for each result.",
+)
+async def critic_agent_tool(
+    query: str,
+    videos_json: str,
+) -> str:
+    """Tool wrapper: parses videos JSON, calls execute_critic, returns summary."""
+    import json as _json
+    videos_data = _json.loads(videos_json)
+    videos = [
+        VideoInfo(
+            sensor_id=v.get("sensor_id", v.get("video_name", "")),
+            start_timestamp=v.get("start_timestamp", v.get("start_time", "")),
+            end_timestamp=v.get("end_timestamp", v.get("end_time", "")),
+        )
+        for v in videos_data
+    ]
+    critic_input = CriticAgentInput(query=query, videos=videos)
+    result = await execute_critic(critic_input=critic_input)
+    lines = [f"Verification results for query: {query}"]
+    for vr in result.video_results:
+        status = vr.result.value
+        criteria = ", ".join(f"{k}={v}" for k, v in (vr.criteria_met or {}).items())
+        lines.append(f"  {vr.video_info.sensor_id}: {status} ({criteria})")
+    return "\n".join(lines)
+
 
 
 # ===== Core Verification =====
