@@ -9,8 +9,8 @@ Design Pattern: #13 Three-Path Search Strategy.
 import logging
 
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.query_builders import SearchOutput
-from vsa_agent.tools.query_builders import SearchResult
+from vsa_agent.agents.search_agent import SearchOutput
+from vsa_agent.agents.search_agent import SearchResult
 
 logger = logging.getLogger(__name__)
 

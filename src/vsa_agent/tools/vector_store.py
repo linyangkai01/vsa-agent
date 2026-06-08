@@ -6,7 +6,7 @@ In production, these would be backed by Elasticsearch (see NVIDIA original).
 
 import logging
 
-from vsa_agent.tools.query_builders import SearchOutput
+from vsa_agent.agents.search_agent import SearchOutput
 
 logger = logging.getLogger(__name__)
 

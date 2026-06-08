@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from vsa_agent.registry import ToolRegistry
-from vsa_agent.tools.query_builders import SearchOutput
-from vsa_agent.tools.query_builders import SearchResult
+from vsa_agent.agents.search_agent import SearchOutput
+from vsa_agent.agents.search_agent import SearchResult
 
 
 # ===== Helpers =====
