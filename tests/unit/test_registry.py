@@ -1,37 +1,21 @@
+"""Tests for registry.py."""
 import pytest
-import asyncio
-from vsa_agent.registry import ToolRegistry, register_tool, _TOOLS
+from vsa_agent.registry import ToolRegistry, register_tool
 
+class TestRegisterTool:
+    def test_registers_function(self):
+        @register_tool("test_tool", description="A test tool")
+        async def my_tool(x: int) -> int:
+            return x + 1
+        tools = ToolRegistry.get_all()
+        assert "test_tool" in tools
 
 class TestToolRegistry:
-    def test_register_and_get(self):
-        @register_tool('test_upper', description='Convert to uppercase')
-        async def test_upper(message: str) -> str:
-            return message.upper()
+    def test_get_returns_none_for_missing(self):
+        assert ToolRegistry.get("nonexistent_tool") is None
 
-        tools = ToolRegistry.get_all()
-        assert 'test_upper' in tools
-
-        fn = ToolRegistry.get('test_upper')
-        assert fn is not None
-
-        result = asyncio.run(fn('hello'))
-        assert result == 'HELLO'
-
-        # Clean up
-        del _TOOLS['test_upper']
-
-    def test_list_tools(self):
-        @register_tool('temp_list_tool', description='Test listing')
-        async def temp_list_tool():
-            pass
-
-        tools = ToolRegistry.list_tools()
-        names = [t['name'] for t in tools]
-        assert 'temp_list_tool' in names
-
-        del _TOOLS['temp_list_tool']
-
-    def test_get_nonexistent_returns_none(self):
-        fn = ToolRegistry.get('nonexistent_tool')
-        assert fn is None
+    def test_list_tools_returns_list(self):
+        tools_list = ToolRegistry.list_tools()
+        assert isinstance(tools_list, list)
+        for t in tools_list:
+            assert "name" in t

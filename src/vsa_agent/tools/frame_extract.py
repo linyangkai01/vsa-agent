@@ -1,4 +1,4 @@
-﻿"""Video frame extraction tool — extracts evenly-spaced frames from a video file.
+"""Video frame extraction tool — extracts evenly-spaced frames from a video file.
 
 Uses OpenCV to read video frames and returns them as base64-encoded JPEG strings,
 suitable for feeding into VLM models for video understanding tasks.
@@ -13,6 +13,7 @@ import math
 import cv2
 
 from vsa_agent.registry import register_tool
+from vsa_agent.tools.frame_store import store_frames
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,8 @@ def has_nvidia_gpu() -> bool:
 
 @register_tool(
     "frame_extract",
-    description="Extract evenly-spaced frames from a video file as base64-encoded JPEGs",
+    description="Extract evenly-spaced frames from a video file. Returns metadata with a frame_key reference. "
+                "Pass the frame_key to video_understanding to analyze the frames.",
 )
 async def frame_extract_tool(
     video_path: str,
@@ -101,6 +103,11 @@ async def frame_extract_tool(
 ) -> dict:
     """Extract up to max_frames evenly-spaced frames from a video.
 
+    Frames are stored in an internal frame store. The returned dict contains
+    a 'frame_key' that can be passed to video_understanding_tool to analyze
+    the frames. The 'frames' field is included for backward compatibility
+    but is deprecated - use frame_key instead.
+
     Args:
         video_path: Absolute or relative path to the video file.
         max_frames: Maximum number of frames to extract (default 10).
@@ -109,7 +116,8 @@ async def frame_extract_tool(
 
     Returns:
         dict with keys:
-            frames: list of base64-encoded JPEG strings
+            frame_key: reference key for video_understanding
+            frames: list of base64-encoded JPEG strings (deprecated)
             duration_sec: total video duration in seconds
             fps: frames per second of the source video
             frame_count: total number of frames in the source video
@@ -142,6 +150,7 @@ async def frame_extract_tool(
                 video_path, start_timestamp, end_timestamp,
             )
             return {
+                "frame_key": "",
                 "frames": [],
                 "duration_sec": duration_sec,
                 "fps": fps,
@@ -156,7 +165,17 @@ async def frame_extract_tool(
             cap, fps, total_frames, start_timestamp, end_timestamp, step_size,
         )
 
+        # Store frames in shared store, return reference key
+        frame_key = store_frames(frames, {
+            "video_path": video_path,
+            "duration_sec": duration_sec,
+            "fps": fps,
+            "frame_count": total_frames,
+            "extracted_count": len(frames),
+        })
+
         return {
+            "frame_key": frame_key,
             "frames": frames,
             "duration_sec": duration_sec,
             "fps": fps,

@@ -19,6 +19,7 @@ class PromptsConfig(BaseModel):
 class ModelDevConfig(BaseModel):
     provider: str = "openai_compatible"
     base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""
     llm_model: str = "gpt-4o"
     vlm_model: str = "gpt-4o"
 
@@ -26,6 +27,7 @@ class ModelDevConfig(BaseModel):
 class ModelProdConfig(BaseModel):
     provider: str = "vllm"
     base_url: str = "http://localhost:8000/v1"
+    api_key: str = ""
     llm_model: str = "Qwen3-VL-8B-Instruct"
     vlm_model: str = "Qwen3-VL-8B-Instruct"
 

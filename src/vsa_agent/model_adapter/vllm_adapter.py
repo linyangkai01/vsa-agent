@@ -13,6 +13,7 @@ class VLLMModelAdapter(BaseModelAdapter):
         self.llm = ChatOpenAI(
             model=model_name or prod.llm_model,
             base_url=prod.base_url,
+            api_key=prod.api_key if prod.api_key else None,
             temperature=0,
         )
 

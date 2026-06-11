@@ -11,3 +11,9 @@ _nvidia-original/
 .pytest_cache/
 tests/
 
+
+# Contains API keys
+config.yaml
+
+logs/
+data/

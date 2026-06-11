@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables.config import RunnableConfig
 from pydantic import BaseModel
 
 from vsa_agent.agents.data_models import AgentState
@@ -26,7 +27,8 @@ async def chat(req: ChatRequest):
 
     async def event_stream():
         state = AgentState(current_message=HumanMessage(content=req.message))
-        async for chunk in graph.astream(state, stream_mode='custom'):
+        config = RunnableConfig(configurable={'thread_id': '1'})
+        async for chunk in graph.astream(state, config=config, stream_mode='custom'):
             yield f'data: {json.dumps(chunk.model_dump())}\n\n'
         yield 'data: [DONE]\n\n'
 

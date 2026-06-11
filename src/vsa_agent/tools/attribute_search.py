@@ -1,85 +1,137 @@
-"""Attribute search tool — object-level search by visual attributes.
+﻿"""Attribute search tool — object-level search by visual attributes.
 
 Searches for video segments matching specific object/person descriptions
-(e.g., "person with red jacket", "blue forklift").
+using Elasticsearch behavior index with embedding similarity.
 
 Design Pattern: #10 Registry Table, #13 Search Strategy.
 """
 
+import asyncio
+import json
 import logging
-
+import re
 from datetime import datetime
-from pydantic import BaseModel
-from pydantic import Field
+from typing import Any
+
+from elasticsearch import AsyncElasticsearch
+from pydantic import BaseModel, Field
 
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.tools.search import SearchOutput, SearchResult
 
 logger = logging.getLogger(__name__)
 
-
-# ===== Data Models =====
+BASE_2025 = datetime(2025, 1, 1)
 
 
 class AttributeSearchInput(BaseModel):
-    """Input for attribute-based search. Mirrors NVIDIA AttributeSearchInput."""
+    """Input for attribute-based search."""
 
-    query: str | list[str] = Field(
-        ...,
-        description="Attribute query or list of queries (e.g., 'person with red hat' or ['person', 'red hat'])",
-    )
-    source_type: str = Field(
-        default="video_file",
-        description="Type of video source: 'video_file' for uploaded videos, 'rtsp' for live/camera streams.",
-    )
-    timestamp_start: str | None = Field(default=None, description="Start time filter")
-    timestamp_end: str | None = Field(default=None, description="End time filter")
-    video_sources: list[str] | None = Field(default=None, description="Filter by video source names")
-    top_k: int = Field(default=1, description="Number of results to return")
-    min_similarity: float = Field(default=0.3, description="Minimum cosine similarity threshold")
-    fuse_multi_attribute: bool = Field(default=True, description="Fuse multiple attributes for single screenshot")
-    exclude_videos: list[dict[str, str]] = Field(default_factory=list, description="Videos to exclude")
+    query: str | list[str] = Field(..., description="Attribute query or list of queries")
+    source_type: str = Field(default="video_file")
+    timestamp_start: str | None = Field(default=None)
+    timestamp_end: str | None = Field(default=None)
+    video_sources: list[str] | None = Field(default=None)
+    top_k: int = Field(default=1)
+    min_similarity: float = Field(default=0.3)
+    fuse_multi_attribute: bool = Field(default=True)
+    exclude_videos: list[dict[str, str]] = Field(default_factory=list)
 
 
 class AttributeSearchMetadata(BaseModel):
-    """Metadata for attribute search result. Mirrors NVIDIA AttributeSearchMetadata."""
+    """Metadata for attribute search result."""
 
     sensor_id: str = Field(..., description="Sensor/camera ID")
     object_id: str = Field(..., description="Object ID")
     object_type: str = Field(default="", description="Object type")
     frame_timestamp: str = Field(default="", description="Best frame timestamp")
-    start_time: str | None = Field(default=None, description="Start time")
-    end_time: str | None = Field(default=None, description="End time")
-    bbox: dict | None = Field(default=None, description="Bounding box")
-    behavior_score: float = Field(default=0.0, description="Behavior-level similarity")
-    frame_score: float | None = Field(default=None, description="Frame-level similarity")
-    video_name: str | None = Field(default=None, description="Video name")
+    start_time: str | None = Field(default=None)
+    end_time: str | None = Field(default=None)
+    bbox: dict | None = Field(default=None)
+    behavior_score: float = Field(default=0.0)
+    frame_score: float | None = Field(default=None)
+    video_name: str | None = Field(default=None)
 
 
 class AttributeSearchResult(BaseModel):
-    """Single attribute search result. Mirrors NVIDIA AttributeSearchResult."""
+    """Single attribute search result."""
 
-    screenshot_url: str | None = Field(default=None, description="Screenshot URL")
+    screenshot_url: str | None = Field(default=None)
     metadata: AttributeSearchMetadata = Field(..., description="Search result metadata")
 
 
-# ===== Core Search =====
-
-
-async def search_by_attributes(
+async def search_single_attribute(
     query_text: str,
     search_input: AttributeSearchInput | None = None,
+    es_client: AsyncElasticsearch | None = None,
+    index: str = "mdx-behavior-2026-01-06",
+    top_k: int = 5,
 ) -> list[AttributeSearchResult]:
-    """Search for objects by visual attributes. Mock implementation.
-
-    NVIDIA original uses Elasticsearch behavior index + frame lookup +
-    cosine similarity with Painless scripts. Returns mock results for now.
-    """
+    """Search for a single attribute using ES behavior index."""
     if search_input is None:
         search_input = AttributeSearchInput(query=query_text)
-    
-    # Mock: return a single result with deterministic scoring
+
+    if es_client is None:
+        from vsa_agent.config import get_config
+        cfg = get_config()
+        es_client = AsyncElasticsearch(cfg.search.es_endpoint)
+
+    try:
+        must_clauses = [{"match": {"object_type": query_text}}]
+
+        if search_input.video_sources:
+            should_clauses = []
+            for vname in search_input.video_sources:
+                should_clauses.append({"term": {"sensor_id.keyword": vname}})
+            must_clauses.append({"bool": {"should": should_clauses, "minimum_should_match": 1}})
+
+        if search_input.timestamp_start or search_input.timestamp_end:
+            range_filter = {"range": {}}
+            if search_input.timestamp_start:
+                range_filter["range"]["timestamp"] = {"gte": search_input.timestamp_start}
+            if search_input.timestamp_end:
+                range_filter["range"]["timestamp"] = {"lte": search_input.timestamp_end}
+            must_clauses.append(range_filter)
+
+        es_query = {
+            "size": top_k,
+            "query": {"bool": {"must": must_clauses}},
+            "sort": [{"_score": {"order": "desc"}}],
+        }
+
+        response = await es_client.search(index=index, body=es_query)
+        hits = response["hits"]["hits"]
+
+        results = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            score = hit.get("_score", 0.0)
+            sensor_id = source.get("sensor_id", "")
+            object_id = source.get("object_id", str(hash(query_text) % 10000))
+            object_type = source.get("object_type", query_text)
+
+            results.append(AttributeSearchResult(
+                screenshot_url="",
+                metadata=AttributeSearchMetadata(
+                    sensor_id=sensor_id,
+                    object_id=object_id,
+                    object_type=object_type,
+                    frame_timestamp=source.get("timestamp", ""),
+                    start_time=source.get("timestamp", ""),
+                    end_time=source.get("end", ""),
+                    behavior_score=score,
+                    video_name=sensor_id,
+                ),
+            ))
+
+        return results
+    except Exception as e:
+        logger.warning("ES attribute search failed, using mock: %s", e)
+        return await _mock_attribute_search(query_text, search_input)
+
+
+async def _mock_attribute_search(query_text: str, search_input: AttributeSearchInput) -> list[AttributeSearchResult]:
+    """Fallback mock attribute search when ES is unavailable."""
     seed = sum(ord(c) for c in str(query_text)) % 100
     return [
         AttributeSearchResult(
@@ -96,16 +148,27 @@ async def search_by_attributes(
     ]
 
 
-# ===== Helpers =====
+async def search_by_attributes(query_text: str, search_input: AttributeSearchInput | None = None) -> list[AttributeSearchResult]:
+    """Search for objects by visual attributes. Tries ES first, falls back to mock."""
+    if search_input is None:
+        search_input = AttributeSearchInput(query=query_text)
+
+    try:
+        from vsa_agent.config import get_config
+        cfg = get_config()
+        es_client = AsyncElasticsearch(cfg.search.es_endpoint)
+        index_exists = await es_client.indices.exists(index=cfg.search.behavior_index)
+        if index_exists:
+            return await search_single_attribute(query_text, search_input, es_client, cfg.search.behavior_index, search_input.top_k)
+        await es_client.close()
+    except Exception as e:
+        logger.warning("ES search_by_attributes failed: %s", e)
+
+    return await _mock_attribute_search(query_text, search_input)
 
 
 def _deduplicate_by_video_name(results: list[SearchResult]) -> list[SearchResult]:
-    """Deduplicate SearchResults by video_name, keeping the highest similarity.
-
-    This mimics the NVIDIA original's deduplication behavior where
-    multiple attribute hits on the same video are collapsed into the
-    best-scoring result.
-    """
+    """Deduplicate SearchResults by video_name, keeping the highest similarity."""
     merged: dict[str, SearchResult] = {}
     for r in results:
         if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
@@ -113,44 +176,18 @@ def _deduplicate_by_video_name(results: list[SearchResult]) -> list[SearchResult
     return sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
 
 
-# ===== Registered Tool =====
-
-
-@register_tool(
-    "attribute_search",
-    description="Attribute-based search: find video segments matching specific "
-                "visual attributes (e.g., 'person in red jacket'). "
-                "Returns deduplicated SearchOutput ranked by similarity.",
-)
-async def attribute_search_tool(
-    attributes: list[str],
-    store=None,
-    top_k: int = 5,
-) -> SearchOutput:
-    """Search for video segments matching visual attribute descriptions.
-
-    Args:
-        attributes: List of attribute descriptions (e.g., ["person in red shirt"]).
-        store: Optional vector store for dependency injection (testing).
-               If None, uses a default in-memory store.
-        top_k: Maximum results per attribute before deduplication.
-
-    Returns:
-        SearchOutput with deduplicated, ranked matches.
-    """
+@register_tool("attribute_search", description="Attribute-based search: find video segments matching specific visual attributes.")
+async def attribute_search_tool(attributes: list[str], store=None, top_k: int = 5) -> SearchOutput:
+    """Search for video segments matching visual attribute descriptions."""
     if not attributes:
-        raise ValueError("At least one attribute is required for attribute search")
+        raise ValueError("At least one attribute is required")
 
     if store is None:
         from vsa_agent.tools.vector_store import get_default_store
         store = get_default_store()
 
     try:
-        result = await store.search_by_attributes(
-            attributes=attributes,
-            top_k=top_k,
-        )
-
+        result = await store.search_by_attributes(attributes=attributes, top_k=top_k)
         if isinstance(result, SearchOutput):
             results = result.data
         elif hasattr(result, "data"):
@@ -158,34 +195,27 @@ async def attribute_search_tool(
         else:
             results = list(result) if isinstance(result, list) else []
 
-        # Deduplicate by video_name (best score wins)
         deduped = _deduplicate_by_video_name(results)
-
-        # Sort by similarity descending
         deduped.sort(key=lambda x: x.similarity, reverse=True)
-
         return SearchOutput(data=deduped[:top_k])
     except Exception as e:
-        logger.error("Attribute search failed for attributes %s: %s", attributes, e)
+        logger.error("Attribute search failed: %s", e)
         return SearchOutput(data=[])
 
 
-# ===== P1 Multi-Attribute Search (Phase B) =====
-
-
-async def search_single_attribute(attribute, search_input=None):
-    """Search for a single attribute. Returns list of AttributeSearchResult."""
+async def search_single_attribute_wrapper(attribute, search_input=None):
+    """Wrapper for single attribute search."""
     return await search_by_attributes(query_text=attribute, search_input=search_input)
 
 
 async def search_attributes(search_input):
-    """Search for multiple attributes. For each query, calls search_single_attribute."""
+    """Search for multiple attributes."""
     queries = search_input.query
     if isinstance(queries, str):
         queries = [queries]
     all_results = []
     for q in queries:
-        attr_results = await search_single_attribute(q, search_input)
+        attr_results = await search_single_attribute_wrapper(q, search_input)
         for ar in attr_results:
             if hasattr(ar, "metadata"):
                 m = ar.metadata

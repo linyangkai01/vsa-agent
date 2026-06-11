@@ -69,7 +69,7 @@ def _to_search_results(raw: list) -> list:
             d.setdefault("similarity", d.pop("similarity_score", 0.0))
             d.setdefault("object_ids", [])
             out.append(SearchResult(**d))
-        elif isinstance(r, dict):
+        elif isinstance(r, dict) and not hasattr(r, "model_dump"):
             d = dict(r)
             d.setdefault("description", d.get("description", ""))
             d.setdefault("start_time", d.get("start_time", ""))
