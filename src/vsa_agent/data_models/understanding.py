@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class EvidenceRef(BaseModel):
+class SharedContractModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EvidenceRef(SharedContractModel):
     source_type: Literal["video_file", "rtsp"]
     video_path: str | None = None
     sensor_id: str | None = None
@@ -18,14 +22,20 @@ class EvidenceRef(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_specific_fields(self) -> "EvidenceRef":
-        if self.source_type == "video_file" and not self.video_path:
-            raise ValueError("video_path is required when source_type is video_file")
-        if self.source_type == "rtsp" and not self.sensor_id:
-            raise ValueError("sensor_id is required when source_type is rtsp")
+        if self.source_type == "video_file":
+            if not self.video_path:
+                raise ValueError("video_path is required when source_type is video_file")
+            if self.sensor_id is not None:
+                raise ValueError("sensor_id is not allowed when source_type is video_file")
+        if self.source_type == "rtsp":
+            if not self.sensor_id:
+                raise ValueError("sensor_id is required when source_type is rtsp")
+            if self.video_path is not None:
+                raise ValueError("video_path is not allowed when source_type is rtsp")
         return self
 
 
-class ObservationChunk(BaseModel):
+class ObservationChunk(SharedContractModel):
     chunk_id: str
     start_timestamp: str
     end_timestamp: str
@@ -37,7 +47,7 @@ class ObservationChunk(BaseModel):
     evidence: EvidenceRef
 
 
-class DetectedEvent(BaseModel):
+class DetectedEvent(SharedContractModel):
     event_id: str
     label: str
     description: str
@@ -50,7 +60,7 @@ class DetectedEvent(BaseModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
 
 
-class UnderstandingResult(BaseModel):
+class UnderstandingResult(SharedContractModel):
     query: str
     source_type: Literal["video_file", "rtsp"]
     summary_text: str
@@ -59,7 +69,7 @@ class UnderstandingResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SummaryResult(BaseModel):
+class SummaryResult(SharedContractModel):
     query: str
     text_output: str
     structured_output: UnderstandingResult

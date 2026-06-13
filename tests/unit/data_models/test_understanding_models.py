@@ -170,3 +170,101 @@ def test_model_defaults_are_independent_between_instances():
 
     assert second.frame_indices == []
     assert second_result.metadata == {}
+
+
+@pytest.mark.parametrize(
+    ("model_class", "payload", "expected_message"),
+    [
+        (
+            EvidenceRef,
+            {
+                "source_type": "video_file",
+                "video_path": "a.mp4",
+                "unexpected": "value",
+            },
+            "unexpected",
+        ),
+        (
+            ObservationChunk,
+            {
+                "chunk_id": "c1",
+                "start_timestamp": "2025-01-01T10:00:00Z",
+                "end_timestamp": "2025-01-01T10:00:10Z",
+                "prompt_used": "watch carefully",
+                "raw_model_output": "person walking",
+                "normalized_text": "person walking near forklift",
+                "evidence": {
+                    "source_type": "video_file",
+                    "video_path": "a.mp4",
+                },
+                "unexpected": "value",
+            },
+            "unexpected",
+        ),
+        (
+            DetectedEvent,
+            {
+                "event_id": "e1",
+                "label": "walking",
+                "description": "person walking near forklift",
+                "start_timestamp": "2025-01-01T10:00:00Z",
+                "end_timestamp": "2025-01-01T10:00:05Z",
+                "unexpected": "value",
+            },
+            "unexpected",
+        ),
+        (
+            UnderstandingResult,
+            {
+                "query": "what happened",
+                "source_type": "video_file",
+                "summary_text": "person walking near forklift",
+                "unexpected": "value",
+            },
+            "unexpected",
+        ),
+        (
+            SummaryResult,
+            {
+                "query": "what happened",
+                "text_output": "person walking near forklift",
+                "structured_output": {
+                    "query": "what happened",
+                    "source_type": "video_file",
+                    "summary_text": "person walking near forklift",
+                },
+                "unexpected": "value",
+            },
+            "unexpected",
+        ),
+    ],
+)
+def test_understanding_models_reject_unexpected_extra_keys(model_class, payload, expected_message):
+    with pytest.raises(ValidationError, match=expected_message):
+        model_class(**payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_message"),
+    [
+        (
+            {
+                "source_type": "video_file",
+                "video_path": "a.mp4",
+                "sensor_id": "cam-1",
+            },
+            "sensor_id",
+        ),
+        (
+            {
+                "source_type": "rtsp",
+                "sensor_id": "cam-1",
+                "video_path": "a.mp4",
+            },
+            "video_path",
+        ),
+    ],
+)
+def test_evidence_ref_rejects_mixed_source_fields(payload, expected_message):
+    with pytest.raises(ValidationError, match=expected_message):
+        EvidenceRef(**payload)
