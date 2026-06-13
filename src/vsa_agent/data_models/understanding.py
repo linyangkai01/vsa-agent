@@ -20,15 +20,19 @@ class EvidenceRef(SharedContractModel):
     start_timestamp: str | None = None
     end_timestamp: str | None = None
 
+    @staticmethod
+    def _is_blank(value: str | None) -> bool:
+        return value is None or not value.strip()
+
     @model_validator(mode="after")
     def validate_source_specific_fields(self) -> "EvidenceRef":
         if self.source_type == "video_file":
-            if not self.video_path:
+            if self._is_blank(self.video_path):
                 raise ValueError("video_path is required when source_type is video_file")
             if self.sensor_id is not None:
                 raise ValueError("sensor_id is not allowed when source_type is video_file")
         if self.source_type == "rtsp":
-            if not self.sensor_id:
+            if self._is_blank(self.sensor_id):
                 raise ValueError("sensor_id is required when source_type is rtsp")
             if self.video_path is not None:
                 raise ValueError("video_path is not allowed when source_type is rtsp")
@@ -68,12 +72,29 @@ class UnderstandingResult(SharedContractModel):
     events: list[DetectedEvent] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_nested_source_types(self) -> "UnderstandingResult":
+        for chunk in self.chunks:
+            if chunk.evidence.source_type != self.source_type:
+                raise ValueError("chunks evidence source_type must match UnderstandingResult.source_type")
+        for event in self.events:
+            for evidence in event.evidence:
+                if evidence.source_type != self.source_type:
+                    raise ValueError("events evidence source_type must match UnderstandingResult.source_type")
+        return self
+
 
 class SummaryResult(SharedContractModel):
     query: str
     text_output: str
     structured_output: UnderstandingResult
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_query_match(self) -> "SummaryResult":
+        if self.query != self.structured_output.query:
+            raise ValueError("query must match structured_output.query")
+        return self
 
 
 __all__ = [

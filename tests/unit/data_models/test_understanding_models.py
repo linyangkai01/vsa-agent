@@ -268,3 +268,95 @@ def test_understanding_models_reject_unexpected_extra_keys(model_class, payload,
 def test_evidence_ref_rejects_mixed_source_fields(payload, expected_message):
     with pytest.raises(ValidationError, match=expected_message):
         EvidenceRef(**payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_message"),
+    [
+        (
+            {
+                "query": "what happened",
+                "source_type": "video_file",
+                "summary_text": "person walking near forklift",
+                "chunks": [
+                    {
+                        "chunk_id": "c1",
+                        "start_timestamp": "2025-01-01T10:00:00Z",
+                        "end_timestamp": "2025-01-01T10:00:10Z",
+                        "prompt_used": "watch carefully",
+                        "raw_model_output": "person walking",
+                        "normalized_text": "person walking near forklift",
+                        "evidence": {
+                            "source_type": "rtsp",
+                            "sensor_id": "cam-1",
+                        },
+                    }
+                ],
+            },
+            "chunks",
+        ),
+        (
+            {
+                "query": "what happened",
+                "source_type": "rtsp",
+                "summary_text": "person walking near forklift",
+                "events": [
+                    {
+                        "event_id": "e1",
+                        "label": "walking",
+                        "description": "person walking near forklift",
+                        "start_timestamp": "2025-01-01T10:00:00Z",
+                        "end_timestamp": "2025-01-01T10:00:05Z",
+                        "evidence": [
+                            {
+                                "source_type": "video_file",
+                                "video_path": "a.mp4",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "events",
+        ),
+    ],
+)
+def test_understanding_result_rejects_mixed_nested_source_types(payload, expected_message):
+    with pytest.raises(ValidationError, match=expected_message):
+        UnderstandingResult(**payload)
+
+
+def test_summary_result_rejects_mismatched_query():
+    with pytest.raises(ValidationError, match="query"):
+        SummaryResult(
+            query="what happened",
+            text_output="person walking near forklift",
+            structured_output={
+                "query": "different query",
+                "source_type": "video_file",
+                "summary_text": "person walking near forklift",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_message"),
+    [
+        (
+            {
+                "source_type": "video_file",
+                "video_path": "   ",
+            },
+            "video_path",
+        ),
+        (
+            {
+                "source_type": "rtsp",
+                "sensor_id": "   ",
+            },
+            "sensor_id",
+        ),
+    ],
+)
+def test_evidence_ref_rejects_whitespace_only_source_identifiers(payload, expected_message):
+    with pytest.raises(ValidationError, match=expected_message):
+        EvidenceRef(**payload)
