@@ -1,5 +1,15 @@
 """Tests for data_models/understanding.py."""
 
+import pytest
+from pydantic import ValidationError
+
+from vsa_agent.data_models import (
+    DetectedEvent as ExportedDetectedEvent,
+    EvidenceRef as ExportedEvidenceRef,
+    ObservationChunk as ExportedObservationChunk,
+    SummaryResult as ExportedSummaryResult,
+    UnderstandingResult as ExportedUnderstandingResult,
+)
 from vsa_agent.data_models.understanding import (
     DetectedEvent,
     EvidenceRef,
@@ -73,3 +83,90 @@ def test_understanding_model_defaults():
     assert result.chunks == []
     assert result.metadata == {}
     assert summary.metadata == {}
+
+
+def test_understanding_models_are_reexported():
+    assert ExportedEvidenceRef is EvidenceRef
+    assert ExportedObservationChunk is ObservationChunk
+    assert ExportedDetectedEvent is DetectedEvent
+    assert ExportedUnderstandingResult is UnderstandingResult
+    assert ExportedSummaryResult is SummaryResult
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_message"),
+    [
+        ({"source_type": "video_file"}, "video_path"),
+        ({"source_type": "rtsp"}, "sensor_id"),
+    ],
+)
+def test_evidence_ref_rejects_invalid_source_specific_payloads(payload, expected_message):
+    with pytest.raises(ValidationError, match=expected_message):
+        EvidenceRef(**payload)
+
+
+def test_summary_result_construction_from_nested_dict_payload():
+    summary = SummaryResult(
+        query="what happened",
+        text_output="person walking near forklift",
+        structured_output={
+            "query": "what happened",
+            "source_type": "video_file",
+            "summary_text": "person walking near forklift",
+            "chunks": [
+                {
+                    "chunk_id": "c1",
+                    "start_timestamp": "2025-01-01T10:00:00Z",
+                    "end_timestamp": "2025-01-01T10:00:10Z",
+                    "prompt_used": "watch carefully",
+                    "raw_model_output": "person walking",
+                    "normalized_text": "person walking near forklift",
+                    "evidence": {
+                        "source_type": "video_file",
+                        "video_path": "a.mp4",
+                    },
+                }
+            ],
+            "events": [
+                {
+                    "event_id": "e1",
+                    "label": "walking",
+                    "description": "person walking near forklift",
+                    "start_timestamp": "2025-01-01T10:00:00Z",
+                    "end_timestamp": "2025-01-01T10:00:05Z",
+                    "evidence": [
+                        {
+                            "source_type": "video_file",
+                            "video_path": "a.mp4",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert isinstance(summary.structured_output, UnderstandingResult)
+    assert isinstance(summary.structured_output.chunks[0], ObservationChunk)
+    assert isinstance(summary.structured_output.events[0], DetectedEvent)
+    assert isinstance(summary.structured_output.events[0].evidence[0], EvidenceRef)
+
+
+def test_model_defaults_are_independent_between_instances():
+    first = EvidenceRef(source_type="video_file", video_path="a.mp4")
+    second = EvidenceRef(source_type="video_file", video_path="b.mp4")
+    first.frame_indices.append(1)
+
+    first_result = UnderstandingResult(
+        query="first",
+        source_type="video_file",
+        summary_text="first summary",
+    )
+    second_result = UnderstandingResult(
+        query="second",
+        source_type="video_file",
+        summary_text="second summary",
+    )
+    first_result.metadata["key"] = "value"
+
+    assert second.frame_indices == []
+    assert second_result.metadata == {}

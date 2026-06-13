@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EvidenceRef(BaseModel):
@@ -15,6 +15,14 @@ class EvidenceRef(BaseModel):
     frame_timestamps: list[str] = Field(default_factory=list)
     start_timestamp: str | None = None
     end_timestamp: str | None = None
+
+    @model_validator(mode="after")
+    def validate_source_specific_fields(self) -> "EvidenceRef":
+        if self.source_type == "video_file" and not self.video_path:
+            raise ValueError("video_path is required when source_type is video_file")
+        if self.source_type == "rtsp" and not self.sensor_id:
+            raise ValueError("sensor_id is required when source_type is rtsp")
+        return self
 
 
 class ObservationChunk(BaseModel):

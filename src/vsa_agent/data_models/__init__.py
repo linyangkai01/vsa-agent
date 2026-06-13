@@ -1,5 +1,20 @@
-﻿"""Shared data models for vsa-agent."""
+"""Shared data models for vsa-agent."""
 
-from .vss import MediaInfoOffset, Incident
+from .understanding import (
+    DetectedEvent,
+    EvidenceRef,
+    ObservationChunk,
+    SummaryResult,
+    UnderstandingResult,
+)
+from .vss import Incident, MediaInfoOffset
 
-__all__ = ["MediaInfoOffset", "Incident"]
+__all__ = [
+    "DetectedEvent",
+    "EvidenceRef",
+    "Incident",
+    "MediaInfoOffset",
+    "ObservationChunk",
+    "SummaryResult",
+    "UnderstandingResult",
+]
