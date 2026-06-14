@@ -8,6 +8,7 @@ Mirrors NVIDIA tools/register.py pattern.
 import vsa_agent.tools.echo_tool  # noqa: F401
 import vsa_agent.tools.find_video_tool  # noqa: F401
 import vsa_agent.tools.frame_extract  # noqa: F401
+import vsa_agent.tools.prompt_gen  # noqa: F401
 import vsa_agent.tools.video_understanding  # noqa: F401
 
 # Search tools
