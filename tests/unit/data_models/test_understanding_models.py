@@ -360,3 +360,64 @@ def test_summary_result_rejects_mismatched_query():
 def test_evidence_ref_rejects_whitespace_only_source_identifiers(payload, expected_message):
     with pytest.raises(ValidationError, match=expected_message):
         EvidenceRef(**payload)
+
+
+@pytest.mark.parametrize(
+    ("model_class", "payload", "expected_message"),
+    [
+        (
+            ObservationChunk,
+            {
+                "chunk_id": "   ",
+                "start_timestamp": "2025-01-01T10:00:00Z",
+                "end_timestamp": "2025-01-01T10:00:10Z",
+                "prompt_used": "watch carefully",
+                "raw_model_output": "person walking",
+                "normalized_text": "person walking near forklift",
+                "evidence": {
+                    "source_type": "video_file",
+                    "video_path": "a.mp4",
+                },
+            },
+            "chunk_id",
+        ),
+        (
+            DetectedEvent,
+            {
+                "event_id": "   ",
+                "label": "walking",
+                "description": "person walking near forklift",
+                "start_timestamp": "2025-01-01T10:00:00Z",
+                "end_timestamp": "2025-01-01T10:00:05Z",
+            },
+            "event_id",
+        ),
+        (
+            UnderstandingResult,
+            {
+                "query": "   ",
+                "source_type": "video_file",
+                "summary_text": "person walking near forklift",
+            },
+            "query",
+        ),
+        (
+            SummaryResult,
+            {
+                "query": "   ",
+                "text_output": "person walking near forklift",
+                "structured_output": {
+                    "query": "   ",
+                    "source_type": "video_file",
+                    "summary_text": "person walking near forklift",
+                },
+            },
+            "query",
+        ),
+    ],
+)
+def test_understanding_models_reject_whitespace_only_identifier_fields(
+    model_class, payload, expected_message
+):
+    with pytest.raises(ValidationError, match=expected_message):
+        model_class(**payload)

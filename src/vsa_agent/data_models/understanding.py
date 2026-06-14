@@ -10,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class SharedContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    @staticmethod
+    def _is_blank(value: str | None) -> bool:
+        return value is None or not value.strip()
+
 
 class EvidenceRef(SharedContractModel):
     source_type: Literal["video_file", "rtsp"]
@@ -19,10 +23,6 @@ class EvidenceRef(SharedContractModel):
     frame_timestamps: list[str] = Field(default_factory=list)
     start_timestamp: str | None = None
     end_timestamp: str | None = None
-
-    @staticmethod
-    def _is_blank(value: str | None) -> bool:
-        return value is None or not value.strip()
 
     @model_validator(mode="after")
     def validate_source_specific_fields(self) -> "EvidenceRef":
@@ -50,6 +50,12 @@ class ObservationChunk(SharedContractModel):
     confidence: float | None = None
     evidence: EvidenceRef
 
+    @model_validator(mode="after")
+    def validate_chunk_id(self) -> "ObservationChunk":
+        if self._is_blank(self.chunk_id):
+            raise ValueError("chunk_id must not be blank")
+        return self
+
 
 class DetectedEvent(SharedContractModel):
     event_id: str
@@ -63,6 +69,12 @@ class DetectedEvent(SharedContractModel):
     severity: str | None = None
     evidence: list[EvidenceRef] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_event_id(self) -> "DetectedEvent":
+        if self._is_blank(self.event_id):
+            raise ValueError("event_id must not be blank")
+        return self
+
 
 class UnderstandingResult(SharedContractModel):
     query: str
@@ -71,6 +83,12 @@ class UnderstandingResult(SharedContractModel):
     chunks: list[ObservationChunk] = Field(default_factory=list)
     events: list[DetectedEvent] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_query(self) -> "UnderstandingResult":
+        if self._is_blank(self.query):
+            raise ValueError("query must not be blank")
+        return self
 
     @model_validator(mode="after")
     def validate_nested_source_types(self) -> "UnderstandingResult":
@@ -89,6 +107,12 @@ class SummaryResult(SharedContractModel):
     text_output: str
     structured_output: UnderstandingResult
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_query(self) -> "SummaryResult":
+        if self._is_blank(self.query):
+            raise ValueError("query must not be blank")
+        return self
 
     @model_validator(mode="after")
     def validate_query_match(self) -> "SummaryResult":
