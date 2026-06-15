@@ -373,12 +373,23 @@ async def _analyze_frames(
     raise RuntimeError(f"VLM call failed for query '{query[:60]}...': {last_error}") from last_error
 
 
-def _prepare_video_path(video_path: str, config: VideoUnderstandingConfig) -> str:
+def _prepare_video_path(
+    video_path: str,
+    config: VideoUnderstandingConfig,
+    *,
+    source_type: str = "video_file",
+) -> str:
     if not video_path:
         return video_path
 
     if config.source_mode == "translated" or is_remote_url(video_path):
         translated = translate_url(video_path, target_base=config.translated_base_dir)
+        if source_type == "rtsp" and (
+            translated.startswith("rtsp://")
+            or translated.startswith("http://")
+            or translated.startswith("https://")
+        ):
+            return translated
         if is_remote_url(translated):
             raise ValueError(f"Video path is not accessible as a local file: {video_path}")
         return translated
@@ -386,17 +397,42 @@ def _prepare_video_path(video_path: str, config: VideoUnderstandingConfig) -> st
     return video_path
 
 
-def _resolve_video_source(
+def _get_vst_client():
+    from vsa_agent.integrations.vst_client import VSTClient
+
+    return VSTClient(external_url="http://localhost:30888")
+
+
+async def _resolve_video_source(
     video_path: str,
     sensor_id: str | None,
     source_type: str,
     config: VideoUnderstandingConfig,
+    *,
+    start_timestamp: str | int | float | None = None,
+    end_timestamp: str | int | float | None = None,
 ) -> str:
     """Resolve the concrete analyzable source from explicit path or sensor mapping."""
+    from vsa_agent.integrations.vst_client import VSTClientError
+
     if video_path:
         return video_path
 
     if source_type == "rtsp":
+        if sensor_id:
+            try:
+                vst_client = _get_vst_client()
+                clip = await vst_client.get_video_clip(
+                    sensor_id,
+                    "" if start_timestamp is None else str(start_timestamp),
+                    "" if end_timestamp is None else str(end_timestamp),
+                )
+                if clip.local_path:
+                    return clip.local_path
+                if clip.clip_url:
+                    return clip.clip_url
+            except VSTClientError:
+                pass
         if sensor_id and sensor_id in config.vst_sensor_source_map:
             return config.vst_sensor_source_map[sensor_id]
         raise ValueError(f"No VST source mapping for sensor_id '{sensor_id}'")
@@ -429,13 +465,24 @@ async def analyze_video_segment(
         query,
         context={"source_type": source_type},
     )
-    source_candidate = _resolve_video_source(video_path or "", sensor_id, source_type, tool_config)
-    resolved_video_path = _prepare_video_path(source_candidate, tool_config) if source_candidate else None
+    source_candidate = await _resolve_video_source(
+        video_path or "",
+        sensor_id,
+        source_type,
+        tool_config,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    resolved_video_path = (
+        _prepare_video_path(source_candidate, tool_config, source_type=source_type)
+        if source_candidate
+        else None
+    )
 
     if frames is None:
         if not resolved_video_path:
             raise ValueError("Either 'video_path' or 'frames' must be provided")
-        if not os.path.exists(resolved_video_path):
+        if source_type != "rtsp" and not os.path.exists(resolved_video_path):
             raise ValueError(f"Video file not found: {resolved_video_path}")
         start_offset = _timestamp_to_seconds(start_timestamp)
         end_offset = _timestamp_to_seconds(end_timestamp)
@@ -572,11 +619,32 @@ async def video_understanding_tool(
         )
         return result.summary_text
 
-    if not video_path:
+    source_candidate = await _resolve_video_source(
+        video_path,
+        sensor_id,
+        source_type,
+        tool_config,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    if not source_candidate:
         raise ValueError("Either 'video_path' or 'frames' must be provided")
 
-    resolved_video_path = _prepare_video_path(video_path, tool_config)
-    if not os.path.exists(resolved_video_path):
+    resolved_video_path = _prepare_video_path(source_candidate, tool_config, source_type=source_type)
+    if source_type == "rtsp" and resolved_video_path.startswith("rtsp://"):
+        result = await analyze_video_segment(
+            video_path=resolved_video_path,
+            query=query,
+            model_adapter=model_adapter,
+            config=tool_config,
+            source_type=source_type,
+            sensor_id=sensor_id,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        return result.summary_text
+
+    if source_type != "rtsp" and not os.path.exists(resolved_video_path):
         raise ValueError(f"Video file not found: {resolved_video_path}")
 
     _require_cv2()

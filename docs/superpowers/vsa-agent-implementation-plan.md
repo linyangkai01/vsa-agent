@@ -151,7 +151,7 @@
 ### Task 2.1: 完善 video_understanding.py
 - [x] 对齐 NVIDIA VideoUnderstandingConfig (max_fps, min_pixels, reasoning, filter_thinking)
 - [x] 支持 ISO 和 offset 两种时间格式
-- [ ] 支持 VST/MinIO 两种视频源
+- [x] 支持 VST/MinIO 两种视频源
 - [x] 实现 URL 翻译
 - [x] 实现 VLM 重试逻辑
 

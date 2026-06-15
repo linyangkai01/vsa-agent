@@ -134,42 +134,116 @@ class TestPrepareVideoPath:
         )
         assert resolved == "C:/mounted-video-store/bucket/path/video.mp4"
 
+    def test_allows_http_clip_for_rtsp_source(self, monkeypatch):
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding.translate_url",
+            lambda url, target_base=None: "http://localhost:30888/vst/api/v1/clip.mp4",
+        )
+        resolved = _prepare_video_path(
+            "http://localhost:30888/vst/api/v1/clip.mp4",
+            VideoUnderstandingConfig(source_mode="translated"),
+            source_type="rtsp",
+        )
+        assert resolved == "http://localhost:30888/vst/api/v1/clip.mp4"
+
 
 class TestResolveVideoSource:
-    def test_prefers_explicit_video_path(self):
+    @pytest.mark.asyncio
+    async def test_prefers_explicit_video_path(self):
         from vsa_agent.tools.video_understanding import _resolve_video_source
 
         config = VideoUnderstandingConfig()
-        resolved = _resolve_video_source(
+        resolved = await _resolve_video_source(
             video_path="C:/videos/a.mp4",
             sensor_id="camera-1",
             source_type="rtsp",
             config=config,
+            start_timestamp="PT5S",
+            end_timestamp="PT10S",
         )
         assert resolved == "C:/videos/a.mp4"
 
-    def test_resolves_rtsp_sensor_from_config_map(self):
+    @pytest.mark.asyncio
+    async def test_resolves_rtsp_sensor_from_config_map(self):
         from vsa_agent.tools.video_understanding import _resolve_video_source
 
         config = VideoUnderstandingConfig(vst_sensor_source_map={"camera-1": "rtsp://camera-1/stream"})
-        resolved = _resolve_video_source(
+        resolved = await _resolve_video_source(
             video_path="",
             sensor_id="camera-1",
             source_type="rtsp",
             config=config,
+            start_timestamp="PT5S",
+            end_timestamp="PT10S",
         )
         assert resolved == "rtsp://camera-1/stream"
 
-    def test_rejects_missing_rtsp_sensor_mapping(self):
+    @pytest.mark.asyncio
+    async def test_resolves_rtsp_sensor_via_vst_client_first(self, monkeypatch):
+        from vsa_agent.tools.video_understanding import _resolve_video_source
+
+        class FakeClient:
+            async def get_video_clip(self, sensor_id, start_timestamp, end_timestamp):
+                return type(
+                    "ClipResult",
+                    (),
+                    {"clip_url": "rtsp://camera-1/from-vst", "local_path": None},
+                )()
+
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding._get_vst_client",
+            lambda: FakeClient(),
+        )
+
+        config = VideoUnderstandingConfig(vst_sensor_source_map={"camera-1": "rtsp://camera-1/from-map"})
+        resolved = await _resolve_video_source(
+            video_path="",
+            sensor_id="camera-1",
+            source_type="rtsp",
+            config=config,
+            start_timestamp="PT5S",
+            end_timestamp="PT10S",
+        )
+        assert resolved == "rtsp://camera-1/from-vst"
+
+    @pytest.mark.asyncio
+    async def test_resolves_rtsp_sensor_falls_back_to_map_when_vst_fails(self, monkeypatch):
+        from vsa_agent.tools.video_understanding import _resolve_video_source
+        from vsa_agent.integrations.vst_client import VSTClientError
+
+        class FakeClient:
+            async def get_video_clip(self, sensor_id, start_timestamp, end_timestamp):
+                raise VSTClientError("vst unavailable")
+
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding._get_vst_client",
+            lambda: FakeClient(),
+        )
+
+        config = VideoUnderstandingConfig(vst_sensor_source_map={"camera-1": "rtsp://camera-1/from-map"})
+        resolved = await _resolve_video_source(
+            video_path="",
+            sensor_id="camera-1",
+            source_type="rtsp",
+            config=config,
+            start_timestamp="PT5S",
+            end_timestamp="PT10S",
+        )
+        assert resolved == "rtsp://camera-1/from-map"
+
+    @pytest.mark.asyncio
+    async def test_rejects_missing_rtsp_sensor_mapping(self):
         from vsa_agent.tools.video_understanding import _resolve_video_source
 
         config = VideoUnderstandingConfig(vst_sensor_source_map={})
         with pytest.raises(ValueError, match="No VST source mapping"):
-            _resolve_video_source(
+            await _resolve_video_source(
                 video_path="",
                 sensor_id="camera-unknown",
                 source_type="rtsp",
                 config=config,
+                start_timestamp="PT5S",
+                end_timestamp="PT10S",
             )
 
 class TestParseThinkingFromContent:
@@ -382,4 +456,59 @@ class TestVideoUnderstandingToolCompatibility:
         monkeypatch.setattr("vsa_agent.tools.video_understanding.summarize_understanding_result", fake_summarize_understanding_result)
 
         result = await video_understanding_tool(video_path="video.mp4", query="what happened")
+        assert result == "phase2 long video summary"
+
+    @pytest.mark.asyncio
+    async def test_rtsp_local_clip_keeps_long_video_pipeline(self, monkeypatch):
+        async def fake_analyze_long_video(**kwargs):
+            return UnderstandingResult(
+                query=kwargs["query"],
+                source_type=kwargs["source_type"],
+                summary_text="long video structured result",
+                chunks=[],
+                events=[],
+            )
+
+        async def fake_summarize_understanding_result(result, query, model_adapter=None):
+            return type(
+                "Summary",
+                (),
+                {
+                    "text_output": "phase2 long video summary",
+                    "structured_output": result,
+                },
+            )()
+
+        class FakeClient:
+            async def get_video_clip(self, sensor_id, start_timestamp, end_timestamp):
+                return type("ClipResult", (), {"clip_url": None, "local_path": "C:/tmp/clip.mp4"})()
+
+        class FakeCap:
+            def isOpened(self):
+                return True
+
+            def get(self, prop):
+                if prop == 5:
+                    return 30.0
+                if prop == 7:
+                    return 3000
+                return 0
+
+            def release(self):
+                return None
+
+        monkeypatch.setattr("vsa_agent.tools.video_understanding._get_vst_client", lambda: FakeClient())
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.cv2.VideoCapture", lambda _: FakeCap())
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_long_video", fake_analyze_long_video)
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.summarize_understanding_result", fake_summarize_understanding_result)
+
+        result = await video_understanding_tool(
+            video_path="",
+            query="what happened",
+            source_type="rtsp",
+            sensor_id="camera-1",
+            start_timestamp="PT5S",
+            end_timestamp="PT10S",
+        )
         assert result == "phase2 long video summary"
