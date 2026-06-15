@@ -10,6 +10,8 @@ import vsa_agent.tools.find_video_tool  # noqa: F401
 import vsa_agent.tools.frame_extract  # noqa: F401
 import vsa_agent.tools.prompt_gen  # noqa: F401
 import vsa_agent.tools.video_understanding  # noqa: F401
+import vsa_agent.tools.lvs_video_understanding  # noqa: F401
+import vsa_agent.tools.vss_summarize  # noqa: F401
 
 # Search tools
 import vsa_agent.tools.search  # noqa: F401

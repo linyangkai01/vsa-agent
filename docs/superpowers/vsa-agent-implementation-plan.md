@@ -130,10 +130,10 @@
 - [x] 安装 elasticsearch 依赖
 
 ### Task 1.2: 实现 attribute_search.py (真实 ES 查询)
-- [x] 实现 search_single_attribute() 行为嵌入搜索
-- [ ] 实现 _perform_frame_lookups() 帧级查找
-- [ ] 实现 _fuse_multi_attribute() / _append_multi_attribute()
-- [ ] 实现 _deduplicate_by_object()
+- [x] 实现 search_single_attribute() 最小 ES 属性搜索
+- [x] 实现 _perform_frame_lookups() 帧级查找
+- [x] 实现 _fuse_multi_attribute() / _append_multi_attribute()
+- [x] 实现 _deduplicate_by_object()
 
 ### Task 1.3: 完善 search.py 融合算法
 - [x] 实现置信度阈值检查 (embed_confidence_threshold)
@@ -149,23 +149,23 @@
 **目标**: 完善 video_understanding 工具
 
 ### Task 2.1: 完善 video_understanding.py
-- [ ] 对齐 NVIDIA VideoUnderstandingConfig (max_fps, min_pixels, reasoning, filter_thinking)
-- [ ] 支持 ISO 和 offset 两种时间格式
+- [x] 对齐 NVIDIA VideoUnderstandingConfig (max_fps, min_pixels, reasoning, filter_thinking)
+- [x] 支持 ISO 和 offset 两种时间格式
 - [ ] 支持 VST/MinIO 两种视频源
-- [ ] 实现 URL 翻译
-- [ ] 实现 VLM 重试逻辑
+- [x] 实现 URL 翻译
+- [x] 实现 VLM 重试逻辑
 
 ### Task 2.2: 实现 lvs_video_understanding.py
-- [ ] 长视频分块处理 (chunk_duration / num_frames_per_chunk)
-- [ ] 场景/事件配置
-- [ ] 结构化输出
+- [x] 长视频分块处理 (chunk_duration / num_frames_per_chunk)
+- [x] 场景/事件配置
+- [x] 结构化输出
 
 ### Task 2.3: 实现 vss_summarize.py
-- [ ] Caption summarization
-- [ ] 时间合并
+- [x] Caption summarization
+- [x] 时间合并
 
 ### Task 2.4: 实现 prompt_gen.py
-- [ ] 根据用户意图动态生成 VLM 子 prompt
+- [x] 根据用户意图动态生成 VLM 子 prompt
 
 ---
 

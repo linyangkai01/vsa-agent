@@ -31,12 +31,16 @@ def translate_url(url: str, target_base: str | None = None) -> str:
     if parsed.scheme == "file":
         path = parsed.path
         if target_base:
-            return os.path.join(target_base, os.path.basename(path))
+            return os.path.join(target_base, os.path.basename(path)).replace("\\", "/")
         return path
 
     if parsed.scheme in ("", "c:", "d:"):
         # Already a local path
         return url
+
+    if parsed.scheme in ("s3", "minio") and target_base:
+        relative_parts = [part for part in [parsed.netloc, *parsed.path.lstrip("/").split("/")] if part]
+        return "/".join([target_base.rstrip("/\\")] + relative_parts)
 
     # For other schemes, return as-is (caller handles)
     return url
@@ -51,5 +55,7 @@ def is_remote_url(url: str) -> bool:
     Returns:
         True if the URL is remote (http, https, s3, etc.).
     """
+    if len(url) >= 3 and url[1:3] in (":\\", ":/") and url[0].isalpha():
+        return False
     parsed = urlparse(url)
     return parsed.scheme not in ("", "file", None)

@@ -56,12 +56,37 @@ class ServerConfig(BaseModel):
     port: int = 8000
 
 
+class VideoUnderstandingConfig(BaseModel):
+    """Configuration for short-video understanding."""
+
+    max_fps: float = 2.0
+    min_pixels: int = 224 * 224
+    max_pixels: int = 1280 * 720
+    reasoning_effort: str = "medium"
+    filter_thinking: bool = True
+    max_retries: int = 3
+    time_format: Literal["iso", "offset"] = "iso"
+    source_mode: Literal["local", "translated"] = "local"
+    translated_base_dir: str | None = None
+
+
+class LVSVideoUnderstandingConfig(BaseModel):
+    """Configuration for long-video understanding orchestration."""
+
+    chunk_duration_sec: int = 30
+    max_frames_per_chunk: int = 12
+    max_chunks: int | None = None
+    merge_adjacent_events: bool = True
+
+
 class AppConfig(BaseModel):
     model: ModelConfig = ModelConfig()
     tools: ToolsConfig = ToolsConfig()
     agent: AgentConfig = AgentConfig()
     server: ServerConfig = ServerConfig()
     prompts: PromptsConfig = PromptsConfig()
+    video_understanding: VideoUnderstandingConfig = VideoUnderstandingConfig()
+    lvs_video_understanding: LVSVideoUnderstandingConfig = LVSVideoUnderstandingConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path = "config.yaml") -> "AppConfig":
