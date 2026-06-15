@@ -386,6 +386,24 @@ def _prepare_video_path(video_path: str, config: VideoUnderstandingConfig) -> st
     return video_path
 
 
+def _resolve_video_source(
+    video_path: str,
+    sensor_id: str | None,
+    source_type: str,
+    config: VideoUnderstandingConfig,
+) -> str:
+    """Resolve the concrete analyzable source from explicit path or sensor mapping."""
+    if video_path:
+        return video_path
+
+    if source_type == "rtsp":
+        if sensor_id and sensor_id in config.vst_sensor_source_map:
+            return config.vst_sensor_source_map[sensor_id]
+        raise ValueError(f"No VST source mapping for sensor_id '{sensor_id}'")
+
+    return video_path
+
+
 async def generate_understanding_prompt(*args, **kwargs):
     """Lazy wrapper to avoid hard coupling to prompt_gen import paths in tests."""
     from vsa_agent.tools.prompt_gen import generate_understanding_prompt as _generate_prompt
@@ -411,7 +429,8 @@ async def analyze_video_segment(
         query,
         context={"source_type": source_type},
     )
-    resolved_video_path = _prepare_video_path(video_path or "", tool_config) if video_path else None
+    source_candidate = _resolve_video_source(video_path or "", sensor_id, source_type, tool_config)
+    resolved_video_path = _prepare_video_path(source_candidate, tool_config) if source_candidate else None
 
     if frames is None:
         if not resolved_video_path:

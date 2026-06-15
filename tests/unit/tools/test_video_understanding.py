@@ -23,12 +23,14 @@ class TestVideoUnderstandingConfig:
         assert cfg.time_format == "iso"
         assert cfg.source_mode == "local"
         assert cfg.translated_base_dir is None
+        assert cfg.vst_sensor_source_map == {}
 
     def test_loads_from_app_config(self):
         cfg = AppConfig.from_yaml("config_test.yaml")
         assert cfg.video_understanding.time_format == "iso"
         assert cfg.video_understanding.source_mode == "local"
         assert cfg.video_understanding.translated_base_dir == "C:/mounted-video-store"
+        assert cfg.video_understanding.vst_sensor_source_map["camera-1"] == "rtsp://camera-1/stream"
 
 class TestBuildVlmMessages:
     def test_builds_messages(self):
@@ -131,6 +133,44 @@ class TestPrepareVideoPath:
             VideoUnderstandingConfig(source_mode="translated", translated_base_dir="C:/mounted-video-store"),
         )
         assert resolved == "C:/mounted-video-store/bucket/path/video.mp4"
+
+
+class TestResolveVideoSource:
+    def test_prefers_explicit_video_path(self):
+        from vsa_agent.tools.video_understanding import _resolve_video_source
+
+        config = VideoUnderstandingConfig()
+        resolved = _resolve_video_source(
+            video_path="C:/videos/a.mp4",
+            sensor_id="camera-1",
+            source_type="rtsp",
+            config=config,
+        )
+        assert resolved == "C:/videos/a.mp4"
+
+    def test_resolves_rtsp_sensor_from_config_map(self):
+        from vsa_agent.tools.video_understanding import _resolve_video_source
+
+        config = VideoUnderstandingConfig(vst_sensor_source_map={"camera-1": "rtsp://camera-1/stream"})
+        resolved = _resolve_video_source(
+            video_path="",
+            sensor_id="camera-1",
+            source_type="rtsp",
+            config=config,
+        )
+        assert resolved == "rtsp://camera-1/stream"
+
+    def test_rejects_missing_rtsp_sensor_mapping(self):
+        from vsa_agent.tools.video_understanding import _resolve_video_source
+
+        config = VideoUnderstandingConfig(vst_sensor_source_map={})
+        with pytest.raises(ValueError, match="No VST source mapping"):
+            _resolve_video_source(
+                video_path="",
+                sensor_id="camera-unknown",
+                source_type="rtsp",
+                config=config,
+            )
 
 class TestParseThinkingFromContent:
     def test_no_thinking(self):

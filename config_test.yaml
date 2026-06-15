@@ -46,6 +46,8 @@ video_understanding:
   time_format: iso
   source_mode: local
   translated_base_dir: "C:/mounted-video-store"
+  vst_sensor_source_map:
+    camera-1: "rtsp://camera-1/stream"
 
 lvs_video_understanding:
   chunk_duration_sec: 30

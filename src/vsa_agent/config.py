@@ -68,6 +68,7 @@ class VideoUnderstandingConfig(BaseModel):
     time_format: Literal["iso", "offset"] = "iso"
     source_mode: Literal["local", "translated"] = "local"
     translated_base_dir: str | None = None
+    vst_sensor_source_map: dict[str, str] = Field(default_factory=dict)
 
 
 class LVSVideoUnderstandingConfig(BaseModel):
