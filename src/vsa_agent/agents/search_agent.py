@@ -13,11 +13,13 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from vsa_agent.registry import register_tool
+from vsa_agent.tools.incidents import incidents_to_tagged_json
 from vsa_agent.tools.search import DecomposedQuery
 from vsa_agent.tools.search import SearchOutput
 from vsa_agent.tools.search import SearchResult
 from vsa_agent.tools.search import _resolve_search_callable
 from vsa_agent.tools.search import decompose_query
+from vsa_agent.tools.incidents import search_output_to_incidents
 
 logger = logging.getLogger(__name__)
 
@@ -85,33 +87,8 @@ def _to_search_results(raw: list) -> list:
 
 def _to_incidents_output(search_output) -> str:
     """Format SearchOutput as incidents JSON. Mirrors NVIDIA _to_incidents_output."""
-    import json
-    incidents = []
-    for result in (search_output.data if hasattr(search_output, "data") else search_output):
-        try:
-            name = getattr(result, "video_name", "unknown")
-            desc = getattr(result, "description", "")
-            sim = getattr(result, "similarity", 0.0)
-            start = getattr(result, "start_time", "")
-            end = getattr(result, "end_time", "")
-            incident = {
-                "Alert Details": {
-                    "Alert Triggered": name,
-                    "video_description": desc,
-                    "similarity_score": round(sim, 2),
-                    "description": desc,
-                },
-                "Clip Information": {
-                    "Timestamp": start,
-                    "video_id": name,
-                    "start_time": start,
-                    "end_time": end,
-                },
-            }
-            incidents.append(incident)
-        except Exception:
-            continue
-    return "<incidents>\n" + json.dumps({"incidents": incidents}, indent=2) + "\n</incidents>"
+    incidents = search_output_to_incidents(search_output)
+    return incidents_to_tagged_json(incidents)
 
 
 

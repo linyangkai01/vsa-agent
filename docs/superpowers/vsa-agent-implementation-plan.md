@@ -2226,9 +2226,550 @@ git commit --allow-empty -m "test: verify review fixes with full regression"
 
 ## Phase 4 — 剩余离线工具 (P2)
 
-**目标**: 补齐 incidents, geo, captions 等工具
+**目标**: 补齐 `incidents`、`video_caption*`、`geolocation` 这批离线工具，并优先把最贴近主业务流的 `incidents.py` 做成后续可复用的标准化中间层。
 
-### Task 4.1-4.8: 实现 incidents.py / geolocation.py / video_caption.py 等
+**推荐执行顺序**:
+1. `incidents.py`
+2. `video_caption.py`
+3. `video_detailed_caption.py` / `video_skim_caption.py`
+4. `geolocation.py`
+5. Phase 4 验收与全量回归
+
+**Architecture**: Phase 4 不引入新的在线依赖，不新接 RTSP/VST 下载协议，也不重复实现已有的视频理解主链。`incidents.py` 负责把 `SearchOutput` / `UnderstandingResult` 统一转换为标准 `Incident` 列表；`video_caption*` 作为对原版 NVIDIA 工具的兼容层，内部复用 `video_understanding.py` 与 `lvs_video_understanding.py`；`geolocation.py` 保持纯离线、纯结构化，基于已有 `Location` / `Place` / `Incident` 模型做补全与摘要。
+
+**Files Overview**:
+- Create: `src/vsa_agent/tools/incidents.py`
+  - 标准化 `SearchOutput` / `UnderstandingResult` 到 `video_analytics.nvschema.Incident`
+- Create: `src/vsa_agent/tools/video_caption.py`
+  - 原版 `video_caption` 兼容入口，内部复用现有视频理解链
+- Create: `src/vsa_agent/tools/video_detailed_caption.py`
+  - 详细描述包装器
+- Create: `src/vsa_agent/tools/video_skim_caption.py`
+  - 快速概述包装器
+- Create: `src/vsa_agent/tools/geolocation.py`
+  - 位置补全、区域统计、文本摘要
+- Modify: `src/vsa_agent/agents/search_agent.py`
+  - 复用 `incidents.py` 输出，不再把 incidents JSON 拼装逻辑埋在 agent 私有函数里
+- Modify: `src/vsa_agent/tools/__init__.py`
+  - 导出新增工具模块
+- Create: `tests/unit/tools/test_incidents.py`
+- Create: `tests/unit/tools/test_video_caption.py`
+- Create: `tests/unit/tools/test_video_detailed_caption.py`
+- Create: `tests/unit/tools/test_video_skim_caption.py`
+- Create: `tests/unit/tools/test_geolocation.py`
+- Create: `tests/acceptance/test_phase4_offline_tools_flow.py`
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+  - 持续记录 Phase 4 进度与回归结果
+
+### Task 4.1: 实现 `incidents.py` 的标准化数据转换层
+
+**Files:**
+- Create: `src/vsa_agent/tools/incidents.py`
+- Test: `tests/unit/tools/test_incidents.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `UnderstandingResult -> list[Incident]` 行为**
+
+```python
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, UnderstandingResult
+
+
+def test_understanding_to_incidents_maps_events_to_nvschema():
+    from vsa_agent.tools.incidents import understanding_to_incidents
+
+    event = DetectedEvent(
+        event_id="event-1",
+        label="intrusion",
+        description="person enters restricted area",
+        start_timestamp="00:00:05",
+        end_timestamp="00:00:12",
+        confidence=0.91,
+        evidence=[EvidenceRef(source_type="video_file", video_path="video.mp4")],
+    )
+    result = UnderstandingResult(
+        query="find intrusion",
+        source_type="video_file",
+        summary_text="person enters restricted area",
+        chunks=[],
+        events=[event],
+    )
+
+    incidents = understanding_to_incidents(result)
+
+    assert len(incidents) == 1
+    assert incidents[0].category == "intrusion"
+    assert incidents[0].description == "person enters restricted area"
+    assert incidents[0].confidence == 0.91
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_incidents.py::test_understanding_to_incidents_maps_events_to_nvschema -v`
+
+Expected: `ImportError` or `AttributeError`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+from vsa_agent.video_analytics.nvschema import Incident
+
+
+def understanding_to_incidents(result: UnderstandingResult) -> list[Incident]:
+    incidents: list[Incident] = []
+    for index, event in enumerate(result.events, start=1):
+        incidents.append(
+            Incident(
+                id=event.event_id or f"incident-{index}",
+                description=event.description,
+                category=event.label,
+                confidence=event.confidence,
+                metadata={
+                    "query": result.query,
+                    "source_type": result.source_type,
+                    "start_timestamp": event.start_timestamp,
+                    "end_timestamp": event.end_timestamp,
+                },
+            )
+        )
+    return incidents
+```
+
+- [ ] **Step 4: 继续补 `SearchOutput -> list[Incident]` 与空输入边界测试**
+
+```python
+def test_search_output_to_incidents_uses_clip_time_and_description():
+    from vsa_agent.tools.incidents import search_output_to_incidents
+    from vsa_agent.tools.search import SearchOutput, SearchResult
+
+    output = SearchOutput(
+        data=[
+            SearchResult(
+                video_name="camera-1",
+                description="forklift enters loading zone",
+                start_time="2025-01-01T10:00:00Z",
+                end_time="2025-01-01T10:00:10Z",
+                sensor_id="camera-1",
+                similarity=0.88,
+            )
+        ]
+    )
+
+    incidents = search_output_to_incidents(output)
+
+    assert incidents[0].category == "search_hit"
+    assert incidents[0].metadata["start_time"] == "2025-01-01T10:00:00Z"
+```
+
+- [ ] **Step 5: 让 `incidents.py` 补齐序列化输出**
+
+```python
+def incidents_to_tagged_json(incidents: list[Incident]) -> str:
+    payload = {
+        "incidents": [
+            {
+                "id": inc.id,
+                "description": inc.description,
+                "category": inc.category,
+                "severity": inc.severity,
+                "confidence": inc.confidence,
+                "metadata": inc.metadata,
+            }
+            for inc in incidents
+        ]
+    }
+    return "<incidents>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</incidents>"
+```
+
+- [ ] **Step 6: 运行模块测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_incidents.py -v`
+
+Expected: `PASS`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/vsa_agent/tools/incidents.py tests/unit/tools/test_incidents.py
+git commit -m "feat: add incident normalization tool"
+```
+
+### Task 4.2: 让 `search_agent` 复用 `incidents.py`
+
+**Files:**
+- Modify: `src/vsa_agent/agents/search_agent.py`
+- Test: `tests/unit/agents/test_search_agent.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `_to_incidents_output()` 复用共享工具**
+
+```python
+def test_to_incidents_output_delegates_to_incident_serializer(monkeypatch):
+    from vsa_agent.agents.search_agent import _to_incidents_output
+    from vsa_agent.tools.search import SearchOutput
+
+    called = {}
+
+    def fake_search_output_to_incidents(output):
+        called["search_output"] = output
+        return []
+
+    def fake_incidents_to_tagged_json(incidents):
+        called["incidents"] = incidents
+        return "<incidents>\n{\"incidents\": []}\n</incidents>"
+
+    monkeypatch.setattr("vsa_agent.agents.search_agent.search_output_to_incidents", fake_search_output_to_incidents)
+    monkeypatch.setattr("vsa_agent.agents.search_agent.incidents_to_tagged_json", fake_incidents_to_tagged_json)
+
+    text = _to_incidents_output(SearchOutput(data=[]))
+
+    assert text.startswith("<incidents>")
+    assert "search_output" in called
+```
+
+- [ ] **Step 2: 运行红灯测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_search_agent.py::test_to_incidents_output_delegates_to_incident_serializer -v`
+
+Expected: `ImportError` or assertion fail
+
+- [ ] **Step 3: 最小改造 `search_agent.py`**
+
+```python
+from vsa_agent.tools.incidents import incidents_to_tagged_json
+from vsa_agent.tools.incidents import search_output_to_incidents
+
+
+def _to_incidents_output(search_output) -> str:
+    incidents = search_output_to_incidents(search_output)
+    return incidents_to_tagged_json(incidents)
+```
+
+- [ ] **Step 4: 跑 `search_agent` 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_search_agent.py tests/unit/tools/test_incidents.py -v`
+
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/search_agent.py tests/unit/agents/test_search_agent.py src/vsa_agent/tools/incidents.py tests/unit/tools/test_incidents.py
+git commit -m "refactor: reuse incident serializer in search agent"
+```
+
+### Task 4.3: 实现 `video_caption.py` 兼容包装器
+
+**Files:**
+- Create: `src/vsa_agent/tools/video_caption.py`
+- Test: `tests/unit/tools/test_video_caption.py`
+
+- [ ] **Step 1: 写失败测试，锁定短视频/长视频都复用现有主链**
+
+```python
+import pytest
+
+
+@pytest.mark.anyio
+async def test_video_caption_short_path_delegates_to_analyze_video(monkeypatch):
+    from vsa_agent.tools.video_caption import video_caption_tool
+
+    captured = {}
+
+    async def fake_analyze_video(**kwargs):
+        captured.update(kwargs)
+        return type("Result", (), {"summary_text": "short caption", "metadata": {}})()
+
+    monkeypatch.setattr("vsa_agent.tools.video_caption.analyze_video", fake_analyze_video)
+
+    text = await video_caption_tool(video_path="video.mp4", user_prompt="describe")
+
+    assert text == "short caption"
+    assert captured["video_path"] == "video.mp4"
+```
+
+- [ ] **Step 2: 运行红灯测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_caption.py::test_video_caption_short_path_delegates_to_analyze_video -v`
+
+Expected: `ImportError`
+
+- [ ] **Step 3: 最小实现 `VideoCaptionInput` 与工具函数**
+
+```python
+class VideoCaptionInput(BaseModel):
+    video_path: str = ""
+    sensor_id: str = ""
+    user_prompt: str = ""
+    start_timestamp: str = ""
+    end_timestamp: str = ""
+
+
+@register_tool("video_caption", description="Generate caption text for a video or clip.")
+async def video_caption_tool(...):
+    result = await analyze_video(
+        video_path=video_path,
+        query=user_prompt,
+        sensor_id=sensor_id or None,
+        source_type="rtsp" if sensor_id else "video_file",
+        start_timestamp=start_timestamp or None,
+        end_timestamp=end_timestamp or None,
+    )
+    return result.summary_text
+```
+
+- [ ] **Step 4: 补长视频摘要路径测试**
+
+```python
+@pytest.mark.anyio
+async def test_video_caption_long_path_uses_summary_text_from_long_pipeline(monkeypatch):
+    from vsa_agent.tools.video_caption import video_caption_tool
+    from vsa_agent.data_models.understanding import UnderstandingResult
+
+    async def fake_analyze_video(**kwargs):
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="long caption summary",
+            chunks=[],
+            events=[],
+            metadata={"chunk_count": 2},
+        )
+
+    monkeypatch.setattr("vsa_agent.tools.video_caption.analyze_video", fake_analyze_video)
+    text = await video_caption_tool(video_path="video.mp4", user_prompt="describe")
+    assert text == "long caption summary"
+```
+
+- [ ] **Step 5: 跑测试并提交**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_caption.py -v`
+
+```bash
+git add src/vsa_agent/tools/video_caption.py tests/unit/tools/test_video_caption.py
+git commit -m "feat: add video caption compatibility tool"
+```
+
+### Task 4.4: 实现 `video_detailed_caption.py`
+
+**Files:**
+- Create: `src/vsa_agent/tools/video_detailed_caption.py`
+- Test: `tests/unit/tools/test_video_detailed_caption.py`
+
+- [ ] **Step 1: 写失败测试**
+
+```python
+@pytest.mark.anyio
+async def test_detailed_caption_adds_detail_prompt_prefix(monkeypatch):
+    from vsa_agent.tools.video_detailed_caption import video_detailed_caption_tool
+
+    captured = {}
+
+    async def fake_video_caption_tool(**kwargs):
+        captured.update(kwargs)
+        return "detailed caption"
+
+    monkeypatch.setattr("vsa_agent.tools.video_detailed_caption.video_caption_tool", fake_video_caption_tool)
+    text = await video_detailed_caption_tool(video_path="video.mp4", user_prompt="describe")
+
+    assert text == "detailed caption"
+    assert "详细" in captured["user_prompt"]
+```
+
+- [ ] **Step 2: 最小实现**
+
+```python
+async def video_detailed_caption_tool(...):
+    normalized_prompt = f"请详细描述视频内容：{user_prompt}".strip("：")
+    return await video_caption_tool(..., user_prompt=normalized_prompt)
+```
+
+- [ ] **Step 3: 跑测试并提交**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_detailed_caption.py -v`
+
+```bash
+git add src/vsa_agent/tools/video_detailed_caption.py tests/unit/tools/test_video_detailed_caption.py
+git commit -m "feat: add detailed video caption wrapper"
+```
+
+### Task 4.5: 实现 `video_skim_caption.py`
+
+**Files:**
+- Create: `src/vsa_agent/tools/video_skim_caption.py`
+- Test: `tests/unit/tools/test_video_skim_caption.py`
+
+- [ ] **Step 1: 写失败测试**
+
+```python
+@pytest.mark.anyio
+async def test_skim_caption_adds_brief_prompt_prefix(monkeypatch):
+    from vsa_agent.tools.video_skim_caption import video_skim_caption_tool
+
+    captured = {}
+
+    async def fake_video_caption_tool(**kwargs):
+        captured.update(kwargs)
+        return "brief caption"
+
+    monkeypatch.setattr("vsa_agent.tools.video_skim_caption.video_caption_tool", fake_video_caption_tool)
+    text = await video_skim_caption_tool(video_path="video.mp4", user_prompt="describe")
+
+    assert text == "brief caption"
+    assert "简要" in captured["user_prompt"]
+```
+
+- [ ] **Step 2: 最小实现**
+
+```python
+async def video_skim_caption_tool(...):
+    normalized_prompt = f"请简要概述视频内容：{user_prompt}".strip("：")
+    return await video_caption_tool(..., user_prompt=normalized_prompt)
+```
+
+- [ ] **Step 3: 跑测试并提交**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_skim_caption.py -v`
+
+```bash
+git add src/vsa_agent/tools/video_skim_caption.py tests/unit/tools/test_video_skim_caption.py
+git commit -m "feat: add skim video caption wrapper"
+```
+
+### Task 4.6: 实现 `geolocation.py` 的离线位置补全与摘要
+
+**Files:**
+- Create: `src/vsa_agent/tools/geolocation.py`
+- Test: `tests/unit/tools/test_geolocation.py`
+
+- [ ] **Step 1: 写失败测试，锁定缺失 location/place 的补全行为**
+
+```python
+def test_enrich_incidents_with_default_location_and_zone():
+    from vsa_agent.tools.geolocation import enrich_incidents_with_location
+    from vsa_agent.video_analytics.nvschema import Incident
+
+    incidents = [Incident(id="1", description="intrusion", category="intrusion")]
+
+    enriched = enrich_incidents_with_location(
+        incidents,
+        default_location_name="Warehouse A",
+        default_zone="loading_dock",
+    )
+
+    assert enriched[0].location is not None
+    assert enriched[0].location.name == "Warehouse A"
+    assert enriched[0].location.zone == "loading_dock"
+```
+
+- [ ] **Step 2: 最小实现**
+
+```python
+def enrich_incidents_with_location(...):
+    output = []
+    for incident in incidents:
+        if incident.location is None:
+            incident.location = Location(name=default_location_name, zone=default_zone)
+        output.append(incident)
+    return output
+```
+
+- [ ] **Step 3: 补区域统计与文本摘要测试**
+
+```python
+def test_summarize_geolocation_groups_by_zone():
+    from vsa_agent.tools.geolocation import summarize_geolocation
+    ...
+    assert "loading_dock" in summary
+    assert "2" in summary
+```
+
+- [ ] **Step 4: 跑测试并提交**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_geolocation.py -v`
+
+```bash
+git add src/vsa_agent/tools/geolocation.py tests/unit/tools/test_geolocation.py
+git commit -m "feat: add offline geolocation helpers"
+```
+
+### Task 4.7: 补齐 Phase 4 验收流
+
+**Files:**
+- Create: `tests/acceptance/test_phase4_offline_tools_flow.py`
+
+- [ ] **Step 1: 写验收测试，锁定“理解结果 -> incidents -> geolocation”主链**
+
+```python
+@pytest.mark.anyio
+async def test_phase4_offline_flow_from_understanding_to_geolocation_summary():
+    from vsa_agent.tools.geolocation import summarize_geolocation
+    from vsa_agent.tools.incidents import understanding_to_incidents
+    ...
+    incidents = understanding_to_incidents(result)
+    summary = summarize_geolocation(incidents)
+    assert "Warehouse A" in summary
+```
+
+- [ ] **Step 2: 写验收测试，锁定 `video_caption*` 包装器兼容行为**
+
+```python
+@pytest.mark.anyio
+async def test_phase4_caption_wrappers_share_same_core_path(monkeypatch):
+    ...
+    assert detailed_text == "caption"
+    assert skim_text == "caption"
+```
+
+- [ ] **Step 3: 跑 Phase 4 验收测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/acceptance/test_phase4_offline_tools_flow.py -v`
+
+Expected: `PASS`
+
+### Task 4.8: 回归、文档状态更新、提交
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 跑相关模块回归**
+
+Run:
+
+```powershell
+C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest `
+  tests/unit/tools/test_incidents.py `
+  tests/unit/tools/test_video_caption.py `
+  tests/unit/tools/test_video_detailed_caption.py `
+  tests/unit/tools/test_video_skim_caption.py `
+  tests/unit/tools/test_geolocation.py `
+  tests/unit/agents/test_search_agent.py `
+  tests/acceptance/test_phase4_offline_tools_flow.py -q
+```
+
+Expected: `PASS`
+
+- [ ] **Step 2: 跑全量测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests -q`
+
+Expected: `PASS`
+
+- [ ] **Step 3: 更新总计划文档状态**
+
+```markdown
+### 当前执行状态（YYYY-MM-DD）
+- [x] Task 4.1 已完成：incidents 标准化层已接通
+- [x] Task 4.2 已完成：search_agent incidents 输出已复用共享工具
+- [x] Task 4.3 已完成：`video_caption.py` 兼容包装器已接通
+- [x] Task 4.4-4.6 已完成：detailed/skim caption 与 geolocation 已实现
+- [x] Task 4.7 已完成：Phase 4 验收流已补齐
+- [x] Task 4.8 已完成：全量回归已通过（303 passed）
+```
+
+- [ ] **Step 4: 最终提交**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md src/vsa_agent/tools tests/unit tests/acceptance
+git commit -m "feat: complete phase4 offline tools"
+```
 
 ---
 
