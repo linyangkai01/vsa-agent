@@ -427,6 +427,7 @@ async def _resolve_video_source(
 ) -> str:
     """Resolve the concrete analyzable source from explicit path or sensor mapping."""
     from vsa_agent.integrations.vst_client import VSTClientError
+    has_time_window = bool(str(start_timestamp or "").strip() or str(end_timestamp or "").strip())
 
     if video_path:
         return video_path
@@ -445,7 +446,8 @@ async def _resolve_video_source(
                 if clip.clip_url:
                     return clip.clip_url
             except VSTClientError:
-                pass
+                if has_time_window:
+                    raise
         if sensor_id and sensor_id in config.vst_sensor_source_map:
             return config.vst_sensor_source_map[sensor_id]
         raise ValueError(f"No VST source mapping for sensor_id '{sensor_id}'")

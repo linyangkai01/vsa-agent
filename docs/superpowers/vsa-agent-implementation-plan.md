@@ -2775,7 +2775,342 @@ git commit -m "feat: complete phase4 offline tools"
 
 ## Phase 5 — 在线视频 / RTSP / VST (P3)
 
-**目标**: RTSP stream API, VST 服务集成, video_delete API
+**目标**: 补齐在线视频入口层，先建立 RTSP stream API，再强化 VST 服务集成，最后补 `video_delete` API，使在线视频场景有完整的请求入口、错误语义和资源操作面。
+
+**推荐执行顺序**:
+1. `api/rtsp_stream_api.py`
+2. `api/routes.py` 挂载 RTSP 路由与主链验收
+3. `integrations/vst_client.py` 在线语义强化
+4. `api/video_delete.py`
+5. Phase 5 验收与全量回归
+
+**Architecture**: Phase 5 继续复用现有 `video_understanding.py` 作为统一在线视频理解主链，不额外分叉一套 RTSP 逻辑。API 层只负责请求校验、调用主链和映射错误；VST 仍由 `integrations/vst_client.py` 作为唯一外部系统边界；删除接口先做最小安全版本，只定义清晰契约和 stub 响应，不提前引入真实对象存储删除协议。
+
+**Files Overview**:
+- Create: `src/vsa_agent/api/rtsp_stream_api.py`
+  - RTSP 在线分析入口
+- Modify: `src/vsa_agent/api/routes.py`
+  - 把 RTSP API 挂到现有 FastAPI app
+- Modify: `src/vsa_agent/integrations/vst_client.py`
+  - 在线语义补强、错误映射收紧
+- Create: `src/vsa_agent/api/video_delete.py`
+  - 最小可用删除接口
+- Create: `tests/unit/api/test_rtsp_stream_api.py`
+- Modify: `tests/unit/api/test_routes.py`
+- Modify: `tests/unit/integrations/test_vst_client.py`
+- Create: `tests/unit/api/test_video_delete.py`
+- Create: `tests/acceptance/test_phase5_online_flow.py`
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+  - 持续记录 Phase 5 进度
+
+### Task 5.1: 实现 `RTSP Stream API` 契约与主链接入
+
+**Files:**
+- Create: `src/vsa_agent/api/rtsp_stream_api.py`
+- Test: `tests/unit/api/test_rtsp_stream_api.py`
+
+- [x] **Step 1: 写失败测试，锁定 RTSP 请求契约**
+
+```python
+import pytest
+
+
+@pytest.mark.anyio
+async def test_rtsp_stream_api_uses_rtsp_source_type(monkeypatch):
+    from vsa_agent.api.rtsp_stream_api import analyze_rtsp_stream
+
+    captured = {}
+
+    async def fake_analyze_video(**kwargs):
+        captured.update(kwargs)
+        return type("Result", (), {"summary_text": "rtsp summary", "metadata": {}})()
+
+    monkeypatch.setattr("vsa_agent.api.rtsp_stream_api.analyze_video", fake_analyze_video)
+
+    payload = {
+        "sensor_id": "camera-1",
+        "query": "describe stream",
+        "start_timestamp": "PT5S",
+        "end_timestamp": "PT10S",
+    }
+    result = await analyze_rtsp_stream(**payload)
+
+    assert result["summary_text"] == "rtsp summary"
+    assert captured["sensor_id"] == "camera-1"
+    assert captured["source_type"] == "rtsp"
+```
+
+- [x] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/api/test_rtsp_stream_api.py::test_rtsp_stream_api_uses_rtsp_source_type -v`
+
+Expected: `ModuleNotFoundError`
+
+- [x] **Step 3: 写最小实现**
+
+```python
+class RTSPStreamRequest(BaseModel):
+    sensor_id: str
+    query: str
+    start_timestamp: str | None = None
+    end_timestamp: str | None = None
+
+
+async def analyze_rtsp_stream(
+    sensor_id: str,
+    query: str,
+    start_timestamp: str | None = None,
+    end_timestamp: str | None = None,
+) -> dict[str, Any]:
+    result = await analyze_video(
+        video_path="",
+        query=query,
+        source_type="rtsp",
+        sensor_id=sensor_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    return {
+        "sensor_id": sensor_id,
+        "summary_text": result.summary_text,
+        "metadata": result.metadata,
+    }
+```
+
+- [x] **Step 4: 补时间窗错误语义测试**
+
+```python
+@pytest.mark.anyio
+async def test_rtsp_stream_api_surfaces_time_window_clip_errors(monkeypatch):
+    from vsa_agent.api.rtsp_stream_api import analyze_rtsp_stream
+    from vsa_agent.integrations.vst_client import VSTClientError
+
+    async def fake_analyze_video(**kwargs):
+        raise VSTClientError("clip not found")
+
+    monkeypatch.setattr("vsa_agent.api.rtsp_stream_api.analyze_video", fake_analyze_video)
+
+    with pytest.raises(VSTClientError):
+        await analyze_rtsp_stream(
+            sensor_id="camera-1",
+            query="describe stream",
+            start_timestamp="PT5S",
+            end_timestamp="PT10S",
+        )
+```
+
+- [x] **Step 5: 跑模块测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/api/test_rtsp_stream_api.py -v`
+
+Expected: `PASS`
+
+- [x] **Step 6: Commit**
+
+```bash
+git add src/vsa_agent/api/rtsp_stream_api.py tests/unit/api/test_rtsp_stream_api.py
+git commit -m "feat: add rtsp stream api contract"
+```
+
+### Task 5.2: 挂载 RTSP API 到 FastAPI 路由
+
+**Files:**
+- Modify: `src/vsa_agent/api/routes.py`
+- Modify: `tests/unit/api/test_routes.py`
+- Create: `tests/acceptance/test_phase5_online_flow.py`
+
+- [x] **Step 1: 写失败测试，要求主 app 暴露 RTSP endpoint**
+
+```python
+def test_routes_register_rtsp_endpoint():
+    from fastapi.routing import APIRoute
+    from vsa_agent.api.routes import app
+
+    paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
+    assert "/api/rtsp/analyze" in paths
+```
+
+- [x] **Step 2: 写最小路由接线**
+
+```python
+from vsa_agent.api.rtsp_stream_api import router as rtsp_router
+
+app.include_router(rtsp_router)
+```
+
+- [x] **Step 3: 写 acceptance，锁定 API -> 主链路径**
+
+```python
+@pytest.mark.anyio
+async def test_phase5_rtsp_api_flow(monkeypatch):
+    from fastapi.testclient import TestClient
+    from vsa_agent.api.routes import app
+
+    async def fake_analyze_rtsp_stream(**kwargs):
+        return {"sensor_id": kwargs["sensor_id"], "summary_text": "rtsp summary", "metadata": {}}
+
+    monkeypatch.setattr("vsa_agent.api.rtsp_stream_api.analyze_rtsp_stream", fake_analyze_rtsp_stream)
+
+    client = TestClient(app)
+    response = client.post("/api/rtsp/analyze", json={"sensor_id": "camera-1", "query": "describe"})
+
+    assert response.status_code == 200
+    assert response.json()["summary_text"] == "rtsp summary"
+```
+
+- [x] **Step 4: 跑路由与验收测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/api/test_routes.py tests/unit/api/test_rtsp_stream_api.py tests/acceptance/test_phase5_online_flow.py -v`
+
+Expected: `PASS`
+
+- [x] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/api/routes.py src/vsa_agent/api/rtsp_stream_api.py tests/unit/api/test_routes.py tests/unit/api/test_rtsp_stream_api.py tests/acceptance/test_phase5_online_flow.py
+git commit -m "feat: expose rtsp stream api route"
+```
+
+### Task 5.3: 强化 `VSTClient` 在线语义
+
+**Files:**
+- Modify: `src/vsa_agent/integrations/vst_client.py`
+- Modify: `tests/unit/integrations/test_vst_client.py`
+- Modify: `tests/unit/api/test_rtsp_stream_api.py`
+
+- [x] **Step 1: 写失败测试，要求 live fallback 只出现在无时间窗场景**
+
+```python
+@pytest.mark.anyio
+async def test_get_video_clip_without_window_can_fallback_to_stream():
+    ...
+    result = await client.get_video_clip("camera-1", "", "")
+    assert result.clip_url == "rtsp://camera-1/live"
+```
+
+- [x] **Step 2: 写失败测试，要求 clip 错误消息在 API 层可区分**
+
+```python
+@pytest.mark.anyio
+async def test_rtsp_stream_api_preserves_vst_error_message(monkeypatch):
+    ...
+    with pytest.raises(VSTClientError, match="clip"):
+        await analyze_rtsp_stream(...)
+```
+
+- [x] **Step 3: 最小实现**
+
+```python
+# 保持 has_time_window 语义不变
+# 只补充更清晰的错误消息与必要 metadata
+```
+
+- [x] **Step 4: 跑回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/integrations/test_vst_client.py tests/unit/api/test_rtsp_stream_api.py tests/acceptance/test_phase5_online_flow.py -v`
+
+Expected: `PASS`
+
+- [x] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/integrations/vst_client.py tests/unit/integrations/test_vst_client.py tests/unit/api/test_rtsp_stream_api.py tests/acceptance/test_phase5_online_flow.py
+git commit -m "fix: tighten vst online semantics for rtsp api"
+```
+
+### Task 5.4: 实现 `video_delete.py` 最小安全接口
+
+**Files:**
+- Create: `src/vsa_agent/api/video_delete.py`
+- Create: `tests/unit/api/test_video_delete.py`
+- Modify: `src/vsa_agent/api/routes.py`
+
+- [x] **Step 1: 写失败测试，锁定删除契约**
+
+```python
+def test_video_delete_router_imports():
+    from vsa_agent.api.video_delete import router
+    assert router is not None
+```
+
+```python
+@pytest.mark.anyio
+async def test_video_delete_returns_deleted_stub():
+    from vsa_agent.api.video_delete import delete_video
+
+    result = await delete_video(video_id="video-123")
+
+    assert result["video_id"] == "video-123"
+    assert result["deleted"] is True
+```
+
+- [x] **Step 2: 最小实现**
+
+```python
+router = APIRouter(prefix="/api", tags=["video"])
+
+
+@router.delete("/video/{video_id}")
+async def delete_video(video_id: str):
+    return {"video_id": video_id, "deleted": True, "mode": "stub"}
+```
+
+- [x] **Step 3: 接到主 app 并跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/api/test_video_delete.py tests/unit/api/test_routes.py -v`
+
+Expected: `PASS`
+
+- [x] **Step 4: Commit**
+
+```bash
+git add src/vsa_agent/api/video_delete.py src/vsa_agent/api/routes.py tests/unit/api/test_video_delete.py tests/unit/api/test_routes.py
+git commit -m "feat: add video delete api stub"
+```
+
+### Task 5.5: Phase 5 回归、文档状态更新、提交
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [x] **Step 1: 跑 Phase 5 相关回归**
+
+Run:
+
+```powershell
+C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest `
+  tests/unit/api/test_rtsp_stream_api.py `
+  tests/unit/api/test_video_delete.py `
+  tests/unit/api/test_routes.py `
+  tests/unit/integrations/test_vst_client.py `
+  tests/acceptance/test_phase5_online_flow.py -q
+```
+
+Expected: `PASS`
+
+- [x] **Step 2: 跑全量测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests -q`
+
+Expected: `PASS`
+
+- [x] **Step 3: 更新总计划文档状态**
+
+```markdown
+### 当前执行状态（2026-06-16）
+- [x] Task 5.1 已完成：RTSP Stream API 契约已接通
+- [x] Task 5.2 已完成：RTSP FastAPI 路由与在线验收已接通
+- [x] Task 5.3 已完成：VST 在线语义已强化
+- [x] Task 5.4 已完成：video_delete API 已补齐
+- [x] Task 5.5 已完成：全量回归已通过
+```
+
+- [ ] **Step 4: 最终提交**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md src/vsa_agent/api src/vsa_agent/integrations tests/unit/api tests/unit/integrations tests/acceptance
+git commit -m "feat: complete phase5 online video apis"
+```
 
 ---
 

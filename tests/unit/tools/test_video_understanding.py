@@ -174,8 +174,8 @@ class TestResolveVideoSource:
             sensor_id="camera-1",
             source_type="rtsp",
             config=config,
-            start_timestamp="PT5S",
-            end_timestamp="PT10S",
+            start_timestamp="",
+            end_timestamp="",
         )
         assert resolved == "rtsp://camera-1/stream"
 
@@ -208,7 +208,7 @@ class TestResolveVideoSource:
         assert resolved == "rtsp://camera-1/from-vst"
 
     @pytest.mark.asyncio
-    async def test_resolves_rtsp_sensor_falls_back_to_map_when_vst_fails(self, monkeypatch):
+    async def test_resolves_rtsp_sensor_without_window_falls_back_to_map_when_vst_fails(self, monkeypatch):
         from vsa_agent.tools.video_understanding import _resolve_video_source
         from vsa_agent.integrations.vst_client import VSTClientError
 
@@ -227,10 +227,35 @@ class TestResolveVideoSource:
             sensor_id="camera-1",
             source_type="rtsp",
             config=config,
-            start_timestamp="PT5S",
-            end_timestamp="PT10S",
+            start_timestamp="",
+            end_timestamp="",
         )
         assert resolved == "rtsp://camera-1/from-map"
+
+    @pytest.mark.asyncio
+    async def test_resolves_rtsp_sensor_with_window_raises_when_vst_fails(self, monkeypatch):
+        from vsa_agent.tools.video_understanding import _resolve_video_source
+        from vsa_agent.integrations.vst_client import VSTClientError
+
+        class FakeClient:
+            async def get_video_clip(self, sensor_id, start_timestamp, end_timestamp):
+                raise VSTClientError("clip lookup unavailable")
+
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding._get_vst_client",
+            lambda: FakeClient(),
+        )
+
+        config = VideoUnderstandingConfig(vst_sensor_source_map={"camera-1": "rtsp://camera-1/from-map"})
+        with pytest.raises(VSTClientError, match="clip lookup unavailable"):
+            await _resolve_video_source(
+                video_path="",
+                sensor_id="camera-1",
+                source_type="rtsp",
+                config=config,
+                start_timestamp="PT5S",
+                end_timestamp="PT10S",
+            )
 
     @pytest.mark.asyncio
     async def test_rejects_missing_rtsp_sensor_mapping(self):
@@ -243,8 +268,8 @@ class TestResolveVideoSource:
                 sensor_id="camera-unknown",
                 source_type="rtsp",
                 config=config,
-                start_timestamp="PT5S",
-                end_timestamp="PT10S",
+                start_timestamp="",
+                end_timestamp="",
             )
 
 class TestParseThinkingFromContent:
