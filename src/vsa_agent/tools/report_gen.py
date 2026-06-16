@@ -40,6 +40,12 @@ async def _default_template_report_gen(**kwargs):
     return await generate_template_report(**kwargs)
 
 
+async def _default_count_chart_builder_fn(**kwargs):
+    from vsa_agent.tools.fov_counts_with_chart import build_event_count_chart
+
+    return await build_event_count_chart(**kwargs)
+
+
 @register_tool(
     "report_gen",
     description="Generate one markdown report from multiple structured video understanding results.",
@@ -49,12 +55,17 @@ async def generate_multi_report(
     report_sections: list[ReportSectionInput],
     single_report_gen_fn=None,
     template_report_gen_fn=None,
+    count_chart_builder_fn=None,
 ) -> MultiReportGenOutput:
+    """Generate one aggregated markdown report from multiple sections."""
     single_report_gen = single_report_gen_fn or _default_single_report_gen
     template_report_gen = template_report_gen_fn or _default_template_report_gen
+    count_chart_builder = count_chart_builder_fn or _default_count_chart_builder_fn
 
     normalized_sections = []
     summaries = []
+    understanding_results: list[dict[str, Any]] = []
+
     for section in report_sections:
         report = await single_report_gen(
             sensor_id=section.sensor_id,
@@ -70,10 +81,18 @@ async def generate_multi_report(
             }
         )
         summaries.append(report_dict["summary"])
+        understanding_results.append(section.understanding_result)
+
+    count_chart = await count_chart_builder(
+        understanding_results=understanding_results,
+    )
+    count_chart_dict = count_chart if isinstance(count_chart, dict) else count_chart.model_dump()
 
     template = await template_report_gen(
         report_title=report_title,
         report_sections=normalized_sections,
+        counts=count_chart_dict["counts"],
+        chart=count_chart_dict["chart"],
     )
     template_dict = template if isinstance(template, dict) else template.model_dump()
 
