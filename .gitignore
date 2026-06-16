@@ -9,5 +9,11 @@ _nvidia-original/
 .conda-env/
 .conda-pkgs/
 .pytest_cache/
-tests/
+.worktrees/
 
+
+# Contains API keys
+config.yaml
+
+logs/
+data/

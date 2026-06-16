@@ -1,0 +1,56 @@
+"""Tests for tools/template_report_gen.py."""
+
+import pytest
+
+
+@pytest.mark.anyio
+async def test_generate_template_report_returns_markdown_with_summary_sections():
+    from vsa_agent.tools.template_report_gen import TemplateReportGenOutput
+    from vsa_agent.tools.template_report_gen import generate_template_report
+
+    result = await generate_template_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[
+            {
+                "section_title": "事件 1 - camera-1",
+                "summary": "person walking near forklift",
+                "markdown_content": "## 摘要\nperson walking near forklift",
+            },
+            {
+                "section_title": "事件 2 - camera-2",
+                "summary": "forklift stops near doorway",
+                "markdown_content": "## 摘要\nforklift stops near doorway",
+            },
+        ],
+    )
+
+    assert isinstance(result, TemplateReportGenOutput)
+    assert result.markdown_content.startswith("# 仓库巡检聚合报告")
+    assert "## 报告摘要" in result.markdown_content
+    assert "## 分事件报告" in result.markdown_content
+    assert result.section_count == 2
+
+
+@pytest.mark.anyio
+async def test_generate_template_report_includes_counts_and_chart_sections():
+    from vsa_agent.tools.template_report_gen import generate_template_report
+
+    result = await generate_template_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[
+            {
+                "section_title": "事件 1 - camera-1",
+                "summary": "person walking near forklift",
+                "markdown_content": "## 摘要\nperson walking near forklift",
+            }
+        ],
+        counts={"walking": 2},
+        chart={
+            "markdown_table": "| 事件类型 | 次数 |\n| --- | --- |\n| walking | 2 |",
+        },
+    )
+
+    assert "## 统计概览" in result.markdown_content
+    assert "- walking: 2" in result.markdown_content
+    assert "## 图表" in result.markdown_content
+    assert "| 事件类型 | 次数 |" in result.markdown_content

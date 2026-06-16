@@ -2,70 +2,64 @@ model:
   mode: dev
   dev:
     provider: openai_compatible
-    base_url: https://api.openai.com/v1
-    llm_model: gpt-4o
-    vlm_model: gpt-4o
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    llm_model: qwen-plus
+    vlm_model: qwen3-vl-plus
+    api_key: DASHSCOPE_API_KEY_PLACEHOLDER
   prod:
     provider: vllm
     base_url: http://localhost:8000/v1
+    api_key: ''
     llm_model: Qwen3-VL-8B-Instruct
     vlm_model: Qwen3-VL-8B-Instruct
 agent:
   max_iterations: 15
-  planning_enabled: true
-  postprocessing_enabled: true
-  log_level: INFO
-  max_history: 10
 tools:
   enabled_modules:
   - vsa_agent.tools.echo_tool
+  - vsa_agent.tools.find_video_tool
   - vsa_agent.tools.frame_extract
   - vsa_agent.tools.video_understanding
+  - vsa_agent.tools.video_report_gen
+  - vsa_agent.tools.template_report_gen
+  - vsa_agent.tools.report_gen
+  - vsa_agent.tools.chart_generator
+  - vsa_agent.tools.fov_counts_with_chart
   - vsa_agent.tools.embed_search
   - vsa_agent.tools.attribute_search
   - vsa_agent.tools.search
   - vsa_agent.agents.search_agent
-  - vsa_agent.agents.summary_agent
   - vsa_agent.agents.critic_agent
+  - vsa_agent.agents.report_agent
+  - vsa_agent.agents.multi_report_agent
 server:
   host: 0.0.0.0
   port: 8000
 prompts:
-  default_system: 'You are an industrial safety video analysis agent.
-
-    Use tools to analyze videos and generate safety reports.
-
-    Respond directly when no tools are needed.
-
-    '
-  safety_routine_inspection: '你是工业安全巡检系统。检查视频中是否存在：
-
-    1. 未佩戴安全帽的人员
-
-    2. 未穿防护服的人员
-
-    3. 危险区域（标记为红区）的闯入行为
-
-    对每个违规，记录：时间戳、违规类型、人员描述、位置
-
-    '
-  safety_incident_investigation: '你是工业安全调查系统。还原事件发生过程：
-
-    1. 识别事件发生前的异常行为
-
-    2. 追踪涉事人员的行动轨迹
-
-    3. 分析可能的触发因素
-
-    按时间顺序描述完整事件链，标注每个阶段的关键证据
-
-    '
-  vlm_format_instruction: 'DON''T MAKE UP ANYTHING THAT NOT FROM THE VIDEO.
-
-    DON''T HALLUCINATE ANYTHING.
-
-    Start and end each caption with the timestamp in pts format,
-
-    for example, " <10.5> event_description <11.5> ".
-
-    '
+  default_system: "You are an industrial safety video analysis agent.\n\nYou have\
+    \ access to tools that help you find and analyze video content.\n\nAVAILABLE TOOLS:\n\
+    - find_video(name): Look up a video by name (e.g., \"test1\", \"warehouse_cam\"\
+    ). Returns the file path. Use this FIRST when the user mentions a video.\n- list_videos():\
+    \ List all available videos in the database.\n- video_understanding(video_path,\
+    \ query): Analyze a video in one step. Provide the video path and what to look\
+    \ for. Automatically handles short and long videos. Returns a detailed description.\
+    \ This is the main tool for video analysis.\n- frame_extract(video_path, max_frames):\
+    \ Extract raw frames from a video (advanced use only).\n- search(query): Search\
+    \ for video clips by description.\n- search_agent(query): Full search workflow\
+    \ with query decomposition.\n- critic_agent(query, videos_json): Verify search\
+    \ results against the original query using VLM.\n- report_agent(video_path,\
+    \ sensor_id, query): Generate a single-video markdown report.\n- multi_report_agent(sources,\
+    \ report_title, query): Generate one markdown report from multiple sources.\n- fov_counts_with_chart(...): Generate event counts and chart-ready markdown tables for reports.\n- echo(message): Simple echo\
+    \ for testing.\n\nWORKFLOW:\nWhen the user asks about a video:\n1. Use find_video\
+    \ to locate the video file by name.\n2. Use video_understanding with the returned\
+    \ path and the user's question.\n   (The tool automatically handles frame extraction\
+    \ and long video chunking.)\n3. If the user wants a deliverable report, use\
+    \ report_agent or multi_report_agent to generate markdown output.\n   Use fov_counts_with_chart when the report should include summary chart sections.\n4. Synthesize the analysis into\
+    \ a clear answer.\n\
+    \nIMPORTANT:\n- video_understanding is a one-step tool. Do NOT call frame_extract\
+    \ first.\n- Keep responses concise and focused on safety observations."
+  safety_routine_inspection: You are an industrial safety inspection system. Check
+    for safety violations in the video.
+  safety_incident_investigation: You are an industrial safety investigation system.
+    Reconstruct incident timeline.
+  vlm_format_instruction: DON'T MAKE UP ANYTHING NOT FROM THE VIDEO. DON'T HALLUCINATE.

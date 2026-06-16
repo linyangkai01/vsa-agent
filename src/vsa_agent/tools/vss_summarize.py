@@ -1,0 +1,87 @@
+"""Summary layer for dual-track video understanding output."""
+
+from vsa_agent.data_models.understanding import DetectedEvent
+from vsa_agent.data_models.understanding import SummaryResult
+from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.registry import register_tool
+
+
+def _parse_hhmmss(value: str) -> int | None:
+    parts = value.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = [int(part) for part in parts]
+    except ValueError:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _merge_summary_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
+    if not events:
+        return []
+
+    def _sort_key(event: DetectedEvent) -> int:
+        return _parse_hhmmss(event.start_timestamp) or 0
+
+    sorted_events = sorted(events, key=_sort_key)
+    merged: list[DetectedEvent] = [sorted_events[0]]
+
+    for current in sorted_events[1:]:
+        previous = merged[-1]
+        prev_end = _parse_hhmmss(previous.end_timestamp)
+        cur_start = _parse_hhmmss(current.start_timestamp)
+        can_merge = (
+            previous.label == current.label
+            and previous.description == current.description
+            and prev_end is not None
+            and cur_start is not None
+            and cur_start <= prev_end
+        )
+        if can_merge:
+            merged[-1] = previous.model_copy(
+                update={
+                    "end_timestamp": current.end_timestamp,
+                    "evidence": [*previous.evidence, *current.evidence],
+                }
+            )
+        else:
+            merged.append(current)
+
+    return merged
+
+
+def _events_to_text(events: list[DetectedEvent]) -> str:
+    merged_events = _merge_summary_events(events)
+    lines = []
+    for event in merged_events:
+        if event.start_timestamp or event.end_timestamp:
+            lines.append(f"[{event.start_timestamp} - {event.end_timestamp}] {event.description}")
+        else:
+            lines.append(event.description)
+    return "\n".join(line for line in lines if line)
+
+
+@register_tool(
+    "vss_summarize",
+    description="Summarize structured understanding results into dual-track output.",
+)
+async def summarize_understanding_result(
+    result: UnderstandingResult,
+    query: str,
+    model_adapter=None,
+) -> SummaryResult:
+    """Generate dual-track output from a structured understanding result."""
+    if result.summary_text:
+        text_output = result.summary_text
+    elif result.events:
+        text_output = _events_to_text(result.events)
+        if not text_output:
+            text_output = "No notable events detected."
+    else:
+        text_output = "No notable events detected."
+    return SummaryResult(
+        query=query,
+        text_output=text_output,
+        structured_output=result,
+    )

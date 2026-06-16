@@ -76,6 +76,8 @@ class SearchConfig(BaseModel):
     w_attribute: float = Field(default=0.55)
     rrf_k: int = Field(default=60)
     rrf_w: float = Field(default=0.5)
+    enable_critic: bool = Field(default=False, description="Enable VLM critic verification of results")
+    search_max_iterations: int = Field(default=1, ge=1, description="Max search iterations when refining with critic")
 
 
 class SearchInput(BaseModel):
@@ -91,7 +93,7 @@ class SearchInput(BaseModel):
     timestamp_end: str | None = Field(default=None)
     top_k: int | None = Field(default=None)
     min_cosine_similarity: float = Field(default=0.0, description="Minimum cosine similarity filter")
-    use_critic: bool = Field(default=True, description="Whether to verify results with VLM critic")
+    use_critic: bool = Field(default=False, description="Whether to verify results with VLM critic")
     agent_mode: bool = Field(default=True)
 
 
@@ -104,11 +106,19 @@ async def execute_core_search(
     agent_llm=None,
     config: SearchConfig | None = None,
     attribute_search_fn=None,
+    critic_agent=None,
 ):
-    """Core search with three-path routing. Yields SearchOutput."""
+    """Core search with three-path routing, confidence threshold, and critic verification.
+
+    Yields AgentMessageChunk for progress updates, then SearchOutput as final result.
+    """
+    from vsa_agent.agents.data_models import AgentMessageChunk, AgentMessageChunkType
+
     if config is None:
         config = SearchConfig()
     top_k = search_input.top_k if search_input.top_k is not None else config.default_max_results
+    original_top_k = top_k
+
     if search_input.agent_mode and agent_llm is not None:
         decomposed = await decompose_query(search_input.query, agent_llm)
         attributes = decomposed.attributes
@@ -117,52 +127,109 @@ async def execute_core_search(
         attributes = []
         has_action = None
     has_attributes = bool(attributes)
-    if not has_action and has_attributes and attribute_search_fn is not None:
-        logger.info("Path 1: attribute-only search")
-        try:
-            results = await attribute_search_fn()
-            if isinstance(results, SearchOutput):
-                yield results; return
-            if isinstance(results, list):
-                yield SearchOutput(data=results); return
-        except Exception as e:
-            logger.error("Attribute search failed: %s", e)
-    if not has_attributes:
-        logger.info("Path 2: embed-only search")
-        try:
-            results = await embed_search()
-            if isinstance(results, SearchOutput):
-                yield results; return
-            if hasattr(results, "data"):
-                yield SearchOutput(data=results.data); return
-        except Exception as e:
-            logger.error("Embed search failed: %s", e)
-    if has_action and has_attributes:
-        logger.info("Path 3: fusion search")
-        embed_results = []
-        attr_results = []
-        try:
-            r = await embed_search()
-            embed_results = list(r.data) if hasattr(r, "data") else []
-        except Exception as e:
-            logger.error("Embed in fusion failed: %s", e)
-        if attribute_search_fn is not None:
+
+    rejected_results = set()
+    confirmed_results = set()
+    iteration_num = 0
+    do_search = True
+    search_results = []
+
+    while do_search and iteration_num < config.search_max_iterations:
+        iteration_num += 1
+
+        if not has_action and has_attributes and attribute_search_fn is not None:
+            logger.info("Path 1: attribute-only search")
             try:
-                r = await attribute_search_fn()
-                if isinstance(r, SearchOutput):
-                    attr_results = r.data
-                elif isinstance(r, list):
-                    attr_results = r
+                results = await attribute_search_fn()
+                if isinstance(results, SearchOutput):
+                    search_results = results.data
+                elif isinstance(results, list):
+                    search_results = results
+                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Attribute search returned {len(search_results)} results")
             except Exception as e:
-                logger.error("Attribute in fusion failed: %s", e)
-        merged = {}
-        for r in embed_results + attr_results:
-            if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
-                merged[r.video_name] = r
-        combined = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
-        yield SearchOutput(data=combined[:top_k])
-        return
-    yield SearchOutput(data=[])
+                logger.error("Attribute search failed: %s", e)
+
+        elif not has_attributes:
+            logger.info("Path 2: embed-only search")
+            try:
+                results = await embed_search()
+                if isinstance(results, SearchOutput):
+                    search_results = results.data
+                elif hasattr(results, "data"):
+                    search_results = list(results.data)
+                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Embed search returned {len(search_results)} results")
+                if search_results and config.embed_confidence_threshold > 0:
+                    max_score = max(r.similarity for r in search_results)
+                    if max_score < config.embed_confidence_threshold:
+                        yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Embed confidence {max_score:.3f} below threshold")
+            except Exception as e:
+                logger.error("Embed search failed: %s", e)
+
+        elif has_action and has_attributes:
+            logger.info("Path 3: fusion search")
+            embed_results = []
+            attr_results_list = []
+            try:
+                r = await embed_search()
+                embed_results = list(r.data) if hasattr(r, "data") else []
+            except Exception as e:
+                logger.error("Embed in fusion failed: %s", e)
+            if attribute_search_fn is not None:
+                try:
+                    r = await attribute_search_fn()
+                    if isinstance(r, SearchOutput):
+                        attr_results_list = r.data
+                    elif isinstance(r, list):
+                        attr_results_list = r
+                except Exception as e:
+                    logger.error("Attribute in fusion failed: %s", e)
+            if embed_results and config.embed_confidence_threshold > 0:
+                max_embed_score = max(r.similarity for r in embed_results)
+                if max_embed_score < config.embed_confidence_threshold:
+                    search_results = attr_results_list
+                else:
+                    merged = {}
+                    for r in embed_results + attr_results_list:
+                        if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
+                            merged[r.video_name] = r
+                    search_results = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
+            else:
+                merged = {}
+                for r in embed_results + attr_results_list:
+                    if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
+                        merged[r.video_name] = r
+                search_results = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
+            yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Fusion search returned {len(search_results)} results")
+
+        if config.enable_critic and search_input.use_critic and critic_agent is not None and search_results:
+            try:
+                from vsa_agent.agents.critic_agent import CriticAgentInput, CriticAgentResult, VideoInfo
+                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Verifying {len(search_results)} results with critic")
+                search_videos = [VideoInfo(sensor_id=r.sensor_id, start_timestamp=r.start_time, end_timestamp=r.end_time) for r in search_results]
+                critic_input = CriticAgentInput(query=search_input.query, videos=search_videos)
+                critic_output = await critic_agent(critic_input)
+                new_confirmed = 0
+                new_rejected = 0
+                for vr in critic_output.video_results:
+                    if vr.result == CriticAgentResult.CONFIRMED:
+                        confirmed_results.add(vr.video_info)
+                        new_confirmed += 1
+                    elif vr.result == CriticAgentResult.REJECTED:
+                        rejected_results.add(vr.video_info)
+                        new_rejected += 1
+                        top_k += 1
+                        do_search = True
+                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Critic: {new_confirmed} confirmed, {new_rejected} rejected")
+                search_results = [r for r in search_results if not any(rej.sensor_id == r.sensor_id for rej in rejected_results)]
+            except Exception as e:
+                logger.error("Critic verification failed: %s", e)
+
+        if not config.enable_critic or not search_input.use_critic or critic_agent is None:
+            do_search = False
+
+    if original_top_k is not None:
+        search_results = search_results[:original_top_k]
+    yield SearchOutput(data=search_results)
 
 
 # ===== Constants =====
