@@ -18,6 +18,7 @@
 | TopAgent (简化版) | agents/top_agent.py | 完成 |
 | SearchAgent | agents/search_agent.py | 完成 |
 | CriticAgent | agents/critic_agent.py | 完成 |
+| 单视频报告链路 | agents/report_agent.py, tools/video_report_gen.py | 完成 |
 | 核心搜索 (数据模型+融合) | tools/search.py | 完成 |
 | EmbedSearch (mock) | tools/embed_search.py | 完成 |
 | AttributeSearch (mock) | tools/attribute_search.py | 完成 |
@@ -32,12 +33,10 @@
 
 | 模块 | NVIDIA 文件 | 说明 | 优先级 |
 |------|------------|------|--------|
-| agents/report_agent.py | report_agent.py | 单事件报告 Agent | P2 |
 | agents/multi_report_agent.py | multi_report_agent.py | 多事件报告 Agent | P2 |
 | agents/postprocessing/ | postprocessing/ | 后处理管道 | P2 |
 | tools/report_gen.py | report_gen.py | 报告生成工具 | P2 |
 | tools/template_report_gen.py | template_report_gen.py | 模板报告生成 | P2 |
-| tools/video_report_gen.py | video_report_gen.py | 视频报告生成 | P2 |
 | tools/chart_generator.py | chart_generator.py | 图表生成 | P2 |
 | tools/fov_counts_with_chart.py | fov_counts_with_chart.py | FOV 计数+图表 | P2 |
 | tools/incidents.py | incidents.py | 事件管理 | P2 |
@@ -174,9 +173,690 @@
 **目标**: 实现报告生成 Agent 和工具
 
 ### Task 3.1: 实现 report_agent.py
+- [x] 已完成单视频/上传视频报告路径
+- [x] 已支持 `video_file` / `rtsp` 两种入口
+- [x] 已完成 `report_agent_tool` 注册
+
 ### Task 3.2: 实现 multi_report_agent.py
+
 ### Task 3.3: 实现 report_gen.py / template_report_gen.py / video_report_gen.py
+- [x] 已完成 `video_report_gen.py`
+- [x] 已完成固定 Markdown 模板输出
+- [x] 已保留下载元数据扩展位
+- [ ] `report_gen.py`
+- [ ] `template_report_gen.py`
+
 ### Task 3.4: 实现 chart_generator.py / fov_counts_with_chart.py
+
+### Phase 3 当前进度（2026-06-16）
+- [x] 单视频报告主链完成
+- [x] 新增验收测试 `tests/acceptance/test_report_flow.py`
+- [x] 全量回归通过：`261 passed`
+- [ ] 多事件报告
+- [ ] 模板化报告总装
+- [ ] 图表与统计输出
+
+---
+
+# Phase 3 多事件报告主链实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 在现有单视频报告能力之上，打通 `multi_report_agent + report_gen + template_report_gen` 的多事件报告主链，支持多个视频源输入并输出一份聚合 Markdown 报告。
+
+**Architecture:** 这一版只覆盖“多视频/多传感器报告聚合”主链，不引入图表、FOV 计数、地理位置或 incidents 管理。`multi_report_agent` 负责输入整形与逐项调用视频理解，`report_gen` 负责把多个理解结果转成标准分报告块，`template_report_gen` 负责拼装最终 Markdown 报告。
+
+**Tech Stack:** Python 3.12, Pydantic v2, existing `UnderstandingResult`, existing `generate_video_report`, pytest, pytest-asyncio, markdown text generation
+
+---
+
+## 文件结构
+
+**新增文件**
+- `src/vsa_agent/tools/template_report_gen.py`
+  - 固定模板的多事件聚合报告拼装器
+- `src/vsa_agent/tools/report_gen.py`
+  - 多事件报告总装器，负责逐项调用单视频报告生成器
+- `src/vsa_agent/agents/multi_report_agent.py`
+  - 多事件报告 Agent，负责 source 列表输入和逐项理解
+- `tests/unit/tools/test_template_report_gen.py`
+  - 模板聚合器测试
+- `tests/unit/tools/test_report_gen.py`
+  - 报告总装器测试
+- `tests/unit/agents/test_multi_report_agent.py`
+  - 多事件报告 Agent 测试
+- `tests/acceptance/test_multi_report_flow.py`
+  - 多事件报告主链验收测试
+
+**修改文件**
+- `src/vsa_agent/tools/register.py`
+  - 注册 `template_report_gen`、`report_gen`
+- `src/vsa_agent/agents/register.py`
+  - 注册 `multi_report_agent`
+- `config.yaml`
+  - 把 Phase 3 新工具加入 `tools.enabled_modules`
+- `src/vsa_agent/prompt.py`
+  - 在默认系统提示中加入 `multi_report_agent`
+- `tests/unit/test_config.py`
+  - 校验新模块加入运行时加载链
+- `tests/unit/test_prompt.py`
+  - 校验默认提示暴露了新工具
+
+---
+
+### Task 1: 定义 `template_report_gen` 的固定模板契约
+
+**Files:**
+- Create: `src/vsa_agent/tools/template_report_gen.py`
+- Test: `tests/unit/tools/test_template_report_gen.py`
+
+- [ ] **Step 1: 写失败测试，定义多事件模板输出结构**
+
+```python
+import pytest
+
+from vsa_agent.tools.template_report_gen import TemplateReportGenOutput
+from vsa_agent.tools.template_report_gen import generate_template_report
+
+
+@pytest.mark.anyio
+async def test_generate_template_report_returns_markdown_with_summary_sections():
+    result = await generate_template_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[
+            {
+                "section_title": "事件 1 - camera-1",
+                "summary": "person walking near forklift",
+                "markdown_content": "## 摘要\nperson walking near forklift",
+            },
+            {
+                "section_title": "事件 2 - camera-2",
+                "summary": "forklift stops near doorway",
+                "markdown_content": "## 摘要\nforklift stops near doorway",
+            },
+        ],
+    )
+    assert isinstance(result, TemplateReportGenOutput)
+    assert result.markdown_content.startswith("# 仓库巡检聚合报告")
+    assert "## 报告摘要" in result.markdown_content
+    assert "## 分事件报告" in result.markdown_content
+    assert result.section_count == 2
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_template_report_gen.py -v`
+Expected: FAIL with import error
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+from pydantic import BaseModel
+from pydantic import Field
+
+from vsa_agent.registry import register_tool
+
+
+class TemplateReportGenOutput(BaseModel):
+    markdown_content: str
+    section_count: int = 0
+
+
+def _build_summary_lines(report_sections: list[dict]) -> str:
+    if not report_sections:
+        return "- 无分事件内容"
+    return "\n".join(
+        f"- {section['section_title']}: {section['summary']}"
+        for section in report_sections
+    )
+
+
+@register_tool(
+    "template_report_gen",
+    description="Assemble multiple event report sections into one markdown report.",
+)
+async def generate_template_report(
+    report_title: str,
+    report_sections: list[dict],
+) -> TemplateReportGenOutput:
+    summary_lines = _build_summary_lines(report_sections)
+    detail_blocks = "\n\n".join(
+        f"### {section['section_title']}\n\n{section['markdown_content']}"
+        for section in report_sections
+    )
+    markdown_content = (
+        f"# {report_title}\n\n"
+        "## 报告摘要\n"
+        f"{summary_lines}\n\n"
+        "## 分事件报告\n\n"
+        f"{detail_blocks}\n"
+    )
+    return TemplateReportGenOutput(
+        markdown_content=markdown_content,
+        section_count=len(report_sections),
+    )
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_template_report_gen.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/template_report_gen.py tests/unit/tools/test_template_report_gen.py
+git commit -m "feat: add template report generator"
+```
+
+### Task 2: 实现 `report_gen` 作为多事件报告总装器
+
+**Files:**
+- Create: `src/vsa_agent/tools/report_gen.py`
+- Test: `tests/unit/tools/test_report_gen.py`
+
+- [ ] **Step 1: 写失败测试，定义逐项调用单视频报告生成器并汇总**
+
+```python
+import pytest
+
+from vsa_agent.tools.report_gen import MultiReportGenOutput
+from vsa_agent.tools.report_gen import ReportSectionInput
+from vsa_agent.tools.report_gen import generate_multi_report
+
+
+@pytest.mark.anyio
+async def test_generate_multi_report_calls_single_report_gen_and_template_gen():
+    single_calls = []
+    template_calls = []
+
+    async def fake_single_report_gen(**kwargs):
+        single_calls.append(kwargs)
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 摘要\nperson walking near forklift",
+            "downloads": {"markdown": {"filename": "camera-1-report.md"}},
+            "summary": "person walking near forklift",
+        }
+
+    async def fake_template_report_gen(**kwargs):
+        template_calls.append(kwargs)
+        return {
+            "markdown_content": "# 仓库巡检聚合报告\n\n## 报告摘要\n- 事件 1 - camera-1: person walking near forklift",
+            "section_count": 1,
+        }
+
+    result = await generate_multi_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[
+            ReportSectionInput(
+                section_title="事件 1 - camera-1",
+                sensor_id="camera-1",
+                user_query="生成聚合报告",
+                understanding_result={
+                    "query": "生成聚合报告",
+                    "source_type": "rtsp",
+                    "summary_text": "person walking near forklift",
+                    "chunks": [],
+                    "events": [],
+                },
+            )
+        ],
+        single_report_gen_fn=fake_single_report_gen,
+        template_report_gen_fn=fake_template_report_gen,
+    )
+    assert isinstance(result, MultiReportGenOutput)
+    assert result.section_count == 1
+    assert result.downloads["markdown"]["filename"] == "multi-report.md"
+    assert single_calls[0]["sensor_id"] == "camera-1"
+    assert template_calls[0]["report_title"] == "仓库巡检聚合报告"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_gen.py -v`
+Expected: FAIL with import error
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+from typing import Any
+
+from pydantic import BaseModel
+from pydantic import Field
+
+from vsa_agent.registry import register_tool
+
+
+class ReportSectionInput(BaseModel):
+    section_title: str
+    sensor_id: str
+    user_query: str
+    understanding_result: dict[str, Any]
+
+
+class MultiReportGenOutput(BaseModel):
+    markdown_content: str
+    downloads: dict[str, dict[str, str]] = Field(default_factory=dict)
+    summary: str = ""
+    section_count: int = 0
+
+
+async def _default_single_report_gen(**kwargs):
+    from vsa_agent.tools.video_report_gen import generate_video_report
+
+    return await generate_video_report(**kwargs)
+
+
+async def _default_template_report_gen(**kwargs):
+    from vsa_agent.tools.template_report_gen import generate_template_report
+
+    return await generate_template_report(**kwargs)
+
+
+@register_tool(
+    "report_gen",
+    description="Generate one markdown report from multiple structured video understanding results.",
+)
+async def generate_multi_report(
+    report_title: str,
+    report_sections: list[ReportSectionInput],
+    single_report_gen_fn=None,
+    template_report_gen_fn=None,
+) -> MultiReportGenOutput:
+    single_report_gen = single_report_gen_fn or _default_single_report_gen
+    template_report_gen = template_report_gen_fn or _default_template_report_gen
+
+    normalized_sections = []
+    summaries = []
+    for section in report_sections:
+        report = await single_report_gen(
+            sensor_id=section.sensor_id,
+            user_query=section.user_query,
+            understanding_result=section.understanding_result,
+        )
+        report_dict = report if isinstance(report, dict) else report.model_dump()
+        normalized_sections.append(
+            {
+                "section_title": section.section_title,
+                "summary": report_dict["summary"],
+                "markdown_content": report_dict["markdown_content"],
+            }
+        )
+        summaries.append(report_dict["summary"])
+
+    template = await template_report_gen(
+        report_title=report_title,
+        report_sections=normalized_sections,
+    )
+    template_dict = template if isinstance(template, dict) else template.model_dump()
+    return MultiReportGenOutput(
+        markdown_content=template_dict["markdown_content"],
+        downloads={
+            "markdown": {
+                "filename": "multi-report.md",
+                "content_type": "text/markdown",
+            }
+        },
+        summary="; ".join(text for text in summaries if text),
+        section_count=template_dict["section_count"],
+    )
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_gen.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/report_gen.py tests/unit/tools/test_report_gen.py
+git commit -m "feat: add multi report generator"
+```
+
+### Task 3: 实现 `multi_report_agent` 的多输入路径
+
+**Files:**
+- Create: `src/vsa_agent/agents/multi_report_agent.py`
+- Test: `tests/unit/agents/test_multi_report_agent.py`
+
+- [ ] **Step 1: 写失败测试，定义多源输入和输出契约**
+
+```python
+import pytest
+
+from vsa_agent.agents.data_models import AgentOutput
+from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+
+
+@pytest.mark.anyio
+async def test_execute_multi_report_agent_for_multiple_sources():
+    understanding_calls = []
+    report_calls = []
+
+    async def fake_video_understanding(**kwargs):
+        understanding_calls.append(kwargs)
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": f"summary for {kwargs.get('sensor_id') or kwargs.get('video_path')}",
+            "chunks": [],
+            "events": [],
+        }
+
+    async def fake_report_gen(**kwargs):
+        report_calls.append(kwargs)
+        return {
+            "markdown_content": "# 仓库巡检聚合报告\n\n## 报告摘要\n- 事件 1 - camera-1: summary for camera-1",
+            "downloads": {"markdown": {"filename": "multi-report.md"}},
+            "summary": "summary for camera-1; summary for video-a.mp4",
+            "section_count": 2,
+        }
+
+    result = await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="仓库巡检聚合报告",
+            query="生成聚合报告",
+            sources=[
+                MultiReportSourceItem(sensor_id="camera-1"),
+                MultiReportSourceItem(video_path="video-a.mp4"),
+            ],
+        ),
+        video_understanding_fn=fake_video_understanding,
+        report_gen_fn=fake_report_gen,
+    )
+    assert isinstance(result, AgentOutput)
+    assert result.status == "success"
+    assert result.metadata["report_type"] == "multi_video"
+    assert result.side_effects["downloads"]["markdown"]["filename"] == "multi-report.md"
+    assert len(understanding_calls) == 2
+    assert report_calls[0]["report_title"] == "仓库巡检聚合报告"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_multi_report_agent.py -v`
+Expected: FAIL with import error
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+from typing import Any
+from typing import Awaitable
+from typing import Callable
+
+from pydantic import BaseModel
+from pydantic import Field
+
+from vsa_agent.agents.data_models import AgentOutput
+from vsa_agent.registry import register_tool
+from vsa_agent.tools.report_gen import ReportSectionInput
+
+VideoUnderstandingCallable = Callable[..., Awaitable[Any]]
+ReportGenCallable = Callable[..., Awaitable[Any]]
+
+
+class MultiReportSourceItem(BaseModel):
+    video_path: str | None = Field(default=None)
+    sensor_id: str | None = Field(default=None)
+
+
+class MultiReportAgentInput(BaseModel):
+    report_title: str = Field(default="多视频聚合报告")
+    query: str = Field(default="生成聚合报告")
+    sources: list[MultiReportSourceItem] = Field(default_factory=list)
+
+
+def _resolve_source_type(item: MultiReportSourceItem) -> str:
+    return "rtsp" if item.sensor_id else "video_file"
+
+
+async def _default_video_understanding_fn(**kwargs):
+    from vsa_agent.tools.video_understanding import analyze_video_segment
+
+    return await analyze_video_segment(**kwargs)
+
+
+async def _default_report_gen_fn(**kwargs):
+    from vsa_agent.tools.report_gen import generate_multi_report
+
+    return await generate_multi_report(**kwargs)
+
+
+@register_tool(
+    "multi_report_agent",
+    description="Generate one markdown report from multiple uploaded videos or RTSP sensors.",
+)
+async def execute_multi_report_agent(
+    report_input: MultiReportAgentInput,
+    video_understanding_fn: VideoUnderstandingCallable | None = None,
+    report_gen_fn: ReportGenCallable | None = None,
+) -> AgentOutput:
+    if not report_input.sources:
+        raise ValueError("multi_report_agent 至少需要一个 source")
+
+    video_understanding = video_understanding_fn or _default_video_understanding_fn
+    report_gen = report_gen_fn or _default_report_gen_fn
+
+    sections: list[ReportSectionInput] = []
+    for index, item in enumerate(report_input.sources, start=1):
+        if not item.video_path and not item.sensor_id:
+            raise ValueError("每个 source 必须提供 video_path 或 sensor_id")
+        understanding = await video_understanding(
+            video_path=item.video_path or "",
+            query=report_input.query,
+            source_type=_resolve_source_type(item),
+            sensor_id=item.sensor_id,
+        )
+        source_name = item.sensor_id or item.video_path or f"source-{index}"
+        sections.append(
+            ReportSectionInput(
+                section_title=f"事件 {index} - {source_name}",
+                sensor_id=source_name,
+                user_query=report_input.query,
+                understanding_result=understanding if isinstance(understanding, dict) else understanding.model_dump(),
+            )
+        )
+
+    report = await report_gen(
+        report_title=report_input.report_title,
+        report_sections=sections,
+    )
+    report_dict = report if isinstance(report, dict) else report.model_dump()
+    return AgentOutput(
+        messages=[report_dict["summary"]] if report_dict.get("summary") else [],
+        side_effects={
+            "markdown_content": report_dict["markdown_content"],
+            "downloads": report_dict["downloads"],
+        },
+        metadata={
+            "report_type": "multi_video",
+            "source_count": len(report_input.sources),
+        },
+        status="success",
+    )
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_multi_report_agent.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/multi_report_agent.py tests/unit/agents/test_multi_report_agent.py
+git commit -m "feat: add multi report agent"
+```
+
+### Task 4: 接通运行时注册链与默认提示
+
+**Files:**
+- Modify: `src/vsa_agent/tools/register.py`
+- Modify: `src/vsa_agent/agents/register.py`
+- Modify: `config.yaml`
+- Modify: `src/vsa_agent/prompt.py`
+- Modify: `tests/unit/test_config.py`
+- Modify: `tests/unit/test_prompt.py`
+
+- [ ] **Step 1: 写失败测试，要求默认加载和默认提示包含 Phase 3 新模块**
+
+```python
+def test_main_config_enables_multi_report_modules():
+    from vsa_agent.config import AppConfig
+
+    cfg = AppConfig.from_yaml("config.yaml")
+    assert "vsa_agent.tools.template_report_gen" in cfg.tools.enabled_modules
+    assert "vsa_agent.tools.report_gen" in cfg.tools.enabled_modules
+    assert "vsa_agent.agents.multi_report_agent" in cfg.tools.enabled_modules
+
+
+def test_default_system_prompt_mentions_multi_report_agent():
+    from vsa_agent.prompt import SYSTEM_PROMPT_DEFAULT
+
+    assert "multi_report_agent" in SYSTEM_PROMPT_DEFAULT
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_config.py tests/unit/test_prompt.py -v`
+Expected: FAIL because modules are not yet registered
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/register.py
+import vsa_agent.tools.report_gen  # noqa: F401
+import vsa_agent.tools.template_report_gen  # noqa: F401
+
+# src/vsa_agent/agents/register.py
+from vsa_agent.agents import multi_report_agent  # noqa: F401
+
+# config.yaml
+tools:
+  enabled_modules:
+  - vsa_agent.tools.video_report_gen
+  - vsa_agent.tools.template_report_gen
+  - vsa_agent.tools.report_gen
+  - vsa_agent.agents.report_agent
+  - vsa_agent.agents.multi_report_agent
+
+# src/vsa_agent/prompt.py
+"- multi_report_agent(sources, report_title, query): Generate one markdown report from multiple sources.\n"
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_config.py tests/unit/test_prompt.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/register.py src/vsa_agent/agents/register.py config.yaml src/vsa_agent/prompt.py tests/unit/test_config.py tests/unit/test_prompt.py
+git commit -m "feat: register multi report modules"
+```
+
+### Task 5: 补齐多事件报告主链验收测试
+
+**Files:**
+- Create: `tests/acceptance/test_multi_report_flow.py`
+
+- [ ] **Step 1: 写失败测试，验证 `multi_report_agent -> report_gen -> template_report_gen` 主链**
+
+```python
+import pytest
+
+from vsa_agent.agents.data_models import AgentOutput
+from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+from vsa_agent.tools.report_gen import generate_multi_report
+
+
+@pytest.mark.anyio
+async def test_multi_report_flow_returns_aggregated_markdown():
+    async def fake_video_understanding_fn(**kwargs):
+        source_name = kwargs.get("sensor_id") or kwargs.get("video_path")
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": f"summary for {source_name}",
+            "chunks": [],
+            "events": [],
+        }
+
+    result = await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="仓库巡检聚合报告",
+            query="生成聚合报告",
+            sources=[
+                MultiReportSourceItem(sensor_id="camera-1"),
+                MultiReportSourceItem(video_path="video-a.mp4"),
+            ],
+        ),
+        video_understanding_fn=fake_video_understanding_fn,
+        report_gen_fn=generate_multi_report,
+    )
+    assert isinstance(result, AgentOutput)
+    assert result.status == "success"
+    assert result.side_effects["markdown_content"].startswith("# 仓库巡检聚合报告")
+    assert "## 报告摘要" in result.side_effects["markdown_content"]
+    assert "### 事件 1 - camera-1" in result.side_effects["markdown_content"]
+    assert "### 事件 2 - video-a.mp4" in result.side_effects["markdown_content"]
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/acceptance/test_multi_report_flow.py -v`
+Expected: FAIL until the full chain is wired
+
+- [ ] **Step 3: 回跑验收与全量回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/acceptance/test_multi_report_flow.py -v`
+Expected: PASS
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/ -q`
+Expected: all tests PASS
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/acceptance/test_multi_report_flow.py
+git commit -m "test: add multi report acceptance flow"
+```
+
+---
+
+## 自检
+
+### 覆盖性检查
+- `template_report_gen` 模板聚合契约：Task 1 覆盖
+- `report_gen` 多事件总装：Task 2 覆盖
+- `multi_report_agent` 多输入路径：Task 3 覆盖
+- 运行时注册链与默认提示：Task 4 覆盖
+- 多事件报告主链验收：Task 5 覆盖
+
+### 占位符检查
+- 没有 `TODO`、`TBD`、`implement later`
+- 每个任务都有精确文件路径、测试命令、最小代码骨架
+
+### 类型一致性检查
+- 统一使用 `TemplateReportGenOutput`
+- 统一使用 `ReportSectionInput`
+- 统一使用 `MultiReportGenOutput`
+- 统一使用 `MultiReportSourceItem`
+- 统一使用 `MultiReportAgentInput`
+- 统一使用 `generate_template_report`
+- 统一使用 `generate_multi_report`
+- 统一使用 `execute_multi_report_agent`
+
+### 执行说明
+- 本计划只覆盖 Phase 3 的“多事件报告主链”
+- `chart_generator / fov_counts_with_chart` 不纳入本计划，建议单独写下一份执行计划
+- 继续严格按 TDD：先红灯，再最小实现，再全量回归
 
 ---
 

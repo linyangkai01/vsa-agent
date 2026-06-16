@@ -37,3 +37,8 @@ class TestGetConfig:
     def test_returns_appconfig(self):
         cfg = get_config()
         assert isinstance(cfg, AppConfig)
+
+    def test_main_config_enables_phase3_report_modules(self):
+        cfg = AppConfig.from_yaml("config.yaml")
+        assert "vsa_agent.tools.video_report_gen" in cfg.tools.enabled_modules
+        assert "vsa_agent.agents.report_agent" in cfg.tools.enabled_modules

@@ -11,6 +11,7 @@ import vsa_agent.tools.frame_extract  # noqa: F401
 import vsa_agent.tools.prompt_gen  # noqa: F401
 import vsa_agent.tools.video_understanding  # noqa: F401
 import vsa_agent.tools.lvs_video_understanding  # noqa: F401
+import vsa_agent.tools.video_report_gen  # noqa: F401
 import vsa_agent.tools.vss_summarize  # noqa: F401
 
 # Search tools
@@ -22,3 +23,4 @@ import vsa_agent.tools.query_builders  # noqa: F401
 # Agents (registered as tools)
 import vsa_agent.agents.search_agent  # noqa: F401
 import vsa_agent.agents.critic_agent  # noqa: F401
+import vsa_agent.agents.report_agent  # noqa: F401
