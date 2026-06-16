@@ -17,6 +17,9 @@ class TestSystemPrompts:
     def test_default_system_prompt_mentions_multi_report_agent(self):
         assert "multi_report_agent" in SYSTEM_PROMPT_DEFAULT
 
+    def test_default_system_prompt_mentions_chart_tools(self):
+        assert "fov_counts_with_chart" in SYSTEM_PROMPT_DEFAULT
+
     def test_vlm_format_prompt(self):
         assert "HALLUCINATE" in SYSTEM_PROMPT_VLM_FORMAT
 

@@ -14,6 +14,8 @@ import vsa_agent.tools.lvs_video_understanding  # noqa: F401
 import vsa_agent.tools.video_report_gen  # noqa: F401
 import vsa_agent.tools.template_report_gen  # noqa: F401
 import vsa_agent.tools.report_gen  # noqa: F401
+import vsa_agent.tools.chart_generator  # noqa: F401
+import vsa_agent.tools.fov_counts_with_chart  # noqa: F401
 import vsa_agent.tools.vss_summarize  # noqa: F401
 
 # Search tools

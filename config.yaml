@@ -23,6 +23,8 @@ tools:
   - vsa_agent.tools.video_report_gen
   - vsa_agent.tools.template_report_gen
   - vsa_agent.tools.report_gen
+  - vsa_agent.tools.chart_generator
+  - vsa_agent.tools.fov_counts_with_chart
   - vsa_agent.tools.embed_search
   - vsa_agent.tools.attribute_search
   - vsa_agent.tools.search
@@ -47,12 +49,12 @@ prompts:
     \ with query decomposition.\n- critic_agent(query, videos_json): Verify search\
     \ results against the original query using VLM.\n- report_agent(video_path,\
     \ sensor_id, query): Generate a single-video markdown report.\n- multi_report_agent(sources,\
-    \ report_title, query): Generate one markdown report from multiple sources.\n- echo(message): Simple echo\
+    \ report_title, query): Generate one markdown report from multiple sources.\n- fov_counts_with_chart(...): Generate event counts and chart-ready markdown tables for reports.\n- echo(message): Simple echo\
     \ for testing.\n\nWORKFLOW:\nWhen the user asks about a video:\n1. Use find_video\
     \ to locate the video file by name.\n2. Use video_understanding with the returned\
     \ path and the user's question.\n   (The tool automatically handles frame extraction\
     \ and long video chunking.)\n3. If the user wants a deliverable report, use\
-    \ report_agent or multi_report_agent to generate markdown output.\n4. Synthesize the analysis into\
+    \ report_agent or multi_report_agent to generate markdown output.\n   Use fov_counts_with_chart when the report should include summary chart sections.\n4. Synthesize the analysis into\
     \ a clear answer.\n\
     \nIMPORTANT:\n- video_understanding is a one-step tool. Do NOT call frame_extract\
     \ first.\n- Keep responses concise and focused on safety observations."

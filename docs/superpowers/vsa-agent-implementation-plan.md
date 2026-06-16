@@ -190,15 +190,19 @@
 - [x] 已完成 `template_report_gen.py`
 
 ### Task 3.4: 实现 chart_generator.py / fov_counts_with_chart.py
+- [x] 已完成 `chart_generator.py`
+- [x] 已完成 `fov_counts_with_chart.py`
+- [x] 已完成图表区块接入 `report_gen / template_report_gen`
+- [x] 已完成图表增强验收测试 `tests/acceptance/test_report_chart_flow.py`
 
 ### Phase 3 当前进度（2026-06-16）
 - [x] 单视频报告主链完成
 - [x] 新增验收测试 `tests/acceptance/test_report_flow.py`
 - [x] 多事件报告主链完成
 - [x] 新增验收测试 `tests/acceptance/test_multi_report_flow.py`
-- [x] 全量回归通过：`267 passed`
+- [x] 全量回归通过：`274 passed`
 - [x] 模板化报告总装
-- [ ] 图表与统计输出
+- [x] 图表与统计输出
 
 ---
 
@@ -860,6 +864,589 @@ git commit -m "test: add multi report acceptance flow"
 ### 执行说明
 - 本计划只覆盖 Phase 3 的“多事件报告主链”
 - `chart_generator / fov_counts_with_chart` 不纳入本计划，建议单独写下一份执行计划
+- 继续严格按 TDD：先红灯，再最小实现，再全量回归
+
+---
+
+# Phase 3 图表与统计输出实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 为现有单视频/多事件 Markdown 报告链路补齐统计与图表输出能力，支持从事件时间线生成基础计数统计，并把图表区块嵌入最终报告。
+
+**Architecture:** 这一版采用“报告增强型”路径，不先做独立统计平台。`fov_counts_with_chart` 负责从已有 `understanding_result / report_sections` 中提取基础计数并调用 `chart_generator` 产出图表元数据，`template_report_gen` 与 `report_gen` 负责把图表区块嵌入最终 Markdown，优先覆盖柱状图和表格摘要两种最小能力。
+
+**Tech Stack:** Python 3.12, Pydantic v2, pytest, pytest-asyncio, markdown text generation, in-memory chart spec generation
+
+---
+
+## 文件结构
+
+**新增文件**
+- `src/vsa_agent/tools/chart_generator.py`
+  - 统一图表规范生成器，第一版只输出可嵌入 Markdown 的图表元数据与文本表格
+- `src/vsa_agent/tools/fov_counts_with_chart.py`
+  - 从事件结果中提取计数统计并组装为图表输入
+- `tests/unit/tools/test_chart_generator.py`
+  - 图表规范生成器测试
+- `tests/unit/tools/test_fov_counts_with_chart.py`
+  - 统计与图表适配器测试
+- `tests/acceptance/test_report_chart_flow.py`
+  - 报告链路带图表区块的验收测试
+
+**修改文件**
+- `src/vsa_agent/tools/report_gen.py`
+  - 接入统计/图表生成能力，把图表元数据传给模板层
+- `src/vsa_agent/tools/template_report_gen.py`
+  - 为最终 Markdown 增加“统计概览 / 图表”区块
+- `src/vsa_agent/tools/register.py`
+  - 注册 `chart_generator`、`fov_counts_with_chart`
+- `config.yaml`
+  - 把新工具加入 `tools.enabled_modules`
+- `src/vsa_agent/prompt.py`
+  - 在默认系统提示中暴露图表增强能力
+- `tests/unit/test_config.py`
+  - 校验新模块加入运行时加载链
+- `tests/unit/test_prompt.py`
+  - 校验默认提示暴露图表工具
+
+---
+
+### Task 1: 定义 `chart_generator` 的最小图表契约
+
+**Files:**
+- Create: `src/vsa_agent/tools/chart_generator.py`
+- Test: `tests/unit/tools/test_chart_generator.py`
+
+- [x] **Step 1: 写失败测试，定义柱状图与 Markdown 表格输出结构**
+
+```python
+import pytest
+
+from vsa_agent.tools.chart_generator import ChartArtifact
+from vsa_agent.tools.chart_generator import ChartSeriesItem
+from vsa_agent.tools.chart_generator import generate_bar_chart_artifact
+
+
+@pytest.mark.anyio
+async def test_generate_bar_chart_artifact_returns_chart_metadata_and_markdown_table():
+    result = await generate_bar_chart_artifact(
+        chart_title="事件计数统计",
+        x_label="事件类型",
+        y_label="次数",
+        series=[
+            ChartSeriesItem(label="walking", value=2),
+            ChartSeriesItem(label="forklift", value=1),
+        ],
+    )
+    assert isinstance(result, ChartArtifact)
+    assert result.chart_type == "bar"
+    assert result.title == "事件计数统计"
+    assert result.spec["labels"] == ["walking", "forklift"]
+    assert "| 事件类型 | 次数 |" in result.markdown_table
+```
+
+- [x] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_chart_generator.py -v`
+Expected: FAIL with import error
+
+- [x] **Step 3: 写最小实现**
+
+```python
+from pydantic import BaseModel
+from pydantic import Field
+
+from vsa_agent.registry import register_tool
+
+
+class ChartSeriesItem(BaseModel):
+    label: str
+    value: int
+
+
+class ChartArtifact(BaseModel):
+    chart_type: str
+    title: str
+    spec: dict = Field(default_factory=dict)
+    markdown_table: str = ""
+
+
+def _build_markdown_table(x_label: str, y_label: str, series: list[ChartSeriesItem]) -> str:
+    lines = [
+        f"| {x_label} | {y_label} |",
+        "| --- | --- |",
+    ]
+    for item in series:
+        lines.append(f"| {item.label} | {item.value} |")
+    return "\n".join(lines)
+
+
+@register_tool(
+    "chart_generator",
+    description="Generate minimal chart metadata and markdown table output.",
+)
+async def generate_bar_chart_artifact(
+    chart_title: str,
+    x_label: str,
+    y_label: str,
+    series: list[ChartSeriesItem],
+) -> ChartArtifact:
+    return ChartArtifact(
+        chart_type="bar",
+        title=chart_title,
+        spec={
+            "labels": [item.label for item in series],
+            "values": [item.value for item in series],
+            "x_label": x_label,
+            "y_label": y_label,
+        },
+        markdown_table=_build_markdown_table(x_label, y_label, series),
+    )
+```
+
+- [x] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_chart_generator.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/chart_generator.py tests/unit/tools/test_chart_generator.py
+git commit -m "feat: add chart generator"
+```
+
+### Task 2: 实现 `fov_counts_with_chart` 的统计与图表组装
+
+**Files:**
+- Create: `src/vsa_agent/tools/fov_counts_with_chart.py`
+- Test: `tests/unit/tools/test_fov_counts_with_chart.py`
+
+- [x] **Step 1: 写失败测试，定义事件计数统计与图表调用**
+
+```python
+import pytest
+
+from vsa_agent.tools.fov_counts_with_chart import CountWithChartResult
+from vsa_agent.tools.fov_counts_with_chart import build_event_count_chart
+
+
+@pytest.mark.anyio
+async def test_build_event_count_chart_counts_events_by_label():
+    chart_calls = []
+
+    async def fake_chart_generator(**kwargs):
+        chart_calls.append(kwargs)
+        return {
+            "chart_type": "bar",
+            "title": "事件计数统计",
+            "spec": {"labels": ["walking", "forklift"], "values": [2, 1]},
+            "markdown_table": "| 事件类型 | 次数 |\\n| --- | --- |\\n| walking | 2 |\\n| forklift | 1 |",
+        }
+
+    result = await build_event_count_chart(
+        understanding_results=[
+            {
+                "events": [
+                    {"label": "walking", "description": "person walking"},
+                    {"label": "walking", "description": "person walking again"},
+                ]
+            },
+            {
+                "events": [
+                    {"label": "forklift", "description": "forklift turning"},
+                ]
+            },
+        ],
+        chart_generator_fn=fake_chart_generator,
+    )
+    assert isinstance(result, CountWithChartResult)
+    assert result.counts == {"walking": 2, "forklift": 1}
+    assert result.chart["title"] == "事件计数统计"
+    assert chart_calls[0]["chart_title"] == "事件计数统计"
+```
+
+- [x] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_fov_counts_with_chart.py -v`
+Expected: FAIL with import error
+
+- [x] **Step 3: 写最小实现**
+
+```python
+from collections import Counter
+from typing import Any
+
+from pydantic import BaseModel
+from pydantic import Field
+
+from vsa_agent.registry import register_tool
+
+
+class CountWithChartResult(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    chart: dict[str, Any] = Field(default_factory=dict)
+
+
+async def _default_chart_generator_fn(**kwargs):
+    from vsa_agent.tools.chart_generator import ChartSeriesItem
+    from vsa_agent.tools.chart_generator import generate_bar_chart_artifact
+
+    series = [ChartSeriesItem(**item) for item in kwargs["series"]]
+    result = await generate_bar_chart_artifact(
+        chart_title=kwargs["chart_title"],
+        x_label=kwargs["x_label"],
+        y_label=kwargs["y_label"],
+        series=series,
+    )
+    return result.model_dump()
+
+
+@register_tool(
+    "fov_counts_with_chart",
+    description="Build basic event counts and chart output from understanding results.",
+)
+async def build_event_count_chart(
+    understanding_results: list[dict[str, Any]],
+    chart_generator_fn=None,
+) -> CountWithChartResult:
+    counter = Counter()
+    for result in understanding_results:
+        for event in result.get("events", []):
+            label = str(event.get("label", "")).strip()
+            if label:
+                counter[label] += 1
+
+    ordered_items = sorted(counter.items(), key=lambda item: item[0])
+    series = [{"label": label, "value": count} for label, count in ordered_items]
+    chart_generator = chart_generator_fn or _default_chart_generator_fn
+    chart = await chart_generator(
+        chart_title="事件计数统计",
+        x_label="事件类型",
+        y_label="次数",
+        series=series,
+    )
+    return CountWithChartResult(
+        counts=dict(counter),
+        chart=chart,
+    )
+```
+
+- [x] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_fov_counts_with_chart.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/fov_counts_with_chart.py tests/unit/tools/test_fov_counts_with_chart.py
+git commit -m "feat: add event count chart adapter"
+```
+
+### Task 3: 把图表区块接入 `report_gen` 与 `template_report_gen`
+
+**Files:**
+- Modify: `src/vsa_agent/tools/report_gen.py`
+- Modify: `src/vsa_agent/tools/template_report_gen.py`
+- Test: `tests/unit/tools/test_report_gen.py`
+- Test: `tests/unit/tools/test_template_report_gen.py`
+
+- [x] **Step 1: 写失败测试，要求聚合报告包含统计概览和图表区块**
+
+```python
+import pytest
+
+from vsa_agent.tools.report_gen import ReportSectionInput
+from vsa_agent.tools.report_gen import generate_multi_report
+
+
+@pytest.mark.anyio
+async def test_generate_multi_report_includes_chart_payload_for_template():
+    template_calls = []
+
+    async def fake_single_report_gen(**kwargs):
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 摘要\nperson walking near forklift",
+            "downloads": {"markdown": {"filename": "camera-1-report.md"}},
+            "summary": "person walking near forklift",
+        }
+
+    async def fake_count_chart_builder(**kwargs):
+        return {
+            "counts": {"walking": 2},
+            "chart": {
+                "chart_type": "bar",
+                "title": "事件计数统计",
+                "spec": {"labels": ["walking"], "values": [2]},
+                "markdown_table": "| 事件类型 | 次数 |\n| --- | --- |\n| walking | 2 |",
+            },
+        }
+
+    async def fake_template_report_gen(**kwargs):
+        template_calls.append(kwargs)
+        return {
+            "markdown_content": "# 仓库巡检聚合报告\n\n## 统计概览\n- walking: 2",
+            "section_count": 1,
+        }
+
+    await generate_multi_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[
+            ReportSectionInput(
+                section_title="事件 1 - camera-1",
+                sensor_id="camera-1",
+                user_query="生成聚合报告",
+                understanding_result={
+                    "query": "生成聚合报告",
+                    "source_type": "rtsp",
+                    "summary_text": "person walking near forklift",
+                    "chunks": [],
+                    "events": [{"label": "walking", "description": "person walking"}],
+                },
+            )
+        ],
+        single_report_gen_fn=fake_single_report_gen,
+        template_report_gen_fn=fake_template_report_gen,
+        count_chart_builder_fn=fake_count_chart_builder,
+    )
+    assert template_calls[0]["counts"] == {"walking": 2}
+    assert template_calls[0]["chart"]["title"] == "事件计数统计"
+```
+
+- [x] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_gen.py tests/unit/tools/test_template_report_gen.py -v`
+Expected: FAIL because chart payload is not yet passed through
+
+- [x] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/report_gen.py
+async def _default_count_chart_builder_fn(**kwargs):
+    from vsa_agent.tools.fov_counts_with_chart import build_event_count_chart
+
+    return await build_event_count_chart(**kwargs)
+
+
+async def generate_multi_report(
+    report_title: str,
+    report_sections: list[ReportSectionInput],
+    single_report_gen_fn=None,
+    template_report_gen_fn=None,
+    count_chart_builder_fn=None,
+) -> MultiReportGenOutput:
+    single_report_gen = single_report_gen_fn or _default_single_report_gen
+    template_report_gen = template_report_gen_fn or _default_template_report_gen
+    count_chart_builder = count_chart_builder_fn or _default_count_chart_builder_fn
+    ...
+    understanding_results = [section.understanding_result for section in report_sections]
+    count_chart = await count_chart_builder(
+        understanding_results=understanding_results,
+    )
+    count_chart_dict = count_chart if isinstance(count_chart, dict) else count_chart.model_dump()
+    template = await template_report_gen(
+        report_title=report_title,
+        report_sections=normalized_sections,
+        counts=count_chart_dict["counts"],
+        chart=count_chart_dict["chart"],
+    )
+
+# src/vsa_agent/tools/template_report_gen.py
+def _build_count_lines(counts: dict[str, int]) -> str:
+    if not counts:
+        return "- 无统计数据"
+    return "\n".join(f"- {label}: {count}" for label, count in sorted(counts.items()))
+
+
+async def generate_template_report(
+    report_title: str,
+    report_sections: list[dict],
+    counts: dict[str, int] | None = None,
+    chart: dict | None = None,
+) -> TemplateReportGenOutput:
+    counts_text = _build_count_lines(counts or {})
+    chart_table = (chart or {}).get("markdown_table", "- 无图表数据")
+    markdown_content = (
+        f"# {report_title}\n\n"
+        "## 报告摘要\n"
+        f"{summary_lines}\n\n"
+        "## 统计概览\n"
+        f"{counts_text}\n\n"
+        "## 图表\n"
+        f"{chart_table}\n\n"
+        "## 分事件报告\n\n"
+        f"{detail_blocks}\n"
+    )
+```
+
+- [x] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_gen.py tests/unit/tools/test_template_report_gen.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/report_gen.py src/vsa_agent/tools/template_report_gen.py tests/unit/tools/test_report_gen.py tests/unit/tools/test_template_report_gen.py
+git commit -m "feat: embed chart blocks into report generation"
+```
+
+### Task 4: 接通运行时注册链与提示词
+
+**Files:**
+- Modify: `src/vsa_agent/tools/register.py`
+- Modify: `config.yaml`
+- Modify: `src/vsa_agent/prompt.py`
+- Modify: `tests/unit/test_config.py`
+- Modify: `tests/unit/test_prompt.py`
+
+- [x] **Step 1: 写失败测试，要求默认加载和默认提示包含图表工具**
+
+```python
+def test_main_config_enables_chart_modules():
+    from vsa_agent.config import AppConfig
+
+    cfg = AppConfig.from_yaml("config.yaml")
+    assert "vsa_agent.tools.chart_generator" in cfg.tools.enabled_modules
+    assert "vsa_agent.tools.fov_counts_with_chart" in cfg.tools.enabled_modules
+
+
+def test_default_system_prompt_mentions_chart_tools():
+    from vsa_agent.prompt import SYSTEM_PROMPT_DEFAULT
+
+    assert "fov_counts_with_chart" in SYSTEM_PROMPT_DEFAULT
+```
+
+- [x] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_config.py tests/unit/test_prompt.py -v`
+Expected: FAIL because chart tools are not yet registered
+
+- [x] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/register.py
+import vsa_agent.tools.chart_generator  # noqa: F401
+import vsa_agent.tools.fov_counts_with_chart  # noqa: F401
+
+# config.yaml
+tools:
+  enabled_modules:
+  - vsa_agent.tools.chart_generator
+  - vsa_agent.tools.fov_counts_with_chart
+
+# src/vsa_agent/prompt.py
+"- fov_counts_with_chart(...): Generate event counts and chart-ready markdown tables for reports.\n"
+```
+
+- [x] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_config.py tests/unit/test_prompt.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/register.py config.yaml src/vsa_agent/prompt.py tests/unit/test_config.py tests/unit/test_prompt.py
+git commit -m "feat: register chart report tools"
+```
+
+### Task 5: 补齐“报告 + 图表”验收测试
+
+**Files:**
+- Create: `tests/acceptance/test_report_chart_flow.py`
+
+- [x] **Step 1: 写失败测试，验证聚合报告包含统计概览与图表区块**
+
+```python
+import pytest
+
+from vsa_agent.agents.data_models import AgentOutput
+from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+from vsa_agent.tools.report_gen import generate_multi_report
+
+
+@pytest.mark.anyio
+async def test_multi_report_flow_with_chart_blocks():
+    async def fake_video_understanding_fn(**kwargs):
+        source_name = kwargs.get("sensor_id") or kwargs.get("video_path")
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": f"summary for {source_name}",
+            "chunks": [],
+            "events": [{"label": "walking", "description": "person walking"}],
+        }
+
+    result = await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="仓库巡检聚合报告",
+            query="生成聚合报告",
+            sources=[
+                MultiReportSourceItem(sensor_id="camera-1"),
+                MultiReportSourceItem(video_path="video-a.mp4"),
+            ],
+        ),
+        video_understanding_fn=fake_video_understanding_fn,
+        report_gen_fn=generate_multi_report,
+    )
+    assert isinstance(result, AgentOutput)
+    assert result.status == "success"
+    assert "## 统计概览" in result.side_effects["markdown_content"]
+    assert "## 图表" in result.side_effects["markdown_content"]
+    assert "| 事件类型 | 次数 |" in result.side_effects["markdown_content"]
+```
+
+- [x] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/acceptance/test_report_chart_flow.py -v`
+Expected: FAIL until chart blocks are wired
+
+- [x] **Step 3: 回跑验收与全量回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/acceptance/test_report_chart_flow.py -v`
+Expected: PASS
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/ -q`
+Expected: all tests PASS
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/acceptance/test_report_chart_flow.py
+git commit -m "test: add chart-enhanced report acceptance flow"
+```
+
+---
+
+## 自检
+
+### 覆盖性检查
+- `chart_generator` 最小图表契约：Task 1 覆盖
+- `fov_counts_with_chart` 统计与图表组装：Task 2 覆盖
+- 图表区块接入 `report_gen / template_report_gen`：Task 3 覆盖
+- 运行时注册链与提示词：Task 4 覆盖
+- 报告链路带图表验收：Task 5 覆盖
+
+### 占位符检查
+- 没有 `TODO`、`TBD`、`implement later`
+- 每个任务都有精确文件路径、测试命令、最小代码骨架
+
+### 类型一致性检查
+- 统一使用 `ChartSeriesItem`
+- 统一使用 `ChartArtifact`
+- 统一使用 `CountWithChartResult`
+- 统一使用 `generate_bar_chart_artifact`
+- 统一使用 `build_event_count_chart`
+
+### 执行说明
+- 本计划只覆盖 Phase 3 剩余部分的“图表与统计输出”
+- 第一版只做事件标签计数 + 柱状图元数据 + Markdown 表格
+- 不引入真实图片渲染、不引入外部图表前端库、不引入 incidents / geolocation
 - 继续严格按 TDD：先红灯，再最小实现，再全量回归
 
 ---
