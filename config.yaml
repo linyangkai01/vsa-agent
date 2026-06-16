@@ -21,12 +21,15 @@ tools:
   - vsa_agent.tools.frame_extract
   - vsa_agent.tools.video_understanding
   - vsa_agent.tools.video_report_gen
+  - vsa_agent.tools.template_report_gen
+  - vsa_agent.tools.report_gen
   - vsa_agent.tools.embed_search
   - vsa_agent.tools.attribute_search
   - vsa_agent.tools.search
   - vsa_agent.agents.search_agent
   - vsa_agent.agents.critic_agent
   - vsa_agent.agents.report_agent
+  - vsa_agent.agents.multi_report_agent
 server:
   host: 0.0.0.0
   port: 8000
@@ -43,12 +46,13 @@ prompts:
     \ for video clips by description.\n- search_agent(query): Full search workflow\
     \ with query decomposition.\n- critic_agent(query, videos_json): Verify search\
     \ results against the original query using VLM.\n- report_agent(video_path,\
-    \ sensor_id, query): Generate a single-video markdown report.\n- echo(message): Simple echo\
+    \ sensor_id, query): Generate a single-video markdown report.\n- multi_report_agent(sources,\
+    \ report_title, query): Generate one markdown report from multiple sources.\n- echo(message): Simple echo\
     \ for testing.\n\nWORKFLOW:\nWhen the user asks about a video:\n1. Use find_video\
     \ to locate the video file by name.\n2. Use video_understanding with the returned\
     \ path and the user's question.\n   (The tool automatically handles frame extraction\
     \ and long video chunking.)\n3. If the user wants a deliverable report, use\
-    \ report_agent to generate markdown output.\n4. Synthesize the analysis into\
+    \ report_agent or multi_report_agent to generate markdown output.\n4. Synthesize the analysis into\
     \ a clear answer.\n\
     \nIMPORTANT:\n- video_understanding is a one-step tool. Do NOT call frame_extract\
     \ first.\n- Keep responses concise and focused on safety observations."

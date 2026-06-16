@@ -42,3 +42,9 @@ class TestGetConfig:
         cfg = AppConfig.from_yaml("config.yaml")
         assert "vsa_agent.tools.video_report_gen" in cfg.tools.enabled_modules
         assert "vsa_agent.agents.report_agent" in cfg.tools.enabled_modules
+
+    def test_main_config_enables_multi_report_modules(self):
+        cfg = AppConfig.from_yaml("config.yaml")
+        assert "vsa_agent.tools.template_report_gen" in cfg.tools.enabled_modules
+        assert "vsa_agent.tools.report_gen" in cfg.tools.enabled_modules
+        assert "vsa_agent.agents.multi_report_agent" in cfg.tools.enabled_modules
