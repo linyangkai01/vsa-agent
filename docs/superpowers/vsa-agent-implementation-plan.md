@@ -178,22 +178,26 @@
 - [x] 已完成 `report_agent_tool` 注册
 
 ### Task 3.2: 实现 multi_report_agent.py
+- [x] 已完成 `multi_report_agent.py`
+- [x] 已支持多 `video_file / rtsp` 混合输入
+- [x] 已完成 `multi_report_agent_tool` 注册
 
 ### Task 3.3: 实现 report_gen.py / template_report_gen.py / video_report_gen.py
 - [x] 已完成 `video_report_gen.py`
 - [x] 已完成固定 Markdown 模板输出
 - [x] 已保留下载元数据扩展位
-- [ ] `report_gen.py`
-- [ ] `template_report_gen.py`
+- [x] 已完成 `report_gen.py`
+- [x] 已完成 `template_report_gen.py`
 
 ### Task 3.4: 实现 chart_generator.py / fov_counts_with_chart.py
 
 ### Phase 3 当前进度（2026-06-16）
 - [x] 单视频报告主链完成
 - [x] 新增验收测试 `tests/acceptance/test_report_flow.py`
-- [x] 全量回归通过：`261 passed`
-- [ ] 多事件报告
-- [ ] 模板化报告总装
+- [x] 多事件报告主链完成
+- [x] 新增验收测试 `tests/acceptance/test_multi_report_flow.py`
+- [x] 全量回归通过：`267 passed`
+- [x] 模板化报告总装
 - [ ] 图表与统计输出
 
 ---
