@@ -11,6 +11,7 @@ from pydantic import Field
 
 from vsa_agent.agents.data_models import AgentOutput
 from vsa_agent.registry import register_tool
+from vsa_agent.tools.video_understanding import analyze_video
 
 VideoUnderstandingCallable = Callable[..., Awaitable[Any]]
 VideoReportCallable = Callable[..., Awaitable[Any]]
@@ -42,9 +43,7 @@ def _normalize_report_result(report_result: Any) -> tuple[str, dict[str, Any], s
 
 
 async def _default_video_understanding_fn(**kwargs):
-    from vsa_agent.tools.video_understanding import analyze_video_segment
-
-    return await analyze_video_segment(**kwargs)
+    return await analyze_video(**kwargs)
 
 
 async def _default_video_report_gen_fn(**kwargs):

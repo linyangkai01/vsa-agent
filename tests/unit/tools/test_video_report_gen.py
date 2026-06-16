@@ -37,6 +37,7 @@ async def test_generate_video_report_uses_fixed_sections():
         },
     )
 
+    assert result.markdown_content.startswith("# 单视频分析报告")
     assert "## 视频源" in result.markdown_content
     assert "## 用户问题" in result.markdown_content
     assert "## 摘要" in result.markdown_content

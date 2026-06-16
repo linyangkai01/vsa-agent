@@ -12,6 +12,7 @@ from pydantic import Field
 from vsa_agent.agents.data_models import AgentOutput
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.report_gen import ReportSectionInput
+from vsa_agent.tools.video_understanding import analyze_video
 
 VideoUnderstandingCallable = Callable[..., Awaitable[Any]]
 ReportGenCallable = Callable[..., Awaitable[Any]]
@@ -37,9 +38,7 @@ def _resolve_source_type(item: MultiReportSourceItem) -> str:
 
 
 async def _default_video_understanding_fn(**kwargs):
-    from vsa_agent.tools.video_understanding import analyze_video_segment
-
-    return await analyze_video_segment(**kwargs)
+    return await analyze_video(**kwargs)
 
 
 async def _default_report_gen_fn(**kwargs):

@@ -53,3 +53,7 @@ class TestGetConfig:
         cfg = AppConfig.from_yaml("config.yaml")
         assert "vsa_agent.tools.chart_generator" in cfg.tools.enabled_modules
         assert "vsa_agent.tools.fov_counts_with_chart" in cfg.tools.enabled_modules
+
+    def test_main_config_uses_blank_dev_api_key(self):
+        cfg = AppConfig.from_yaml("config.yaml")
+        assert cfg.model.dev.api_key == ""

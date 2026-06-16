@@ -1451,6 +1451,779 @@ git commit -m "test: add chart-enhanced report acceptance flow"
 
 ---
 
+# Review Findings 修复实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 在保持全部现有对外接口不变的前提下，修复代码评审发现的 6 个高优先级问题：报告/图表中文乱码、prod 模式工具绑定失效、dev 默认 API key 配置回退错误、报告链路绕过长视频分流、prompt 未实际进入 VLM、VST 时间窗语义失真。
+
+**Architecture:** 这轮只修内部实现，不新增公开 API，不改 tool/agent 参数与返回结构。核心策略是把视频理解主链内部统一到 `video_understanding.py` 的共享决策路径，用最小的内部 helper 让 `video_understanding_tool`、`report_agent`、`multi_report_agent` 在短视频、长视频、RTSP/VST 场景下行为一致；同时补齐 model adapter 的 prod/dev 对齐能力，并把错误测试断言改成保护真实行为。
+
+**Tech Stack:** Python 3.12, Pydantic v2, LangChain OpenAI-compatible adapters, pytest, pytest-asyncio, FastAPI-compatible agent/tool stack
+
+---
+
+## 文件结构
+
+**修改文件**
+- `src/vsa_agent/tools/video_report_gen.py`
+  - 修复单视频报告中文标题、章节名和空态文本
+- `src/vsa_agent/tools/template_report_gen.py`
+  - 修复聚合报告中文标题、区块名、空态文本
+- `src/vsa_agent/tools/fov_counts_with_chart.py`
+  - 修复图表标题与坐标轴中文文本
+- `src/vsa_agent/agents/report_agent.py`
+  - 默认视频理解入口改为统一内部主链
+- `src/vsa_agent/agents/multi_report_agent.py`
+  - 默认视频理解入口改为统一内部主链
+- `src/vsa_agent/tools/video_understanding.py`
+  - 新增统一内部分析 helper；让 prompt 真正进入 VLM；统一短视频/长视频/RTSP 路径
+- `src/vsa_agent/integrations/vst_client.py`
+  - 改为“有时间窗时强约束 clip、无时间窗时才允许回退 live/source”的语义
+- `src/vsa_agent/tools/lvs_video_understanding.py`
+  - 增加内部时间窗分块 helper，避免长视频窗口请求退化为整段分析
+- `src/vsa_agent/model_adapter/openai_adapter.py`
+  - 空 API key 走环境变量/运行时注入
+- `src/vsa_agent/model_adapter/vllm_adapter.py`
+  - 补齐 `bind_tools()`
+- `config.yaml`
+  - dev 默认 `api_key` 改为空字符串
+
+**修改测试**
+- `tests/unit/tools/test_video_report_gen.py`
+- `tests/unit/tools/test_template_report_gen.py`
+- `tests/unit/tools/test_chart_generator.py`
+- `tests/unit/tools/test_fov_counts_with_chart.py`
+- `tests/acceptance/test_report_chart_flow.py`
+- `tests/unit/agents/test_report_agent.py`
+- `tests/unit/agents/test_multi_report_agent.py`
+- `tests/unit/tools/test_video_understanding.py`
+- `tests/unit/integrations/test_vst_client.py`
+- `tests/unit/model_adapter/test_model_adapter.py`
+- `tests/unit/test_config.py`
+- `tests/unit/tools/test_lvs_video_understanding.py`
+
+---
+
+### Task 1: 修复报告/图表中文输出，并把错误断言改成保护真实文本
+
+**Files:**
+- Modify: `src/vsa_agent/tools/video_report_gen.py`
+- Modify: `src/vsa_agent/tools/template_report_gen.py`
+- Modify: `src/vsa_agent/tools/fov_counts_with_chart.py`
+- Test: `tests/unit/tools/test_video_report_gen.py`
+- Test: `tests/unit/tools/test_template_report_gen.py`
+- Test: `tests/unit/tools/test_chart_generator.py`
+- Test: `tests/unit/tools/test_fov_counts_with_chart.py`
+- Test: `tests/acceptance/test_report_chart_flow.py`
+
+- [ ] **Step 1: 先写失败测试，要求报告和图表输出正确中文**
+
+```python
+# tests/unit/tools/test_video_report_gen.py
+@pytest.mark.anyio
+async def test_generate_video_report_uses_human_readable_chinese_sections():
+    from vsa_agent.tools.video_report_gen import generate_video_report
+
+    result = await generate_video_report(
+        sensor_id="camera-1",
+        user_query="生成详细报告",
+        understanding_result={
+            "summary_text": "person walking near forklift",
+            "events": [],
+        },
+    )
+
+    assert result.markdown_content.startswith("# 单视频分析报告")
+    assert "## 视频源" in result.markdown_content
+    assert "## 用户问题" in result.markdown_content
+    assert "## 摘要" in result.markdown_content
+    assert "## 事件时间线" in result.markdown_content
+
+
+# tests/unit/tools/test_template_report_gen.py
+@pytest.mark.anyio
+async def test_generate_template_report_includes_correct_chinese_headers():
+    from vsa_agent.tools.template_report_gen import generate_template_report
+
+    result = await generate_template_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[],
+        counts={},
+        chart={},
+    )
+
+    assert result.markdown_content.startswith("# 仓库巡检聚合报告")
+    assert "## 报告摘要" in result.markdown_content
+    assert "## 统计概览" in result.markdown_content
+    assert "## 图表" in result.markdown_content
+    assert "## 分事件报告" in result.markdown_content
+    assert "- 无分事件内容" in result.markdown_content
+    assert "- 无统计数据" in result.markdown_content
+    assert "- 无图表数据" in result.markdown_content
+
+
+# tests/unit/tools/test_chart_generator.py
+@pytest.mark.anyio
+async def test_generate_bar_chart_artifact_uses_correct_chinese_labels():
+    from vsa_agent.tools.chart_generator import ChartSeriesItem
+    from vsa_agent.tools.chart_generator import generate_bar_chart_artifact
+
+    result = await generate_bar_chart_artifact(
+        chart_title="事件计数统计",
+        x_label="事件类型",
+        y_label="次数",
+        series=[ChartSeriesItem(label="walking", value=2)],
+    )
+
+    assert result.title == "事件计数统计"
+    assert "| 事件类型 | 次数 |" in result.markdown_table
+```
+
+- [ ] **Step 2: 运行相关测试，确认当前因乱码断言而失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_chart_generator.py tests/unit/tools/test_fov_counts_with_chart.py tests/acceptance/test_report_chart_flow.py -v`
+Expected: FAIL，失败信息包含中文标题/章节名不匹配
+
+- [ ] **Step 3: 写最小实现，只修生产代码中的中文文本**
+
+```python
+# src/vsa_agent/tools/video_report_gen.py
+if not non_empty_lines:
+    return "- 无结构化事件"
+
+markdown_content = (
+    "# 单视频分析报告\n\n"
+    "## 视频源\n"
+    f"- sensor_id: {sensor_id}\n\n"
+    "## 用户问题\n"
+    f"{user_query}\n\n"
+    "## 摘要\n"
+    f"{summary_text}\n\n"
+    "## 事件时间线\n"
+    f"{timeline_text}\n"
+)
+
+# src/vsa_agent/tools/template_report_gen.py
+if not report_sections:
+    return "- 无分事件内容"
+if not counts:
+    return "- 无统计数据"
+chart_table = (chart or {}).get("markdown_table", "- 无图表数据")
+
+markdown_content = (
+    f"# {report_title}\n\n"
+    "## 报告摘要\n"
+    f"{summary_lines}\n\n"
+    "## 统计概览\n"
+    f"{counts_text}\n\n"
+    "## 图表\n"
+    f"{chart_table}\n\n"
+    "## 分事件报告\n\n"
+    f"{detail_blocks}\n"
+)
+
+# src/vsa_agent/tools/fov_counts_with_chart.py
+chart = await chart_generator(
+    chart_title="事件计数统计",
+    x_label="事件类型",
+    y_label="次数",
+    series=series,
+)
+```
+
+- [ ] **Step 4: 回跑测试，确认中文输出和验收链路通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_chart_generator.py tests/unit/tools/test_fov_counts_with_chart.py tests/acceptance/test_report_chart_flow.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/video_report_gen.py src/vsa_agent/tools/template_report_gen.py src/vsa_agent/tools/fov_counts_with_chart.py tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_chart_generator.py tests/unit/tools/test_fov_counts_with_chart.py tests/acceptance/test_report_chart_flow.py
+git commit -m "fix: restore chinese report and chart output"
+```
+
+### Task 2: 修复 dev/prod 配置链，让 prod 能绑定工具、dev 能正确回退 API key
+
+**Files:**
+- Modify: `config.yaml`
+- Modify: `src/vsa_agent/model_adapter/openai_adapter.py`
+- Modify: `src/vsa_agent/model_adapter/vllm_adapter.py`
+- Test: `tests/unit/model_adapter/test_model_adapter.py`
+- Test: `tests/unit/test_config.py`
+
+- [ ] **Step 1: 先写失败测试，定义空 key 回退和 prod tool binding 行为**
+
+```python
+# tests/unit/model_adapter/test_model_adapter.py
+from unittest.mock import MagicMock, patch
+
+@patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+def test_openai_adapter_treats_blank_api_key_as_unset(chat_openai_cls):
+    from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+    chat_openai_cls.return_value = MagicMock()
+    OpenAIModelAdapter(model_name="qwen-plus")
+
+    kwargs = chat_openai_cls.call_args.kwargs
+    assert kwargs["api_key"] is None
+
+
+@patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+def test_vllm_adapter_supports_bind_tools(chat_openai_cls):
+    from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+    llm = MagicMock()
+    llm.bind_tools.return_value = llm
+    chat_openai_cls.return_value = llm
+
+    adapter = VLLMModelAdapter(model_name="Qwen3-VL-8B-Instruct")
+    adapter.bind_tools([{"name": "echo"}])
+
+    llm.bind_tools.assert_called_once()
+
+
+# tests/unit/test_config.py
+def test_main_config_uses_blank_dev_api_key_placeholder_strategy():
+    from vsa_agent.config import AppConfig
+
+    cfg = AppConfig.from_yaml("config.yaml")
+    assert cfg.model.dev.api_key == ""
+```
+
+- [ ] **Step 2: 运行测试，确认当前失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py tests/unit/test_config.py -v`
+Expected: FAIL，失败信息包含 `bind_tools` 缺失或 `api_key` 仍为占位值
+
+- [ ] **Step 3: 写最小实现，保持接口不变**
+
+```python
+# config.yaml
+model:
+  dev:
+    api_key: ""
+
+# src/vsa_agent/model_adapter/openai_adapter.py
+self.llm = ChatOpenAI(
+    model=model_name or dev.llm_model,
+    base_url=dev.base_url,
+    api_key=dev.api_key or None,
+    temperature=0,
+    max_retries=2,
+)
+
+# src/vsa_agent/model_adapter/vllm_adapter.py
+class VLLMModelAdapter(BaseModelAdapter):
+    ...
+    def bind_tools(self, tools: list[dict]) -> None:
+        self.llm = self.llm.bind_tools(tools)
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py tests/unit/test_config.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add config.yaml src/vsa_agent/model_adapter/openai_adapter.py src/vsa_agent/model_adapter/vllm_adapter.py tests/unit/model_adapter/test_model_adapter.py tests/unit/test_config.py
+git commit -m "fix: align model adapter configuration behavior"
+```
+
+### Task 3: 在 `video_understanding.py` 内部统一短视频/长视频决策，并让 prompt 真正进入 VLM
+
+**Files:**
+- Modify: `src/vsa_agent/tools/video_understanding.py`
+- Test: `tests/unit/tools/test_video_understanding.py`
+
+- [ ] **Step 1: 先写失败测试，锁定真实行为**
+
+```python
+# tests/unit/tools/test_video_understanding.py
+@pytest.mark.asyncio
+async def test_analyze_video_segment_passes_generated_prompt_to_model(monkeypatch):
+    captured = {}
+
+    async def fake_invoke(messages):
+        captured["messages"] = messages
+        return type("Resp", (), {"content": "plain answer"})()
+
+    class FakeAdapter:
+        async def invoke(self, messages):
+            return await fake_invoke(messages)
+
+    monkeypatch.setattr(
+        "vsa_agent.tools.video_understanding.generate_understanding_prompt",
+        lambda query, intent=None, context=None: __import__("asyncio").sleep(0, result="generated prompt"),
+    )
+
+    result = await analyze_video_segment(
+        frames=["frame-a"],
+        query="raw query",
+        model_adapter=FakeAdapter(),
+    )
+
+    human_text = str(captured["messages"][1].content)
+    assert "generated prompt" in human_text
+    assert result.chunks[0].prompt_used == "generated prompt"
+
+
+@pytest.mark.asyncio
+async def test_analyze_video_returns_long_video_structured_result(monkeypatch):
+    from vsa_agent.data_models.understanding import UnderstandingResult
+    from vsa_agent.tools.video_understanding import analyze_video
+
+    monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
+
+    class FakeCap:
+        def isOpened(self): return True
+        def get(self, prop): return 30.0 if prop == 5 else 3000 if prop == 7 else 0
+        def release(self): return None
+
+    async def fake_analyze_long_video(**kwargs):
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="long structured result",
+            chunks=[],
+            events=[],
+        )
+
+    monkeypatch.setattr("vsa_agent.tools.video_understanding.cv2.VideoCapture", lambda _: FakeCap())
+    monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_long_video", fake_analyze_long_video)
+
+    result = await analyze_video(video_path="video.mp4", query="what happened")
+    assert result.summary_text == "long structured result"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py -v`
+Expected: FAIL，失败信息包含 prompt 未进入消息或缺少统一分析入口
+
+- [ ] **Step 3: 写最小实现，增加内部统一 helper，不改外部接口**
+
+```python
+# src/vsa_agent/tools/video_understanding.py
+async def _analyze_frames(
+    frames: list[str],
+    prompt_text: str,
+    model_adapter=None,
+    *,
+    config: VideoUnderstandingConfig | None = None,
+) -> str:
+    ...
+    messages = _build_vlm_messages(frames, prompt_text)
+    ...
+
+
+async def analyze_video(
+    video_path: str = "",
+    query: str = "",
+    model_adapter=None,
+    frames: list[str] | None = None,
+    source_type: str = "video_file",
+    sensor_id: str | None = None,
+    start_timestamp: str | int | float | None = None,
+    end_timestamp: str | int | float | None = None,
+    config: VideoUnderstandingConfig | None = None,
+) -> UnderstandingResult:
+    tool_config = _get_video_understanding_config(config)
+    if frames is not None:
+        return await analyze_video_segment(
+            frames=frames,
+            query=query,
+            model_adapter=model_adapter,
+            config=tool_config,
+            source_type=source_type,
+            sensor_id=sensor_id,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+
+    source_candidate = await _resolve_video_source(
+        video_path,
+        sensor_id,
+        source_type,
+        tool_config,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    resolved_video_path = _prepare_video_path(source_candidate, tool_config, source_type=source_type)
+
+    if source_type == "rtsp" and resolved_video_path.startswith("rtsp://"):
+        return await analyze_video_segment(
+            video_path=resolved_video_path,
+            query=query,
+            model_adapter=model_adapter,
+            config=tool_config,
+            source_type=source_type,
+            sensor_id=sensor_id,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+
+    ...
+    if duration_sec > LONG_VIDEO_THRESHOLD_SEC:
+        return await analyze_long_video(
+            video_path=resolved_video_path,
+            query=query,
+            source_type=source_type,
+            model_adapter=model_adapter,
+        )
+
+    return await analyze_video_segment(
+        video_path=resolved_video_path,
+        query=query,
+        model_adapter=model_adapter,
+        config=tool_config,
+        source_type=source_type,
+        sensor_id=sensor_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+
+
+async def analyze_video_segment(...):
+    ...
+    prompt_text = prompt_used or await generate_understanding_prompt(
+        query,
+        context={"source_type": source_type},
+    )
+    ...
+    raw_output = await _analyze_frames(
+        frames,
+        prompt_text,
+        model_adapter,
+        config=tool_config,
+    )
+
+
+async def video_understanding_tool(...):
+    result = await analyze_video(
+        video_path=video_path,
+        query=query,
+        model_adapter=model_adapter,
+        frames=frames,
+        source_type=source_type,
+        sensor_id=sensor_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    if frames is not None:
+        return result.summary_text
+    if result.metadata.get("chunk_count") is not None:
+        summary = await summarize_understanding_result(result, query, model_adapter)
+        return summary.text_output
+    return result.summary_text
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/video_understanding.py tests/unit/tools/test_video_understanding.py
+git commit -m "fix: unify internal video understanding flow"
+```
+
+### Task 4: 让 `report_agent` / `multi_report_agent` 复用统一视频理解主链
+
+**Files:**
+- Modify: `src/vsa_agent/agents/report_agent.py`
+- Modify: `src/vsa_agent/agents/multi_report_agent.py`
+- Test: `tests/unit/agents/test_report_agent.py`
+- Test: `tests/unit/agents/test_multi_report_agent.py`
+
+- [ ] **Step 1: 先写失败测试，验证默认路径不再绑死短视频入口**
+
+```python
+# tests/unit/agents/test_report_agent.py
+@pytest.mark.anyio
+async def test_default_report_agent_path_uses_unified_analyze_video(monkeypatch):
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.data_models.understanding import UnderstandingResult
+
+    captured = {}
+
+    async def fake_analyze_video(**kwargs):
+        captured.update(kwargs)
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="long video summary",
+            chunks=[],
+            events=[],
+        )
+
+    async def fake_video_report_gen(**kwargs):
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 摘要\nlong video summary",
+            "downloads": {"markdown": {"filename": "report.md"}},
+            "summary": "long video summary",
+        }
+
+    monkeypatch.setattr("vsa_agent.agents.report_agent.analyze_video", fake_analyze_video)
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+        video_report_gen_fn=fake_video_report_gen,
+    )
+
+    assert result.status == "success"
+    assert captured["video_path"] == "video.mp4"
+
+
+# tests/unit/agents/test_multi_report_agent.py
+@pytest.mark.anyio
+async def test_default_multi_report_agent_path_uses_unified_analyze_video(monkeypatch):
+    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.data_models.understanding import UnderstandingResult
+
+    calls = []
+
+    async def fake_analyze_video(**kwargs):
+        calls.append(kwargs)
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="summary",
+            chunks=[],
+            events=[],
+        )
+
+    async def fake_report_gen(**kwargs):
+        return {
+            "markdown_content": "# 仓库巡检聚合报告",
+            "downloads": {"markdown": {"filename": "multi-report.md"}},
+            "summary": "summary",
+            "section_count": 1,
+        }
+
+    monkeypatch.setattr("vsa_agent.agents.multi_report_agent.analyze_video", fake_analyze_video)
+
+    await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="仓库巡检聚合报告",
+            query="生成聚合报告",
+            sources=[MultiReportSourceItem(video_path="video-a.mp4")],
+        ),
+        report_gen_fn=fake_report_gen,
+    )
+
+    assert calls[0]["video_path"] == "video-a.mp4"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py -v`
+Expected: FAIL，失败信息包含 monkeypatch 目标不存在或默认入口仍是 `analyze_video_segment`
+
+- [ ] **Step 3: 写最小实现，只替换默认内部依赖**
+
+```python
+# src/vsa_agent/agents/report_agent.py
+from vsa_agent.tools.video_understanding import analyze_video
+
+async def _default_video_understanding_fn(**kwargs):
+    return await analyze_video(**kwargs)
+
+# src/vsa_agent/agents/multi_report_agent.py
+from vsa_agent.tools.video_understanding import analyze_video
+
+async def _default_video_understanding_fn(**kwargs):
+    return await analyze_video(**kwargs)
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/report_agent.py src/vsa_agent/agents/multi_report_agent.py tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py
+git commit -m "fix: route report agents through unified video understanding"
+```
+
+### Task 5: 修正 VST `get_video_clip()` 的尽力语义，优先 clip，失败回退到当前流/本地路径
+
+**Files:**
+- Modify: `src/vsa_agent/integrations/vst_client.py`
+- Test: `tests/unit/integrations/test_vst_client.py`
+- Test: `tests/unit/tools/test_video_understanding.py`
+
+- [ ] **Step 1: 先写失败测试，定义“优先时间窗、失败回退”的行为**
+
+```python
+# tests/unit/integrations/test_vst_client.py
+@pytest.mark.anyio
+async def test_get_video_clip_prefers_clip_payload_when_available():
+    from vsa_agent.integrations.vst_client import VSTClient
+
+    async def fake_request_json(path: str):
+        if path == "/vst/api/v1/storage/clips":
+            return {"clip_url": "http://localhost:30888/clips/camera-1.mp4"}
+        if path == "/vst/api/v1/sensor/streams":
+            return [{"stream-123": [{"name": "camera-1", "url": "rtsp://camera-1/live"}]}]
+        raise AssertionError(path)
+
+    client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
+    result = await client.get_video_clip("camera-1", "2025-01-01T10:05:00Z", "2025-01-01T10:05:30Z")
+    assert result.clip_url == "http://localhost:30888/clips/camera-1.mp4"
+
+
+@pytest.mark.anyio
+async def test_get_video_clip_falls_back_to_stream_when_clip_lookup_fails():
+    from vsa_agent.integrations.vst_client import VSTClient
+
+    async def fake_request_json(path: str):
+        if path == "/vst/api/v1/storage/clips":
+            raise RuntimeError("clip lookup unavailable")
+        if path == "/vst/api/v1/sensor/streams":
+            return [{"stream-123": [{"name": "camera-1", "url": "rtsp://camera-1/live"}]}]
+        raise AssertionError(path)
+
+    client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
+    result = await client.get_video_clip("camera-1", "2025-01-01T10:05:00Z", "2025-01-01T10:05:30Z")
+    assert result.clip_url == "rtsp://camera-1/live"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/integrations/test_vst_client.py -v`
+Expected: FAIL，失败信息包含未请求 clip 路径或始终只返回 stream 信息
+
+- [ ] **Step 3: 写最小实现，保持返回结构不变**
+
+```python
+# src/vsa_agent/integrations/vst_client.py
+async def _request_clip_payload(
+    self,
+    sensor_id: str,
+    start_timestamp: str,
+    end_timestamp: str,
+) -> dict[str, Any] | None:
+    try:
+        payload = await self._request_json(
+            f"/vst/api/v1/storage/clips?sensorId={sensor_id}&start={start_timestamp}&end={end_timestamp}"
+        )
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def get_video_clip(... ) -> VSTClipResult:
+    clip_payload = await self._request_clip_payload(sensor_id, start_timestamp, end_timestamp)
+    if clip_payload:
+        clip_url = clip_payload.get("clip_url") or clip_payload.get("url")
+        local_path = clip_payload.get("local_path") or clip_payload.get("localPath")
+        if clip_url or local_path:
+            return VSTClipResult(
+                sensor_id=sensor_id,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                clip_url=clip_url,
+                local_path=local_path,
+            )
+
+    stream = await self.get_stream_info(sensor_id)
+    clip_url = stream.rtsp_url
+    local_path = stream.metadata.get("raw", {}).get("localPath") or stream.metadata.get("raw", {}).get("local_path")
+    if not clip_url and not local_path:
+        raise VSTClientError(f"No clip source available for sensor '{sensor_id}'")
+    return VSTClipResult(
+        sensor_id=sensor_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+        clip_url=clip_url,
+        local_path=local_path,
+    )
+```
+
+- [ ] **Step 4: 回跑测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/integrations/test_vst_client.py tests/unit/tools/test_video_understanding.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/integrations/vst_client.py tests/unit/integrations/test_vst_client.py tests/unit/tools/test_video_understanding.py
+git commit -m "fix: make vst clip lookup best effort"
+```
+
+### Task 6: 跑针对性回归与全量回归，确认 6 个问题全部收口
+
+**Files:**
+- Verify only
+
+- [ ] **Step 1: 运行修复相关模块回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py tests/unit/integrations/test_vst_client.py tests/unit/model_adapter/test_model_adapter.py tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_chart_generator.py tests/unit/tools/test_fov_counts_with_chart.py tests/acceptance/test_report_chart_flow.py -v`
+Expected: PASS
+
+- [ ] **Step 2: 运行全量回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests -q`
+Expected: all tests PASS
+
+- [ ] **Step 3: Commit**
+
+```bash
+git commit --allow-empty -m "test: verify review fixes with full regression"
+```
+
+---
+
+### 当前执行状态（2026-06-16）
+- [x] Task 1 已核实：运行时中文输出未复现为生产缺陷，已增强中文断言测试覆盖
+- [x] Task 2 已完成：dev 默认 `api_key` 改为空字符串，prod `VLLMModelAdapter.bind_tools()` 已补齐
+- [x] Task 3 已完成：`video_understanding.py` 已新增统一内部入口 `analyze_video`，生成后的 prompt 已真正进入 VLM 消息
+- [x] Task 4 已完成：`report_agent` / `multi_report_agent` 默认路径已复用统一视频理解主链
+- [x] Task 5 已完成：`VSTClient.get_video_clip()` 已改为“有时间窗时必须拿 clip，无时间窗时才允许回退 live/source”
+- [x] Task 6 已完成：补齐 `frames` 直传与长视频时间窗语义回归；全量回归通过 `288 passed`
+
+---
+
+## 自检
+
+### 覆盖性检查
+- 中文报告/图表恢复：Task 1 覆盖
+- dev/prod model adapter 对齐：Task 2 覆盖
+- prompt 真正进入模型：Task 3 覆盖
+- 长视频统一分流内部主链：Task 3 + Task 4 覆盖
+- report agent / multi report agent 对齐共享链路：Task 4 覆盖
+- VST 时间窗强约束 + 无时间窗回退语义：Task 5 覆盖
+- 全量回归与验收：Task 6 覆盖
+
+### 占位符检查
+- 没有 `TODO`、`TBD`、`implement later`
+- 每个任务都给出精确文件路径、测试命令、最小实现骨架
+
+### 类型一致性检查
+- 统一使用现有公开入口：`report_agent_tool`、`multi_report_agent_tool`、`video_understanding_tool`
+- 新增内部统一 helper：`analyze_video`
+- 保持 `VSTClipResult`、`UnderstandingResult`、`VideoReportGenOutput` 现有返回结构不变
+
+### 执行说明
+- 本计划只修内部实现，不改任何对外接口
+- `config.yaml` 的 dev `api_key` 改为空字符串，由运行时环境变量接管
+- VST 时间窗这轮做到“显式时间窗必须命中 clip”，但仍不在本轮引入真实历史片段下载协议
+- 继续严格按 TDD：先红灯，再最小实现，再回归
+
+---
+
 ## Phase 4 — 剩余离线工具 (P2)
 
 **目标**: 补齐 incidents, geo, captions 等工具

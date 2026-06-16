@@ -54,3 +54,19 @@ async def test_generate_template_report_includes_counts_and_chart_sections():
     assert "- walking: 2" in result.markdown_content
     assert "## 图表" in result.markdown_content
     assert "| 事件类型 | 次数 |" in result.markdown_content
+
+
+@pytest.mark.anyio
+async def test_generate_template_report_uses_correct_chinese_empty_states():
+    from vsa_agent.tools.template_report_gen import generate_template_report
+
+    result = await generate_template_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[],
+        counts={},
+        chart={},
+    )
+
+    assert "- 无分事件内容" in result.markdown_content
+    assert "- 无统计数据" in result.markdown_content
+    assert "- 无图表数据" in result.markdown_content

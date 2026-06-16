@@ -99,12 +99,56 @@ class VSTClient:
             end_timestamp=end,
         )
 
+    async def _request_clip_payload(
+        self,
+        sensor_id: str,
+        start_timestamp: str,
+        end_timestamp: str,
+    ) -> dict[str, Any]:
+        path = (
+            "/vst/api/v1/storage/clips"
+            f"?sensorId={sensor_id}&start={start_timestamp}&end={end_timestamp}"
+        )
+        payload = await self._request_json(path)
+        if not isinstance(payload, dict):
+            raise VSTClientError(f"Clip response for sensor '{sensor_id}' is not a JSON object")
+        return payload
+
     async def get_video_clip(
         self,
         sensor_id: str,
         start_timestamp: str,
         end_timestamp: str,
     ) -> VSTClipResult:
+        has_time_window = bool(start_timestamp.strip() or end_timestamp.strip())
+        if has_time_window:
+            try:
+                clip_payload = await self._request_clip_payload(
+                    sensor_id,
+                    start_timestamp,
+                    end_timestamp,
+                )
+            except VSTClientError:
+                raise
+            except Exception as exc:
+                raise VSTClientError(
+                    f"Failed to fetch clip for sensor '{sensor_id}' within requested time window"
+                ) from exc
+
+            clip_url = clip_payload.get("clip_url") or clip_payload.get("url")
+            local_path = clip_payload.get("local_path") or clip_payload.get("localPath")
+            if clip_url or local_path:
+                return VSTClipResult(
+                    sensor_id=sensor_id,
+                    start_timestamp=start_timestamp,
+                    end_timestamp=end_timestamp,
+                    clip_url=clip_url,
+                    local_path=local_path,
+                )
+            raise VSTClientError(
+                f"No clip source available for sensor '{sensor_id}' within requested time window"
+            )
+
         stream = await self.get_stream_info(sensor_id)
         clip_url = stream.rtsp_url
         local_path = stream.metadata.get("raw", {}).get("localPath") or stream.metadata.get(

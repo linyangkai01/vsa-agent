@@ -196,3 +196,40 @@ async def test_analyze_long_video_calls_segment_analyzer(monkeypatch):
     assert calls == [(0.0, 30.0), (30.0, 60.0), (60.0, 65.0)]
     assert isinstance(result, UnderstandingResult)
     assert "0.0-30.0" in result.summary_text
+
+
+@pytest.mark.anyio
+async def test_analyze_long_video_window_respects_requested_time_range(monkeypatch):
+    from vsa_agent.tools.lvs_video_understanding import _analyze_long_video_window
+
+    calls = []
+
+    def fake_probe(video_path):
+        assert video_path == "video.mp4"
+        return 120.0
+
+    async def fake_analyze_video_segment(**kwargs):
+        calls.append((kwargs["start_timestamp"], kwargs["end_timestamp"]))
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text=f"{kwargs['start_timestamp']}-{kwargs['end_timestamp']}",
+            chunks=[],
+            events=[],
+        )
+
+    monkeypatch.setattr("vsa_agent.tools.lvs_video_understanding._probe_video_duration", fake_probe)
+    monkeypatch.setattr("vsa_agent.tools.lvs_video_understanding.analyze_video_segment", fake_analyze_video_segment)
+
+    result = await _analyze_long_video_window(
+        video_path="video.mp4",
+        query="what happened",
+        source_type="video_file",
+        chunk_duration_sec=30,
+        start_timestamp="PT5S",
+        end_timestamp="PT55S",
+    )
+
+    assert calls == [(5.0, 35.0), (35.0, 55.0)]
+    assert isinstance(result, UnderstandingResult)
+    assert "5.0-35.0" in result.summary_text

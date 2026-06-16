@@ -6,7 +6,8 @@ from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.tools.video_understanding import (
     VideoUnderstandingInput, VideoUnderstandingConfig,
     _analyze_frames, _build_vlm_messages, _normalize_model_response,
-    _parse_thinking_from_content, _prepare_video_path, analyze_video_segment,
+    _parse_thinking_from_content, _prepare_video_path, analyze_video,
+    analyze_video_segment,
     video_understanding_tool,
 )
 
@@ -264,6 +265,30 @@ class TestParseThinkingFromContent:
 
 class TestAnalyzeVideoSegment:
     @pytest.mark.asyncio
+    async def test_frames_input_skips_rtsp_source_resolution(self, monkeypatch):
+        async def fail_if_called(*args, **kwargs):
+            raise AssertionError("_resolve_video_source should not run when frames are provided")
+
+        async def fake_prompt(query, intent=None, context=None):
+            return "generated prompt"
+
+        async def fake_analyze_frames(frames, query, model_adapter=None, config=None):
+            return "plain answer"
+
+        monkeypatch.setattr("vsa_agent.tools.video_understanding._resolve_video_source", fail_if_called)
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.generate_understanding_prompt", fake_prompt)
+        monkeypatch.setattr("vsa_agent.tools.video_understanding._analyze_frames", fake_analyze_frames)
+
+        result = await analyze_video_segment(
+            frames=["frame-a"],
+            query="what happened",
+            source_type="rtsp",
+            sensor_id="camera-unknown",
+        )
+
+        assert result.summary_text == "plain answer"
+
+    @pytest.mark.asyncio
     async def test_generates_prompt_when_not_provided(self, monkeypatch):
         monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
         monkeypatch.setattr(
@@ -367,6 +392,126 @@ class TestAnalyzeFramesRetry:
         assert adapter.calls == 3
 
 
+class TestUnifiedAnalyzeVideoFlow:
+    @pytest.mark.asyncio
+    async def test_analyze_video_segment_passes_generated_prompt_to_model(self, monkeypatch):
+        captured = {}
+
+        async def fake_prompt(query, intent=None, context=None):
+            return "generated prompt"
+
+        class FakeAdapter:
+            async def invoke(self, messages):
+                captured["messages"] = messages
+                return type("Resp", (), {"content": "plain answer"})()
+
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding.generate_understanding_prompt",
+            fake_prompt,
+        )
+
+        result = await analyze_video_segment(
+            frames=["frame-a"],
+            query="raw query",
+            model_adapter=FakeAdapter(),
+        )
+
+        human_message = captured["messages"][1]
+        text_part = next(
+            part["text"]
+            for part in human_message.content
+            if part["type"] == "text"
+        )
+        assert "generated prompt" in text_part
+        assert "raw query" not in text_part
+        assert result.chunks[0].prompt_used == "generated prompt"
+
+    @pytest.mark.asyncio
+    async def test_module_exposes_unified_analyze_video_for_structured_results(self, monkeypatch):
+        import vsa_agent.tools.video_understanding as video_understanding_module
+
+        assert hasattr(video_understanding_module, "analyze_video")
+
+        async def fake_analyze_long_video(**kwargs):
+            return UnderstandingResult(
+                query=kwargs["query"],
+                source_type=kwargs["source_type"],
+                summary_text="long structured result",
+                chunks=[],
+                events=[],
+            )
+
+        class FakeCap:
+            def isOpened(self):
+                return True
+
+            def get(self, prop):
+                if prop == 5:
+                    return 30.0
+                if prop == 7:
+                    return 3000
+                return 0
+
+            def release(self):
+                return None
+
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.cv2.VideoCapture", lambda _: FakeCap())
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_long_video", fake_analyze_long_video)
+
+        result = await video_understanding_module.analyze_video(
+            video_path="video.mp4",
+            query="what happened",
+        )
+
+        assert isinstance(result, UnderstandingResult)
+        assert result.summary_text == "long structured result"
+
+    @pytest.mark.asyncio
+    async def test_analyze_video_forwards_time_window_to_long_video_path(self, monkeypatch):
+        captured = {}
+
+        async def fake_analyze_long_video(**kwargs):
+            captured.update(kwargs)
+            return UnderstandingResult(
+                query=kwargs["query"],
+                source_type=kwargs["source_type"],
+                summary_text="long structured result",
+                chunks=[],
+                events=[],
+                metadata={"chunk_count": 1},
+            )
+
+        class FakeCap:
+            def isOpened(self):
+                return True
+
+            def get(self, prop):
+                if prop == 5:
+                    return 30.0
+                if prop == 7:
+                    return 3000
+                return 0
+
+            def release(self):
+                return None
+
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.cv2.VideoCapture", lambda _: FakeCap())
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_long_video", fake_analyze_long_video)
+
+        result = await analyze_video(
+            video_path="video.mp4",
+            query="what happened",
+            start_timestamp="PT5S",
+            end_timestamp="PT55S",
+        )
+
+        assert isinstance(result, UnderstandingResult)
+        assert captured["start_timestamp"] == "PT5S"
+        assert captured["end_timestamp"] == "PT55S"
+
+
 class TestVideoUnderstandingToolCompatibility:
     @pytest.mark.asyncio
     async def test_frames_path_returns_legacy_text(self, monkeypatch):
@@ -423,6 +568,7 @@ class TestVideoUnderstandingToolCompatibility:
                 summary_text="long video structured result",
                 chunks=[],
                 events=[],
+                metadata={"chunk_count": 1},
             )
 
         async def fake_summarize_understanding_result(result, query, model_adapter=None):
@@ -467,6 +613,7 @@ class TestVideoUnderstandingToolCompatibility:
                 summary_text="long video structured result",
                 chunks=[],
                 events=[],
+                metadata={"chunk_count": 1},
             )
 
         async def fake_summarize_understanding_result(result, query, model_adapter=None):
@@ -509,6 +656,6 @@ class TestVideoUnderstandingToolCompatibility:
             source_type="rtsp",
             sensor_id="camera-1",
             start_timestamp="PT5S",
-            end_timestamp="PT10S",
+            end_timestamp="PT55S",
         )
         assert result == "phase2 long video summary"

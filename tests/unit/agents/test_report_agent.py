@@ -107,9 +107,45 @@ async def test_execute_report_agent_requires_video_path_or_sensor_id():
     async def fake_video_report_gen(**kwargs):
         return kwargs
 
-    with pytest.raises(ValueError, match="video_path 或 sensor_id"):
+    with pytest.raises(ValueError, match="video_path"):
         await execute_report_agent(
             ReportAgentInput(),
             video_understanding_fn=fake_video_understanding,
             video_report_gen_fn=fake_video_report_gen,
         )
+
+
+@pytest.mark.anyio
+async def test_default_report_agent_path_uses_unified_analyze_video(monkeypatch):
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.data_models.understanding import UnderstandingResult
+
+    captured = {}
+
+    async def fake_analyze_video(**kwargs):
+        captured.update(kwargs)
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="long video summary",
+            chunks=[],
+            events=[],
+        )
+
+    async def fake_video_report_gen(**kwargs):
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 摘要\nlong video summary",
+            "downloads": {"markdown": {"filename": "report.md"}},
+            "summary": "long video summary",
+        }
+
+    monkeypatch.setattr("vsa_agent.agents.report_agent.analyze_video", fake_analyze_video)
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+        video_report_gen_fn=fake_video_report_gen,
+    )
+
+    assert result.status == "success"
+    assert captured["video_path"] == "video.mp4"

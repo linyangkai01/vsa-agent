@@ -24,3 +24,7 @@ class VLLMModelAdapter(BaseModelAdapter):
         async for chunk in self.llm.astream(messages):
             if chunk.content:
                 yield chunk.content
+
+    def bind_tools(self, tools: list[dict]) -> None:
+        """Bind tool definitions so the LLM can call them."""
+        self.llm = self.llm.bind_tools(tools)

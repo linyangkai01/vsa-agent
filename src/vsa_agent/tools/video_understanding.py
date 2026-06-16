@@ -330,7 +330,7 @@ def _extract_frames(
 
 async def _analyze_frames(
     frames: list[str],
-    query: str,
+    prompt_text: str,
     model_adapter=None,
     *,
     config: VideoUnderstandingConfig | None = None,
@@ -352,7 +352,7 @@ async def _analyze_frames(
         )
         model_adapter = create_model_adapter(model_name=model_name)
 
-    messages = _build_vlm_messages(frames, query)
+    messages = _build_vlm_messages(frames, prompt_text)
     last_error: Exception | None = None
     for attempt in range(1, tool_config.max_retries + 1):
         try:
@@ -366,11 +366,11 @@ async def _analyze_frames(
                 "VLM call attempt %d/%d failed for query '%s': %s",
                 attempt,
                 tool_config.max_retries,
-                query[:60],
+                prompt_text[:60],
                 exc,
             )
 
-    raise RuntimeError(f"VLM call failed for query '{query[:60]}...': {last_error}") from last_error
+    raise RuntimeError(f"VLM call failed for query '{prompt_text[:60]}...': {last_error}") from last_error
 
 
 def _prepare_video_path(
@@ -395,6 +395,19 @@ def _prepare_video_path(
         return translated
 
     return video_path
+
+
+def _get_requested_window_duration(
+    total_duration_sec: float,
+    start_timestamp: str | int | float | None,
+    end_timestamp: str | int | float | None,
+) -> float:
+    """Return the requested analysis window length in seconds when offsets are provided."""
+    start_offset = _timestamp_to_seconds(start_timestamp)
+    end_offset = _timestamp_to_seconds(end_timestamp)
+    normalized_start = max(0.0, start_offset or 0.0)
+    normalized_end = total_duration_sec if end_offset is None else min(total_duration_sec, end_offset)
+    return max(0.0, normalized_end - normalized_start)
 
 
 def _get_vst_client():
@@ -465,21 +478,22 @@ async def analyze_video_segment(
         query,
         context={"source_type": source_type},
     )
-    source_candidate = await _resolve_video_source(
-        video_path or "",
-        sensor_id,
-        source_type,
-        tool_config,
-        start_timestamp=start_timestamp,
-        end_timestamp=end_timestamp,
-    )
-    resolved_video_path = (
-        _prepare_video_path(source_candidate, tool_config, source_type=source_type)
-        if source_candidate
-        else None
-    )
+    resolved_video_path = None
 
     if frames is None:
+        source_candidate = await _resolve_video_source(
+            video_path or "",
+            sensor_id,
+            source_type,
+            tool_config,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        resolved_video_path = (
+            _prepare_video_path(source_candidate, tool_config, source_type=source_type)
+            if source_candidate
+            else None
+        )
         if not resolved_video_path:
             raise ValueError("Either 'video_path' or 'frames' must be provided")
         if source_type != "rtsp" and not os.path.exists(resolved_video_path):
@@ -495,7 +509,7 @@ async def analyze_video_segment(
 
     raw_output = await _analyze_frames(
         frames,
-        query,
+        prompt_text,
         model_adapter,
         config=tool_config,
     )
@@ -517,11 +531,116 @@ async def analyze_video_segment(
     )
 
 
+async def analyze_video(
+    video_path: str = "",
+    query: str = "",
+    model_adapter=None,
+    frames: list[str] | None = None,
+    source_type: str = "video_file",
+    sensor_id: str | None = None,
+    start_timestamp: str | int | float | None = None,
+    end_timestamp: str | int | float | None = None,
+    config: VideoUnderstandingConfig | None = None,
+) -> UnderstandingResult:
+    """Unified internal entrypoint returning structured understanding results."""
+    tool_config = _get_video_understanding_config(config)
+
+    if frames is not None:
+        return await analyze_video_segment(
+            frames=frames,
+            query=query,
+            model_adapter=model_adapter,
+            config=tool_config,
+            source_type=source_type,
+            sensor_id=sensor_id,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+
+    source_candidate = await _resolve_video_source(
+        video_path,
+        sensor_id,
+        source_type,
+        tool_config,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    if not source_candidate:
+        raise ValueError("Either 'video_path' or 'frames' must be provided")
+
+    resolved_video_path = _prepare_video_path(source_candidate, tool_config, source_type=source_type)
+    if source_type == "rtsp" and resolved_video_path.startswith("rtsp://"):
+        return await analyze_video_segment(
+            video_path=resolved_video_path,
+            query=query,
+            model_adapter=model_adapter,
+            config=tool_config,
+            source_type=source_type,
+            sensor_id=sensor_id,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+
+    if source_type != "rtsp" and not os.path.exists(resolved_video_path):
+        raise ValueError(f"Video file not found: {resolved_video_path}")
+
+    _require_cv2()
+    cap = cv2.VideoCapture(resolved_video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {resolved_video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    duration_sec = total_frames / fps if fps > 0 else 0
+
+    logger.info(
+        "Video: %s, duration: %.1fs, fps: %.1f, frames: %d",
+        resolved_video_path,
+        duration_sec,
+        fps,
+        total_frames,
+    )
+
+    requested_duration_sec = _get_requested_window_duration(
+        duration_sec,
+        start_timestamp,
+        end_timestamp,
+    )
+    if requested_duration_sec > LONG_VIDEO_THRESHOLD_SEC:
+        logger.info(
+            "Analysis window %.1fs > %ds threshold, using Phase 2 long-video pipeline",
+            requested_duration_sec,
+            LONG_VIDEO_THRESHOLD_SEC,
+        )
+        return await analyze_long_video(
+            video_path=resolved_video_path,
+            query=query,
+            source_type=source_type,
+            model_adapter=model_adapter,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+
+    return await analyze_video_segment(
+        video_path=resolved_video_path,
+        query=query,
+        model_adapter=model_adapter,
+        config=tool_config,
+        source_type=source_type,
+        sensor_id=sensor_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+
+
 async def analyze_long_video(*args, **kwargs):
     """Lazy wrapper to avoid import cycle with lvs_video_understanding."""
-    from vsa_agent.tools.lvs_video_understanding import analyze_long_video as _analyze_long_video
+    from vsa_agent.tools import lvs_video_understanding as _lvs_video_understanding
 
-    return await _analyze_long_video(*args, **kwargs)
+    if "start_timestamp" in kwargs or "end_timestamp" in kwargs:
+        return await _lvs_video_understanding._analyze_long_video_window(*args, **kwargs)
+
+    return await _lvs_video_understanding.analyze_long_video(*args, **kwargs)
 
 
 async def summarize_understanding_result(*args, **kwargs):
@@ -604,93 +723,21 @@ async def video_understanding_tool(
     end_timestamp: str | int | float | None = None,
 ) -> str:
     """Analyze a video file in one step and keep the legacy text return path."""
-    tool_config = _get_video_understanding_config()
-
-    if frames is not None:
-        result = await analyze_video_segment(
-            frames=frames,
-            query=query,
-            model_adapter=model_adapter,
-            config=tool_config,
-            source_type=source_type,
-            sensor_id=sensor_id,
-            start_timestamp=start_timestamp,
-            end_timestamp=end_timestamp,
-        )
-        return result.summary_text
-
-    source_candidate = await _resolve_video_source(
-        video_path,
-        sensor_id,
-        source_type,
-        tool_config,
-        start_timestamp=start_timestamp,
-        end_timestamp=end_timestamp,
-    )
-    if not source_candidate:
-        raise ValueError("Either 'video_path' or 'frames' must be provided")
-
-    resolved_video_path = _prepare_video_path(source_candidate, tool_config, source_type=source_type)
-    if source_type == "rtsp" and resolved_video_path.startswith("rtsp://"):
-        result = await analyze_video_segment(
-            video_path=resolved_video_path,
-            query=query,
-            model_adapter=model_adapter,
-            config=tool_config,
-            source_type=source_type,
-            sensor_id=sensor_id,
-            start_timestamp=start_timestamp,
-            end_timestamp=end_timestamp,
-        )
-        return result.summary_text
-
-    if source_type != "rtsp" and not os.path.exists(resolved_video_path):
-        raise ValueError(f"Video file not found: {resolved_video_path}")
-
-    _require_cv2()
-    cap = cv2.VideoCapture(resolved_video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {resolved_video_path}")
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
-    duration_sec = total_frames / fps if fps > 0 else 0
-
-    logger.info(
-        "Video: %s, duration: %.1fs, fps: %.1f, frames: %d",
-        resolved_video_path,
-        duration_sec,
-        fps,
-        total_frames,
-    )
-
-    if duration_sec > LONG_VIDEO_THRESHOLD_SEC:
-        logger.info(
-            "Duration %.1fs > %ds threshold, using Phase 2 long-video pipeline",
-            duration_sec,
-            LONG_VIDEO_THRESHOLD_SEC,
-        )
-        structured_result = await analyze_long_video(
-            video_path=resolved_video_path,
-            query=query,
-            source_type=source_type,
-            model_adapter=model_adapter,
-        )
-        summary = await summarize_understanding_result(
-            structured_result,
-            query,
-            model_adapter,
-        )
-        return summary.text_output
-
-    result = await analyze_video_segment(
-        video_path=resolved_video_path,
+    result = await analyze_video(
+        video_path=video_path,
         query=query,
         model_adapter=model_adapter,
-        config=tool_config,
+        frames=frames,
         source_type=source_type,
         sensor_id=sensor_id,
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
     )
+    if result.metadata.get("chunk_count") is not None:
+        summary = await summarize_understanding_result(
+            result,
+            query,
+            model_adapter,
+        )
+        return summary.text_output
     return result.summary_text

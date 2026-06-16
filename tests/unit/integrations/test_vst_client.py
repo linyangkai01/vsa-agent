@@ -69,13 +69,74 @@ async def test_get_video_clip_returns_clip_result():
     client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
     result = await client.get_video_clip(
         "camera-1",
+        "",
+        "",
+    )
+    assert result.sensor_id == "camera-1"
+    assert result.start_timestamp == ""
+    assert result.end_timestamp == ""
+    assert result.clip_url == "rtsp://camera-1/stream"
+
+
+@pytest.mark.anyio
+async def test_get_video_clip_prefers_clip_payload_when_available():
+    from vsa_agent.integrations.vst_client import VSTClient
+
+    async def fake_request_json(path: str):
+        if path == "/vst/api/v1/storage/clips?sensorId=camera-1&start=2025-01-01T10:05:00Z&end=2025-01-01T10:05:30Z":
+            return {"clip_url": "http://localhost:30888/clips/camera-1.mp4"}
+        if path == "/vst/api/v1/sensor/streams":
+            return [{"stream-123": [{"name": "camera-1", "url": "rtsp://camera-1/live"}]}]
+        raise AssertionError(f"unexpected path {path}")
+
+    client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
+    result = await client.get_video_clip(
+        "camera-1",
         "2025-01-01T10:05:00Z",
         "2025-01-01T10:05:30Z",
     )
-    assert result.sensor_id == "camera-1"
-    assert result.start_timestamp == "2025-01-01T10:05:00Z"
-    assert result.end_timestamp == "2025-01-01T10:05:30Z"
-    assert result.clip_url == "rtsp://camera-1/stream"
+    assert result.clip_url == "http://localhost:30888/clips/camera-1.mp4"
+
+
+@pytest.mark.anyio
+async def test_get_video_clip_falls_back_to_stream_when_clip_lookup_fails():
+    from vsa_agent.integrations.vst_client import VSTClient
+
+    async def fake_request_json(path: str):
+        if path == "/vst/api/v1/storage/clips?sensorId=camera-1&start=2025-01-01T10:05:00Z&end=2025-01-01T10:05:30Z":
+            raise RuntimeError("clip lookup unavailable")
+        if path == "/vst/api/v1/sensor/streams":
+            return [{"stream-123": [{"name": "camera-1", "url": "rtsp://camera-1/live"}]}]
+        raise AssertionError(f"unexpected path {path}")
+
+    client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
+    result = await client.get_video_clip(
+        "camera-1",
+        "",
+        "",
+    )
+    assert result.clip_url == "rtsp://camera-1/live"
+
+
+@pytest.mark.anyio
+async def test_get_video_clip_raises_when_time_window_clip_lookup_fails():
+    from vsa_agent.integrations.vst_client import VSTClient
+    from vsa_agent.integrations.vst_client import VSTClientError
+
+    async def fake_request_json(path: str):
+        if path == "/vst/api/v1/storage/clips?sensorId=camera-1&start=2025-01-01T10:05:00Z&end=2025-01-01T10:05:30Z":
+            raise RuntimeError("clip lookup unavailable")
+        if path == "/vst/api/v1/sensor/streams":
+            return [{"stream-123": [{"name": "camera-1", "url": "rtsp://camera-1/live"}]}]
+        raise AssertionError(f"unexpected path {path}")
+
+    client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
+    with pytest.raises(VSTClientError, match="camera-1"):
+        await client.get_video_clip(
+            "camera-1",
+            "2025-01-01T10:05:00Z",
+            "2025-01-01T10:05:30Z",
+        )
 
 
 @pytest.mark.anyio
@@ -84,8 +145,8 @@ async def test_get_video_clip_raises_without_clip_url_or_local_path():
     from vsa_agent.integrations.vst_client import VSTClientError
 
     async def fake_request_json(path: str):
-        if path == "/vst/api/v1/sensor/streams":
-            return [{"stream-123": [{"name": "camera-1"}]}]
+        if path == "/vst/api/v1/storage/clips?sensorId=camera-1&start=2025-01-01T10:05:00Z&end=2025-01-01T10:05:30Z":
+            return {}
         raise AssertionError(f"unexpected path {path}")
 
     client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)

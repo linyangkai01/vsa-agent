@@ -7,6 +7,7 @@ from vsa_agent.config import get_config
 from vsa_agent.data_models.understanding import DetectedEvent
 from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.registry import register_tool
+from vsa_agent.tools.video_understanding import _timestamp_to_seconds
 from vsa_agent.tools.video_understanding import analyze_video_segment
 
 
@@ -113,6 +114,58 @@ def _probe_video_duration(video_path: str) -> float:
         cap.release()
 
 
+async def _analyze_long_video_window(
+    video_path: str,
+    query: str,
+    source_type: str = "video_file",
+    chunk_duration_sec: int = 30,
+    max_frames_per_chunk: int = 12,
+    model_adapter=None,
+    config: LVSVideoUnderstandingConfig | None = None,
+    start_timestamp: str | int | float | None = None,
+    end_timestamp: str | int | float | None = None,
+) -> UnderstandingResult:
+    """Analyze a full video or bounded time window by chunking segment calls."""
+    if config is None:
+        config = get_config().lvs_video_understanding.model_copy(
+            update={
+                "chunk_duration_sec": chunk_duration_sec,
+                "max_frames_per_chunk": max_frames_per_chunk,
+            }
+        )
+
+    duration_sec = _probe_video_duration(video_path)
+    start_sec = max(0.0, _timestamp_to_seconds(start_timestamp) or 0.0)
+    requested_end = _timestamp_to_seconds(end_timestamp)
+    end_sec = duration_sec if requested_end is None else min(duration_sec, requested_end)
+    window_duration_sec = max(0.0, end_sec - start_sec)
+
+    chunks = split_video_into_chunks(window_duration_sec, config.chunk_duration_sec)
+    if config.max_chunks is not None:
+        chunks = chunks[: config.max_chunks]
+
+    chunk_results: list[UnderstandingResult] = []
+    for relative_start_sec, relative_end_sec in chunks:
+        absolute_start_sec = start_sec + relative_start_sec
+        absolute_end_sec = start_sec + relative_end_sec
+        chunk_result = await analyze_video_segment(
+            video_path=video_path,
+            query=query,
+            source_type=source_type,
+            start_timestamp=absolute_start_sec,
+            end_timestamp=absolute_end_sec,
+            model_adapter=model_adapter,
+        )
+        chunk_results.append(chunk_result)
+
+    return merge_chunk_results(
+        query,
+        source_type,
+        chunk_results,
+        merge_adjacent_events=config.merge_adjacent_events,
+    )
+
+
 @register_tool(
     "lvs_video_understanding",
     description="Analyze long videos by splitting into chunks and merging structured results.",
@@ -127,34 +180,12 @@ async def analyze_long_video(
     config: LVSVideoUnderstandingConfig | None = None,
 ) -> UnderstandingResult:
     """Analyze a long video by chunking and delegating to segment analysis."""
-    if config is None:
-        config = get_config().lvs_video_understanding.model_copy(
-            update={
-                "chunk_duration_sec": chunk_duration_sec,
-                "max_frames_per_chunk": max_frames_per_chunk,
-            }
-        )
-
-    duration_sec = _probe_video_duration(video_path)
-    chunks = split_video_into_chunks(duration_sec, config.chunk_duration_sec)
-    if config.max_chunks is not None:
-        chunks = chunks[: config.max_chunks]
-
-    chunk_results: list[UnderstandingResult] = []
-    for start_sec, end_sec in chunks:
-        chunk_result = await analyze_video_segment(
-            video_path=video_path,
-            query=query,
-            source_type=source_type,
-            start_timestamp=start_sec,
-            end_timestamp=end_sec,
-            model_adapter=model_adapter,
-        )
-        chunk_results.append(chunk_result)
-
-    return merge_chunk_results(
-        query,
-        source_type,
-        chunk_results,
-        merge_adjacent_events=config.merge_adjacent_events,
+    return await _analyze_long_video_window(
+        video_path=video_path,
+        query=query,
+        source_type=source_type,
+        chunk_duration_sec=chunk_duration_sec,
+        max_frames_per_chunk=max_frames_per_chunk,
+        model_adapter=model_adapter,
+        config=config,
     )

@@ -52,3 +52,44 @@ async def test_execute_multi_report_agent_for_multiple_sources():
     assert result.side_effects["downloads"]["markdown"]["filename"] == "multi-report.md"
     assert len(understanding_calls) == 2
     assert report_calls[0]["report_title"] == "仓库巡检聚合报告"
+
+
+@pytest.mark.anyio
+async def test_default_multi_report_agent_path_uses_unified_analyze_video(monkeypatch):
+    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.data_models.understanding import UnderstandingResult
+
+    calls = []
+
+    async def fake_analyze_video(**kwargs):
+        calls.append(kwargs)
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="summary",
+            chunks=[],
+            events=[],
+        )
+
+    async def fake_report_gen(**kwargs):
+        return {
+            "markdown_content": "# 仓库巡检聚合报告",
+            "downloads": {"markdown": {"filename": "multi-report.md"}},
+            "summary": "summary",
+            "section_count": 1,
+        }
+
+    monkeypatch.setattr("vsa_agent.agents.multi_report_agent.analyze_video", fake_analyze_video)
+
+    await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="仓库巡检聚合报告",
+            query="生成聚合报告",
+            sources=[MultiReportSourceItem(video_path="video-a.mp4")],
+        ),
+        report_gen_fn=fake_report_gen,
+    )
+
+    assert calls[0]["video_path"] == "video-a.mp4"
