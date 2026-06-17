@@ -3514,9 +3514,469 @@ Expected: `PASS`
 - [x] Task 6.5 已完成：Phase 6 验收与回归通过，待整理提交
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/superpowers/vsa-agent-implementation-plan.md tests/acceptance/test_phase6_report_postprocessing_flow.py
 git commit -m "feat: complete phase6 report postprocessing"
+```
+
+### 当前执行状态（2026-06-17，更新）
+- [x] Phase 6 已完成并提交：`fbf0767 feat: complete phase6 report postprocessing`
+- [x] `master` 已推送到 `origin/master`
+
+---
+
+## Phase 7 — A1 提示词与推理基础设施对齐 (P1)
+
+# Phase 7A1 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 按照“原版接口优先、接口补齐优先”的原则，对齐 `prompt.py`、`utils/reasoning_parsing.py`、`utils/reasoning_utils.py`、`utils/asyncmixin.py` 四个基础模块，并把最小接入落到 `prompt_gen.py` 和 `video_understanding.py`。
+
+**Architecture:** 这一轮不改 Agent 层，只做“基础设施对齐 + 工具层最小接入”。`prompt.py` 作为唯一 prompt 源；`reasoning_parsing.py` 提供统一的 thinking/answer 解析；`reasoning_utils.py` 提供原版式推理辅助别名；`asyncmixin.py` 提供兼容原版生命周期的异步基类。`prompt_gen.py` 和 `video_understanding.py` 只消费这些统一接口，不再各自散落重复逻辑。
+
+**Tech Stack:** Python 3.12, existing `vsa_agent.prompt`, LangChain messages, pytest, dataclasses, existing `VideoUnderstandingConfig`
+
+---
+
+## 文件结构
+
+**修改文件**
+- `src/vsa_agent/prompt.py`
+  - 统一 Prompt 常量导出
+  - 增加结构化注册表与 `__all__`
+- `src/vsa_agent/utils/reasoning_parsing.py`
+  - 增加 `parse_content_blocks()`
+  - 保持 `parse_reasoning_content()` 向后兼容
+- `src/vsa_agent/utils/reasoning_utils.py`
+  - 增加原版式别名 `get_thinking_tag()`、`get_llm_reasoning_bind_kwargs()`
+- `src/vsa_agent/utils/asyncmixin.py`
+  - 对齐 `__async_init__` / `close()` 生命周期兼容
+- `src/vsa_agent/tools/prompt_gen.py`
+  - 只从 `prompt.py` 取共享 prompt 片段
+- `src/vsa_agent/tools/video_understanding.py`
+  - 去掉本地重复 prompt 字面量
+  - 统一使用共享 prompt / reasoning parser
+- `tests/unit/test_prompt.py`
+- `tests/unit/utils/test_reasoning_parsing.py`
+- `tests/unit/utils/test_reasoning_utils.py`
+- `tests/unit/utils/test_asyncmixin.py`
+- `tests/unit/tools/test_prompt_gen.py`
+- `tests/unit/tools/test_video_understanding.py`
+
+**本轮不做**
+- 不修改 Agent 层
+- 不修改 `model_adapter` 的 `invoke()` 签名
+- 不把 reasoning kwargs 全面下沉到所有模型调用链
+
+---
+
+### Task 7.1: 对齐 `prompt.py` 为唯一 Prompt 源
+
+**Files:**
+- Modify: `src/vsa_agent/prompt.py`
+- Modify: `tests/unit/test_prompt.py`
+
+- [ ] **Step 1: 写失败测试，锁定 Prompt 注册表与导出契约**
+
+```python
+from vsa_agent import prompt as prompt_module
+
+
+class TestPromptRegistry:
+    def test_exports_prompt_registry_and_all(self):
+        assert "default" in prompt_module.PROMPT_REGISTRY
+        assert "video_understanding" in prompt_module.PROMPT_REGISTRY
+        assert (
+            prompt_module.PROMPT_REGISTRY["video_understanding"]
+            == prompt_module.SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+        )
+        assert "SYSTEM_PROMPT_DEFAULT" in prompt_module.__all__
+        assert "VLM_HUMAN_PROMPT_TEMPLATE" in prompt_module.__all__
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_prompt.py -v`
+Expected: `AttributeError: module 'vsa_agent.prompt' has no attribute 'PROMPT_REGISTRY'`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/prompt.py
+
+PROMPT_REGISTRY = {
+    "default": SYSTEM_PROMPT_DEFAULT,
+    "safety_inspection": SYSTEM_PROMPT_SAFETY_INSPECTION,
+    "safety_incident": SYSTEM_PROMPT_SAFETY_INCIDENT,
+    "vlm_format": SYSTEM_PROMPT_VLM_FORMAT,
+    "video_understanding": SYSTEM_PROMPT_VIDEO_UNDERSTANDING,
+    "critic_agent": CRITIC_AGENT_SYSTEM_PROMPT,
+    "vlm_human_template": VLM_HUMAN_PROMPT_TEMPLATE,
+}
+
+__all__ = [
+    "SYSTEM_PROMPT_DEFAULT",
+    "SYSTEM_PROMPT_SAFETY_INSPECTION",
+    "SYSTEM_PROMPT_SAFETY_INCIDENT",
+    "SYSTEM_PROMPT_VLM_FORMAT",
+    "SYSTEM_PROMPT_VIDEO_UNDERSTANDING",
+    "VLM_HUMAN_PROMPT_TEMPLATE",
+    "CRITIC_AGENT_SYSTEM_PROMPT",
+    "PROMPT_REGISTRY",
+]
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_prompt.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/prompt.py tests/unit/test_prompt.py
+git commit -m "feat: align prompt module exports"
+```
+
+### Task 7.2: 扩展 `reasoning_parsing.py` 为原版式解析接口
+
+**Files:**
+- Modify: `src/vsa_agent/utils/reasoning_parsing.py`
+- Modify: `tests/unit/utils/test_reasoning_parsing.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `parse_content_blocks()` 契约**
+
+```python
+from vsa_agent.utils.reasoning_parsing import parse_content_blocks
+
+
+class TestParseContentBlocks:
+    def test_splits_thinking_and_answer_blocks(self):
+        result = parse_content_blocks(
+            "<thinking>first</thinking><answer>second</answer>"
+        )
+        assert result == [
+            {"type": "thinking", "content": "first"},
+            {"type": "answer", "content": "second"},
+        ]
+
+    def test_plain_text_returns_single_answer_block(self):
+        result = parse_content_blocks("plain answer")
+        assert result == [{"type": "answer", "content": "plain answer"}]
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_reasoning_parsing.py -v`
+Expected: `ImportError: cannot import name 'parse_content_blocks'`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/reasoning_parsing.py
+
+def parse_content_blocks(content: str | None) -> list[dict[str, str]]:
+    result = parse_reasoning_content(content)
+    blocks: list[dict[str, str]] = []
+    if result.thinking:
+        blocks.append({"type": "thinking", "content": result.thinking})
+    if result.answer:
+        blocks.append({"type": "answer", "content": result.answer})
+    if not blocks:
+        return [{"type": "answer", "content": ""}]
+    return blocks
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_reasoning_parsing.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/reasoning_parsing.py tests/unit/utils/test_reasoning_parsing.py
+git commit -m "feat: add reasoning content block parser"
+```
+
+### Task 7.3: 对齐 `reasoning_utils.py` 原版式函数名
+
+**Files:**
+- Modify: `src/vsa_agent/utils/reasoning_utils.py`
+- Modify: `tests/unit/utils/test_reasoning_utils.py`
+
+- [ ] **Step 1: 写失败测试，锁定原版式别名函数**
+
+```python
+from vsa_agent.utils.reasoning_utils import (
+    bind_reasoning_kwargs,
+    get_llm_reasoning_bind_kwargs,
+    get_thinking_tag,
+    thinking_tag,
+)
+
+
+class TestReasoningCompatNames:
+    def test_get_thinking_tag_matches_existing_helper(self):
+        assert get_thinking_tag("abc") == thinking_tag("abc")
+
+    def test_get_llm_reasoning_bind_kwargs_matches_existing_filter(self):
+        kwargs = {
+            "reasoning_effort": "high",
+            "temperature": 0.1,
+            "filter_thinking": True,
+            "unrelated": "value",
+        }
+        assert get_llm_reasoning_bind_kwargs(kwargs) == bind_reasoning_kwargs(kwargs)
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_reasoning_utils.py -v`
+Expected: `ImportError: cannot import name 'get_thinking_tag'`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/reasoning_utils.py
+
+def get_thinking_tag(content: str) -> str:
+    return thinking_tag(content)
+
+
+def get_llm_reasoning_bind_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return bind_reasoning_kwargs(kwargs)
+
+
+__all__ = [
+    "thinking_tag",
+    "bind_reasoning_kwargs",
+    "get_thinking_tag",
+    "get_llm_reasoning_bind_kwargs",
+]
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_reasoning_utils.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/reasoning_utils.py tests/unit/utils/test_reasoning_utils.py
+git commit -m "feat: add reasoning utils compatibility aliases"
+```
+
+### Task 7.4: 对齐 `AsyncMixin` 生命周期兼容层
+
+**Files:**
+- Modify: `src/vsa_agent/utils/asyncmixin.py`
+- Modify: `tests/unit/utils/test_asyncmixin.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `__async_init__` 与 `close()` 兼容行为**
+
+```python
+import pytest
+
+from vsa_agent.utils.asyncmixin import AsyncMixin
+
+
+class TestAsyncMixinCompat:
+    @pytest.mark.asyncio
+    async def test_create_calls_dunder_async_init_when_present(self):
+        class MyResource(AsyncMixin):
+            def __init__(self):
+                self.ready = False
+
+            async def __async_init__(self):
+                self.ready = True
+
+        obj = await MyResource.create()
+        assert obj.ready is True
+
+    @pytest.mark.asyncio
+    async def test_aexit_uses_close_when_present(self):
+        class MyResource(AsyncMixin):
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        obj = MyResource()
+        await obj.__aexit__(None, None, None)
+        assert obj.closed is True
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_asyncmixin.py -v`
+Expected: FAIL because `create()` does not call `__async_init__` and `__aexit__()` does not delegate to `close()`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/asyncmixin.py
+
+async def async_init(self) -> None:
+    dunder_init = getattr(self, "__async_init__", None)
+    if callable(dunder_init):
+        await dunder_init()
+    self._async_initialized = True
+
+
+async def async_close(self) -> None:
+    self._async_initialized = False
+
+
+async def close(self) -> None:
+    await self.async_close()
+
+
+async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    close_method = getattr(self, "close", None)
+    if callable(close_method):
+        await close_method()
+        return
+    await self.async_close()
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_asyncmixin.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/asyncmixin.py tests/unit/utils/test_asyncmixin.py
+git commit -m "feat: align async mixin lifecycle compatibility"
+```
+
+### Task 7.5: 工具层最小接入共享 Prompt 与推理解析
+
+**Files:**
+- Modify: `src/vsa_agent/tools/prompt_gen.py`
+- Modify: `src/vsa_agent/tools/video_understanding.py`
+- Modify: `tests/unit/tools/test_prompt_gen.py`
+- Modify: `tests/unit/tools/test_video_understanding.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `prompt_gen` 使用共享 Prompt 常量**
+
+```python
+import pytest
+
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.tools.prompt_gen import generate_understanding_prompt
+
+
+@pytest.mark.anyio
+async def test_generate_prompt_uses_shared_prompt_constants():
+    prompt = await generate_understanding_prompt("person walking near forklift")
+    assert prompt.startswith(SYSTEM_PROMPT_VIDEO_UNDERSTANDING)
+    assert VLM_HUMAN_PROMPT_TEMPLATE.format(
+        query="person walking near forklift"
+    ) in prompt
+```
+
+- [ ] **Step 2: 写失败测试，锁定 `video_understanding` 走共享 Prompt 与解析器**
+
+```python
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.tools.video_understanding import _build_vlm_messages
+from vsa_agent.tools.video_understanding import _parse_thinking_from_content
+
+
+class TestSharedPromptIntegration:
+    def test_build_vlm_messages_uses_shared_system_prompt(self):
+        messages = _build_vlm_messages(["frame-a"], "what happened")
+        assert messages[0].content == SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+        text_part = next(
+            part["text"] for part in messages[1].content if part["type"] == "text"
+        )
+        assert text_part == VLM_HUMAN_PROMPT_TEMPLATE.format(query="what happened")
+
+    def test_parse_thinking_from_content_keeps_answer_contract(self):
+        thinking, answer = _parse_thinking_from_content(
+            "<thinking>inspect</thinking><answer>worker falls</answer>"
+        )
+        assert thinking == "inspect"
+        assert answer == "worker falls"
+```
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/video_understanding.py
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+
+
+def _build_vlm_messages(frames, query, system_prompt=None):
+    image_parts = [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}}
+        for frame in frames
+    ]
+    return [
+        SystemMessage(content=system_prompt or SYSTEM_PROMPT_VIDEO_UNDERSTANDING),
+        HumanMessage(
+            content=[
+                {"type": "text", "text": VLM_HUMAN_PROMPT_TEMPLATE.format(query=query)},
+                *image_parts,
+            ]
+        ),
+    ]
+```
+
+```python
+# src/vsa_agent/tools/prompt_gen.py
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+```
+
+- [x] **Step 4: 跑工具层回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_prompt.py tests/unit/utils/test_reasoning_parsing.py tests/unit/utils/test_reasoning_utils.py tests/unit/utils/test_asyncmixin.py tests/unit/tools/test_prompt_gen.py tests/unit/tools/test_video_understanding.py -q`
+Expected: `PASS`
+
+- [x] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/prompt_gen.py src/vsa_agent/tools/video_understanding.py tests/unit/tools/test_prompt_gen.py tests/unit/tools/test_video_understanding.py
+git commit -m "feat: wire shared prompt and reasoning utilities into tools"
+```
+
+### Task 7.6: Phase 7A1 文档状态更新与回归收口
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [x] **Step 1: 跑 Phase 7A1 全量相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/test_prompt.py tests/unit/utils/test_reasoning_parsing.py tests/unit/utils/test_reasoning_utils.py tests/unit/utils/test_asyncmixin.py tests/unit/tools/test_prompt_gen.py tests/unit/tools/test_video_understanding.py -q`
+Expected: `PASS`
+
+- [x] **Step 2: 更新本计划中的 Phase 7A1 状态**
+
+```markdown
+### 当前执行状态（2026-06-17）
+- [x] Task 7.1 已完成：prompt.py 已对齐为唯一 Prompt 源
+- [x] Task 7.2 已完成：reasoning_parsing 已补齐原版式解析接口
+- [x] Task 7.3 已完成：reasoning_utils 已补齐原版式别名函数
+- [x] Task 7.4 已完成：AsyncMixin 生命周期兼容层已补齐
+- [x] Task 7.5 已完成：prompt_gen / video_understanding 已完成最小接入
+- [x] Task 7.6 已完成：Phase 7A1 回归通过，待整理文档提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase7a1 execution status"
 ```
