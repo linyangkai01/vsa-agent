@@ -2,6 +2,8 @@
 
 import pytest
 
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.tools.prompt_gen import generate_understanding_prompt
 
 
@@ -24,3 +26,12 @@ async def test_generate_prompt_for_root_cause_intent():
     assert query in prompt
     assert "root cause" in lowered or "cause" in lowered
     assert "precursors" in lowered or "contributing conditions" in lowered
+
+
+@pytest.mark.anyio
+async def test_generate_prompt_uses_shared_prompt_constants():
+    prompt = await generate_understanding_prompt("person walking near forklift")
+    assert prompt.startswith(SYSTEM_PROMPT_VIDEO_UNDERSTANDING)
+    assert VLM_HUMAN_PROMPT_TEMPLATE.format(
+        query="person walking near forklift"
+    ) in prompt

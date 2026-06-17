@@ -69,9 +69,11 @@ def parse_reasoning_content(content: str) -> ReasoningResult:
     thinking_pattern = r"<thinking>(.*?)</thinking>\s*(.*)"
     match = re.search(thinking_pattern, content, re.DOTALL)
     if match:
+        trailing_answer = match.group(2).strip()
+        answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", trailing_answer, re.DOTALL)
         return ReasoningResult(
             thinking=match.group(1).strip(),
-            answer=match.group(2).strip(),
+            answer=answer_match.group(1).strip() if answer_match else trailing_answer,
             has_reasoning=True,
         )
 

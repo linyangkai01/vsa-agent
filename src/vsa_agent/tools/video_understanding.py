@@ -19,6 +19,8 @@ from vsa_agent.data_models.understanding import EvidenceRef
 from vsa_agent.data_models.understanding import DetectedEvent
 from vsa_agent.data_models.understanding import ObservationChunk
 from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
 from vsa_agent.utils.reasoning_parsing import parse_reasoning_content
 from vsa_agent.utils.time_convert import format_timestamp
@@ -32,17 +34,6 @@ except ImportError:  # pragma: no cover - exercised only in runtime environments
     cv2 = None
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = (
-    "You are an expert at video understanding and description. "
-    "Your task is to capture, in as much detail as possible, the events "
-    "from the video frames related to the user's query. "
-    "Be sure to capture details about the environment, people, objects, "
-    "and actions. For example, describe attire, vehicle types, object colors. "
-    "The frames are sampled from the video in sequence. "
-    "DO NOT make up anything not visible in the frames. "
-    "DO NOT hallucinate."
-)
 
 DEFAULT_MAX_FRAMES = 24
 LONG_VIDEO_THRESHOLD_SEC = 40
@@ -258,18 +249,11 @@ def _build_vlm_messages(frames, query, system_prompt=None):
         for frame in frames
     ]
     human_prompt_parts = [
-        {"type": "text", "text": (
-            f"The following images are frames from a video, sampled in sequence. "
-            f"Analyze them and answer the user's query.\n\n"
-            f"User query: {query}\n\n"
-            f"Start and end each observation with a relative timestamp if you can "
-            f"infer timing from the sequence. "
-            f"Use the format: <timestamp> observation_content </timestamp>."
-        )},
+        {"type": "text", "text": VLM_HUMAN_PROMPT_TEMPLATE.format(query=query)},
         *image_parts,
     ]
     return [
-        SystemMessage(content=system_prompt or SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt or SYSTEM_PROMPT_VIDEO_UNDERSTANDING),
         HumanMessage(content=human_prompt_parts),
     ]
 

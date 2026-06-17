@@ -3,6 +3,8 @@ import pytest
 
 from vsa_agent.config import AppConfig
 from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.tools.video_understanding import (
     VideoUnderstandingInput, VideoUnderstandingConfig,
     _analyze_frames, _build_vlm_messages, _normalize_model_response,
@@ -39,6 +41,16 @@ class TestBuildVlmMessages:
         assert len(messages) == 2
         assert messages[0].type == "system"
         assert messages[1].type == "human"
+
+    def test_uses_shared_prompt_constants(self):
+        messages = _build_vlm_messages(["frame-a"], "what happened")
+        assert messages[0].content == SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+        text_part = next(
+            part["text"]
+            for part in messages[1].content
+            if part["type"] == "text"
+        )
+        assert text_part == VLM_HUMAN_PROMPT_TEMPLATE.format(query="what happened")
 
 class TestNormalizeModelResponse:
     def test_returns_understanding_result(self):
@@ -286,6 +298,13 @@ class TestParseThinkingFromContent:
         thinking, answer = _parse_thinking_from_content("")
         assert thinking is None
         assert answer == ""
+
+    def test_with_explicit_thinking_and_answer_tags(self):
+        thinking, answer = _parse_thinking_from_content(
+            "<thinking>inspect</thinking><answer>worker falls</answer>"
+        )
+        assert thinking == "inspect"
+        assert answer == "worker falls"
 
 
 class TestAnalyzeVideoSegment:
