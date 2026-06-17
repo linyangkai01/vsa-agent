@@ -87,3 +87,28 @@ def parse_reasoning_content(content: str) -> ReasoningResult:
 
     # No structured reasoning found
     return ReasoningResult(answer=content.strip(), has_reasoning=False)
+
+
+def parse_content_blocks(content: str | None) -> list[dict[str, str]]:
+    if not content:
+        return [{"type": "answer", "content": ""}]
+
+    thinking_matches = re.findall(r"<thinking>\s*(.*?)\s*</thinking>", content, re.DOTALL)
+    answer_matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", content, re.DOTALL)
+    if thinking_matches or answer_matches:
+        blocks: list[dict[str, str]] = []
+        for item in thinking_matches:
+            blocks.append({"type": "thinking", "content": item.strip()})
+        for item in answer_matches:
+            blocks.append({"type": "answer", "content": item.strip()})
+        return blocks or [{"type": "answer", "content": ""}]
+
+    result = parse_reasoning_content(content)
+    blocks: list[dict[str, str]] = []
+    if result.thinking:
+        blocks.append({"type": "thinking", "content": result.thinking})
+    if result.answer:
+        blocks.append({"type": "answer", "content": result.answer})
+    if not blocks:
+        return [{"type": "answer", "content": ""}]
+    return blocks
