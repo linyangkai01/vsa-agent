@@ -34,11 +34,18 @@ class AsyncMixin:
 
     async def async_init(self) -> None:
         """Initialize async resources. Override in subclass."""
+        dunder_init = getattr(self, "__async_init__", None)
+        if callable(dunder_init):
+            await dunder_init()
         self._async_initialized = True
 
     async def async_close(self) -> None:
         """Clean up async resources. Override in subclass."""
         self._async_initialized = False
+
+    async def close(self) -> None:
+        """Compatibility close alias."""
+        await self.async_close()
 
     @classmethod
     async def create(cls, *args: Any, **kwargs: Any) -> "AsyncMixin":
@@ -66,4 +73,8 @@ class AsyncMixin:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
+        close_method = getattr(self, "close", None)
+        if callable(close_method):
+            await close_method()
+            return
         await self.async_close()

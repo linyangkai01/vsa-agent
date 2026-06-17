@@ -25,3 +25,30 @@ class TestAsyncMixin:
         assert obj._async_initialized
         await obj.close()
         assert obj._closed
+
+
+class TestAsyncMixinCompat:
+    @pytest.mark.asyncio
+    async def test_create_calls_dunder_async_init_when_present(self):
+        class MyResource(AsyncMixin):
+            def __init__(self):
+                self.ready = False
+
+            async def __async_init__(self):
+                self.ready = True
+
+        obj = await MyResource.create()
+        assert obj.ready is True
+
+    @pytest.mark.asyncio
+    async def test_aexit_uses_close_when_present(self):
+        class MyResource(AsyncMixin):
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        obj = MyResource()
+        await obj.__aexit__(None, None, None)
+        assert obj.closed is True
