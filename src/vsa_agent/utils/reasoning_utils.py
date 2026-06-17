@@ -37,3 +37,19 @@ def bind_reasoning_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "top_p", "stop", "filter_thinking",
     }
     return {k: v for k, v in kwargs.items() if k in reasoning_keys}
+
+
+def get_thinking_tag(content: str) -> str:
+    return thinking_tag(content)
+
+
+def get_llm_reasoning_bind_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return bind_reasoning_kwargs(kwargs)
+
+
+__all__ = [
+    "thinking_tag",
+    "bind_reasoning_kwargs",
+    "get_thinking_tag",
+    "get_llm_reasoning_bind_kwargs",
+]
