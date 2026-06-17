@@ -93,3 +93,82 @@ async def test_default_multi_report_agent_path_uses_unified_analyze_video(monkey
     )
 
     assert calls[0]["video_path"] == "video-a.mp4"
+
+
+@pytest.mark.anyio
+async def test_execute_multi_report_agent_builds_structured_sections_before_rendering():
+    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.data_models.report import StructuredReport
+
+    captured = {}
+
+    async def fake_video_understanding(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": f"summary for {kwargs.get('sensor_id') or kwargs.get('video_path')}",
+            "chunks": [],
+            "events": [],
+        }
+
+    async def fake_report_gen(**kwargs):
+        captured.update(kwargs)
+        assert isinstance(kwargs["structured_report"], StructuredReport)
+        return {
+            "markdown_content": "# 仓库巡检聚合报告",
+            "downloads": {"markdown": {"filename": "multi-report.md"}},
+            "summary": "summary",
+            "section_count": 1,
+        }
+
+    result = await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="仓库巡检聚合报告",
+            query="生成聚合报告",
+            sources=[MultiReportSourceItem(sensor_id="camera-1")],
+        ),
+        video_understanding_fn=fake_video_understanding,
+        report_gen_fn=fake_report_gen,
+    )
+
+    assert result.status == "success"
+    assert "structured_report" in captured
+
+
+@pytest.mark.anyio
+async def test_execute_multi_report_agent_keeps_external_section_title():
+    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
+    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
+    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+
+    async def fake_video_understanding(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": "summary for camera-1",
+            "chunks": [],
+            "events": [{"label": "walking", "description": "person walking"}],
+        }
+
+    async def fake_report_gen(**kwargs):
+        assert kwargs["report_sections"][0].section_title == "事件 1 - camera-1"
+        return {
+            "markdown_content": "# 浠撳簱宸℃鑱氬悎鎶ュ憡",
+            "downloads": {"markdown": {"filename": "multi-report.md"}},
+            "summary": "summary for camera-1",
+            "section_count": 1,
+        }
+
+    result = await execute_multi_report_agent(
+        MultiReportAgentInput(
+            report_title="浠撳簱宸℃鑱氬悎鎶ュ憡",
+            query="鐢熸垚鑱氬悎鎶ュ憡",
+            sources=[MultiReportSourceItem(sensor_id="camera-1")],
+        ),
+        video_understanding_fn=fake_video_understanding,
+        report_gen_fn=fake_report_gen,
+    )
+
+    assert result.status == "success"

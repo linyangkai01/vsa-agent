@@ -7,6 +7,8 @@ from typing import Any
 from pydantic import BaseModel
 from pydantic import Field
 
+from vsa_agent.data_models.report import ReportSection
+from vsa_agent.data_models.report import StructuredReport
 from vsa_agent.registry import register_tool
 
 
@@ -46,13 +48,24 @@ async def _default_count_chart_builder_fn(**kwargs):
     return await build_event_count_chart(**kwargs)
 
 
+def _sections_from_structured_report(structured_report: StructuredReport) -> list[ReportSection]:
+    return list(structured_report.sections)
+
+
+def _understanding_to_dict(understanding_result: Any) -> dict[str, Any]:
+    if isinstance(understanding_result, dict):
+        return understanding_result
+    return understanding_result.model_dump()
+
+
 @register_tool(
     "report_gen",
     description="Generate one markdown report from multiple structured video understanding results.",
 )
 async def generate_multi_report(
-    report_title: str,
-    report_sections: list[ReportSectionInput],
+    report_title: str = "",
+    report_sections: list[ReportSectionInput] | None = None,
+    structured_report: StructuredReport | None = None,
     single_report_gen_fn=None,
     template_report_gen_fn=None,
     count_chart_builder_fn=None,
@@ -66,22 +79,40 @@ async def generate_multi_report(
     summaries = []
     understanding_results: list[dict[str, Any]] = []
 
-    for section in report_sections:
-        report = await single_report_gen(
-            sensor_id=section.sensor_id,
-            user_query=section.user_query,
-            understanding_result=section.understanding_result,
-        )
-        report_dict = report if isinstance(report, dict) else report.model_dump()
-        normalized_sections.append(
-            {
-                "section_title": section.section_title,
-                "summary": report_dict["summary"],
-                "markdown_content": report_dict["markdown_content"],
-            }
-        )
-        summaries.append(report_dict["summary"])
-        understanding_results.append(section.understanding_result)
+    if structured_report is not None:
+        sections = _sections_from_structured_report(structured_report)
+        effective_title = structured_report.report_title
+        for section in sections:
+            report = await single_report_gen(report_section=section)
+            report_dict = report if isinstance(report, dict) else report.model_dump()
+            normalized_sections.append(
+                {
+                    "section_title": section.section_title,
+                    "summary": report_dict["summary"],
+                    "markdown_content": report_dict["markdown_content"],
+                }
+            )
+            summaries.append(report_dict["summary"])
+            understanding_results.append(_understanding_to_dict(section.understanding_result))
+    else:
+        sections = report_sections or []
+        effective_title = report_title
+        for section in sections:
+            report = await single_report_gen(
+                sensor_id=section.sensor_id,
+                user_query=section.user_query,
+                understanding_result=section.understanding_result,
+            )
+            report_dict = report if isinstance(report, dict) else report.model_dump()
+            normalized_sections.append(
+                {
+                    "section_title": section.section_title,
+                    "summary": report_dict["summary"],
+                    "markdown_content": report_dict["markdown_content"],
+                }
+            )
+            summaries.append(report_dict["summary"])
+            understanding_results.append(section.understanding_result)
 
     count_chart = await count_chart_builder(
         understanding_results=understanding_results,
@@ -89,7 +120,7 @@ async def generate_multi_report(
     count_chart_dict = count_chart if isinstance(count_chart, dict) else count_chart.model_dump()
 
     template = await template_report_gen(
-        report_title=report_title,
+        report_title=effective_title,
         report_sections=normalized_sections,
         counts=count_chart_dict["counts"],
         chart=count_chart_dict["chart"],

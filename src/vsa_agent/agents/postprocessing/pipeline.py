@@ -38,3 +38,11 @@ class ValidationPipeline:
                 return PostprocessingResult(passed=False, feedback=f"[{validator.name}] ERROR: {e}")
         return PostprocessingResult(passed=True)
 
+    async def process_report(self, report) -> PostprocessingResult:
+        """Run validators against each report section summary."""
+        for section in getattr(report, "sections", []):
+            result = await self.process(section.summary_text)
+            if not result.passed:
+                return result
+        return PostprocessingResult(passed=True)
+

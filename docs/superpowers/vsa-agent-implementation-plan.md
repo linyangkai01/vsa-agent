@@ -3135,3 +3135,388 @@ $env:PYTHONPATH="src"; python -m pytest tests/unit/ tests/acceptance/ -v
 2. 该 Phase 的验收测试全部 pass
 3. 项目级回归: 全部测试无破坏
 4. git commit
+
+---
+
+## Phase 6 — 报告后处理链 (P2)
+
+**目标**: 将报告链从“理解结果直接渲染 Markdown”升级为“结构化报告对象 -> incidents/geolocation/postprocessing -> Markdown 渲染”的统一闭环，并保持现有对外接口不变。
+
+**推荐执行顺序**:
+1. `data_models/report.py`
+2. `tools/report_structuring.py`
+3. `incidents.py` / `geolocation.py` / `postprocessing`
+4. `video_report_gen.py` / `template_report_gen.py` / `report_gen.py`
+5. `report_agent.py` / `multi_report_agent.py`
+6. Phase 6 验收与全量回归
+
+**Architecture**: 先引入报告域结构化数据模型，再新增内部结构化装配层，把 `UnderstandingResult` 统一转换为 `StructuredReport`。`incidents`、`geolocation` 和 `postprocessing` 在对象层运行，`video_report_gen.py` / `template_report_gen.py` 只负责渲染；`report_agent.py` 和 `multi_report_agent.py` 维持外部接口不变，只替换内部实现。
+
+**Files Overview**:
+- Create: `src/vsa_agent/data_models/report.py`
+- Modify: `src/vsa_agent/data_models/__init__.py`
+- Create: `src/vsa_agent/tools/report_structuring.py`
+- Modify: `src/vsa_agent/tools/incidents.py`
+- Modify: `src/vsa_agent/tools/geolocation.py`
+- Modify: `src/vsa_agent/agents/postprocessing/pipeline.py`
+- Modify: `src/vsa_agent/tools/video_report_gen.py`
+- Modify: `src/vsa_agent/tools/template_report_gen.py`
+- Modify: `src/vsa_agent/tools/report_gen.py`
+- Modify: `src/vsa_agent/agents/report_agent.py`
+- Modify: `src/vsa_agent/agents/multi_report_agent.py`
+- Create: `tests/unit/data_models/test_report_models.py`
+- Create: `tests/unit/tools/test_report_structuring.py`
+- Create: `tests/unit/agents/postprocessing/test_structured_pipeline.py`
+- Create: `tests/acceptance/test_phase6_report_postprocessing_flow.py`
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+### Task 6.1: 新增报告域结构化模型
+
+**Files:**
+- Create: `src/vsa_agent/data_models/report.py`
+- Modify: `src/vsa_agent/data_models/__init__.py`
+- Create: `tests/unit/data_models/test_report_models.py`
+
+- [ ] **Step 1: 写失败测试，锁定报告域对象契约**
+
+```python
+from vsa_agent.data_models.understanding import UnderstandingResult
+
+
+def test_structured_report_defaults_and_serialization():
+    from vsa_agent.data_models.report import ReportSection
+    from vsa_agent.data_models.report import StructuredReport
+
+    section = ReportSection(
+        section_id="section-1",
+        section_title="事件 1 - camera-1",
+        source_name="camera-1",
+        source_type="rtsp",
+        user_query="生成报告",
+        summary_text="forklift stops near doorway",
+        understanding_result=UnderstandingResult(
+            query="生成报告",
+            source_type="rtsp",
+            summary_text="forklift stops near doorway",
+            chunks=[],
+            events=[],
+        ),
+    )
+    report = StructuredReport(
+        report_title="多视频聚合报告",
+        report_type="multi_video",
+        user_query="生成报告",
+        sections=[section],
+    )
+
+    assert report.report_title == "多视频聚合报告"
+    assert report.sections[0].section_title == "事件 1 - camera-1"
+    assert report.model_dump()["sections"][0]["source_type"] == "rtsp"
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/data_models/test_report_models.py -v`
+
+Expected: `ModuleNotFoundError`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel
+from pydantic import Field
+
+from vsa_agent.data_models.understanding import UnderstandingResult
+
+
+class ReportIncident(BaseModel):
+    incident_id: str
+    category: str
+    description: str
+    severity: str = "medium"
+    confidence: float = 0.0
+    start_timestamp: str = ""
+    end_timestamp: str = ""
+    location_name: str = ""
+    zone_name: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReportSection(BaseModel):
+    section_id: str
+    section_title: str
+    source_name: str
+    source_type: str
+    user_query: str
+    summary_text: str
+    understanding_result: UnderstandingResult
+    incidents: list[ReportIncident] = Field(default_factory=list)
+    location_summary: str = ""
+    validation_feedback: list[str] = Field(default_factory=list)
+
+
+class StructuredReport(BaseModel):
+    report_title: str
+    report_type: Literal["single_video", "multi_video"]
+    user_query: str
+    sections: list[ReportSection] = Field(default_factory=list)
+    global_summary: str = ""
+    global_validation_feedback: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/data_models/test_report_models.py -v`
+
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/data_models/report.py src/vsa_agent/data_models/__init__.py tests/unit/data_models/test_report_models.py
+git commit -m "feat: add structured report models"
+```
+
+### Task 6.2: 新增结构化报告装配层
+
+**Files:**
+- Create: `src/vsa_agent/tools/report_structuring.py`
+- Create: `tests/unit/tools/test_report_structuring.py`
+
+- [ ] **Step 1: 写失败测试，锁定 UnderstandingResult -> StructuredReport 行为**
+
+```python
+import pytest
+
+from vsa_agent.data_models.understanding import DetectedEvent
+from vsa_agent.data_models.understanding import EvidenceRef
+from vsa_agent.data_models.understanding import UnderstandingResult
+
+
+@pytest.mark.anyio
+async def test_build_single_section_report_maps_understanding_to_structured_report():
+    from vsa_agent.tools.report_structuring import build_single_section_report
+
+    result = UnderstandingResult(
+        query="生成报告",
+        source_type="rtsp",
+        summary_text="forklift stops near doorway",
+        chunks=[],
+        events=[
+            DetectedEvent(
+                event_id="event-1",
+                label="vehicle",
+                description="forklift stops near doorway",
+                start_timestamp="00:00:05",
+                end_timestamp="00:00:09",
+                evidence=[EvidenceRef(source_type="rtsp", sensor_id="camera-1")],
+            )
+        ],
+    )
+
+    report = build_single_section_report(
+        source_name="camera-1",
+        source_type="rtsp",
+        user_query="生成报告",
+        understanding_result=result,
+    )
+
+    assert report.report_type == "single_video"
+    assert report.sections[0].incidents[0].description == "forklift stops near doorway"
+    assert report.sections[0].source_name == "camera-1"
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_structuring.py -v`
+
+Expected: `ModuleNotFoundError`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+from vsa_agent.data_models.report import ReportIncident
+from vsa_agent.data_models.report import ReportSection
+from vsa_agent.data_models.report import StructuredReport
+from vsa_agent.tools.incidents import understanding_to_incidents
+
+
+def build_single_section_report(...):
+    incidents = [
+        ReportIncident(
+            incident_id=item.id,
+            category=item.category,
+            description=item.description,
+            severity=item.severity,
+            confidence=item.confidence,
+            start_timestamp=str(item.metadata.get("start_timestamp", "")),
+            end_timestamp=str(item.metadata.get("end_timestamp", "")),
+            metadata=item.metadata,
+        )
+        for item in understanding_to_incidents(understanding_result)
+    ]
+    section = ReportSection(...)
+    return StructuredReport(...)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_structuring.py -v`
+
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/report_structuring.py tests/unit/tools/test_report_structuring.py
+git commit -m "feat: add report structuring layer"
+```
+
+### Task 6.3: 接入 incidents / geolocation / postprocessing
+
+**Files:**
+- Modify: `src/vsa_agent/tools/report_structuring.py`
+- Modify: `src/vsa_agent/tools/incidents.py`
+- Modify: `src/vsa_agent/tools/geolocation.py`
+- Modify: `src/vsa_agent/agents/postprocessing/pipeline.py`
+- Create: `tests/unit/agents/postprocessing/test_structured_pipeline.py`
+- Modify: `tests/unit/tools/test_report_structuring.py`
+
+- [ ] **Step 1: 写失败测试，锁定结构化后处理行为**
+
+```python
+@pytest.mark.anyio
+async def test_process_report_keeps_validation_feedback_on_structured_report():
+    from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
+    from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
+
+    pipeline = ValidationPipeline([NonEmptyValidator()])
+    result = await pipeline.process_report(report)
+
+    assert result.passed is True
+```
+
+- [ ] **Step 2: 写失败测试，锁定 geolocation 汇总进入 section**
+
+```python
+from vsa_agent.tools.geolocation import summarize_geolocation
+
+assert section.location_summary == summarize_geolocation(enriched_incidents)
+```
+
+- [ ] **Step 3: 最小实现**
+
+```python
+async def process_report(self, report: StructuredReport) -> PostprocessingResult:
+    ...
+```
+
+- [ ] **Step 4: 跑模块测试**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_report_structuring.py tests/unit/agents/postprocessing/test_structured_pipeline.py tests/unit/tools/test_geolocation.py tests/unit/tools/test_incidents.py -v`
+
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/report_structuring.py src/vsa_agent/tools/incidents.py src/vsa_agent/tools/geolocation.py src/vsa_agent/agents/postprocessing/pipeline.py tests/unit/tools/test_report_structuring.py tests/unit/agents/postprocessing/test_structured_pipeline.py tests/unit/tools/test_geolocation.py tests/unit/tools/test_incidents.py
+git commit -m "feat: wire report postprocessing chain"
+```
+
+### Task 6.4: 调整 report renderer 与 agents
+
+**Files:**
+- Modify: `src/vsa_agent/tools/video_report_gen.py`
+- Modify: `src/vsa_agent/tools/template_report_gen.py`
+- Modify: `src/vsa_agent/tools/report_gen.py`
+- Modify: `src/vsa_agent/agents/report_agent.py`
+- Modify: `src/vsa_agent/agents/multi_report_agent.py`
+- Modify: `tests/unit/tools/test_video_report_gen.py`
+- Modify: `tests/unit/tools/test_template_report_gen.py`
+- Modify: `tests/unit/agents/test_report_agent.py`
+- Modify: `tests/unit/agents/test_multi_report_agent.py`
+
+- [ ] **Step 1: 写失败测试，锁定 renderer 只消费结构化对象**
+
+```python
+@pytest.mark.anyio
+async def test_generate_video_report_accepts_report_section():
+    ...
+```
+
+- [ ] **Step 2: 写失败测试，锁定 agent 先构建 StructuredReport**
+
+```python
+assert result.side_effects["markdown_content"].startswith("# ")
+```
+
+- [ ] **Step 3: 最小实现**
+
+```python
+# 适配旧签名到新结构化对象，render 层只处理对象
+```
+
+- [ ] **Step 4: 跑回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py -v`
+
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/video_report_gen.py src/vsa_agent/tools/template_report_gen.py src/vsa_agent/tools/report_gen.py src/vsa_agent/agents/report_agent.py src/vsa_agent/agents/multi_report_agent.py tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py
+git commit -m "feat: route reports through structured chain"
+```
+
+### Task 6.5: Phase 6 验收与总计划更新
+
+**Files:**
+- Create: `tests/acceptance/test_phase6_report_postprocessing_flow.py`
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [x] **Step 1: 写验收测试，锁定单视频报告链**
+
+```python
+@pytest.mark.anyio
+async def test_phase6_single_video_report_flow(...):
+    ...
+```
+
+- [x] **Step 2: 写验收测试，锁定多视频报告链**
+
+```python
+@pytest.mark.anyio
+async def test_phase6_multi_video_report_flow(...):
+    ...
+```
+
+- [x] **Step 3: 跑 Phase 6 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/data_models/test_report_models.py tests/unit/tools/test_report_structuring.py tests/unit/agents/postprocessing/test_structured_pipeline.py tests/unit/tools/test_video_report_gen.py tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_report_gen.py tests/unit/agents/test_report_agent.py tests/unit/agents/test_multi_report_agent.py tests/acceptance/test_phase6_report_postprocessing_flow.py -q`
+
+Expected: `PASS`
+
+- [x] **Step 4: 更新总计划文档状态**
+
+```markdown
+### 当前执行状态（2026-06-17）
+- [x] Task 6.1 已完成：报告域结构化模型已新增
+- [x] Task 6.2 已完成：结构化报告装配层已新增
+- [x] Task 6.3 已完成：incidents / geolocation / postprocessing 已接入结构化主链
+- [x] Task 6.4 已完成：renderer 与 agents 已切换到结构化对象
+- [x] Task 6.5 已完成：Phase 6 验收与回归通过，待整理提交
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md tests/acceptance/test_phase6_report_postprocessing_flow.py
+git commit -m "feat: complete phase6 report postprocessing"
+```

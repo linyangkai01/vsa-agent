@@ -149,3 +149,76 @@ async def test_default_report_agent_path_uses_unified_analyze_video(monkeypatch)
 
     assert result.status == "success"
     assert captured["video_path"] == "video.mp4"
+
+
+@pytest.mark.anyio
+async def test_execute_report_agent_builds_structured_report_before_rendering():
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.data_models.report import StructuredReport
+
+    captured = {}
+
+    async def fake_video_understanding(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": "person walking near forklift",
+            "chunks": [],
+            "events": [],
+        }
+
+    async def fake_video_report_gen(**kwargs):
+        captured.update(kwargs)
+        assert isinstance(kwargs["structured_report"], StructuredReport)
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 摘要\nperson walking near forklift",
+            "downloads": {"markdown": {"filename": "report.md"}},
+            "summary": "person walking near forklift",
+        }
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+        video_understanding_fn=fake_video_understanding,
+        video_report_gen_fn=fake_video_report_gen,
+    )
+
+    assert result.status == "success"
+    assert "structured_report" in captured
+
+
+@pytest.mark.anyio
+async def test_execute_report_agent_accepts_lax_event_dicts():
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+
+    async def fake_video_understanding(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": "person walking near forklift",
+            "chunks": [],
+            "events": [
+                {
+                    "start_timestamp": "00:00:05",
+                    "end_timestamp": "00:00:09",
+                    "description": "person walking near forklift",
+                }
+            ],
+        }
+
+    async def fake_video_report_gen(**kwargs):
+        assert kwargs["structured_report"].sections[0].summary_text == "person walking near forklift"
+        return {
+            "markdown_content": "# report",
+            "downloads": {"markdown": {"filename": "report.md"}},
+            "summary": "person walking near forklift",
+        }
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="鐢熸垚璇︾粏鎶ュ憡"),
+        video_understanding_fn=fake_video_understanding,
+        video_report_gen_fn=fake_video_report_gen,
+    )
+
+    assert result.status == "success"

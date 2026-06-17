@@ -7,6 +7,7 @@ from .understanding import (
     SummaryResult,
     UnderstandingResult,
 )
+from .report import ReportIncident, ReportSection, StructuredReport
 from .vss import Incident, MediaInfoOffset
 
 __all__ = [
@@ -14,7 +15,10 @@ __all__ = [
     "EvidenceRef",
     "Incident",
     "MediaInfoOffset",
+    "ReportIncident",
+    "ReportSection",
     "ObservationChunk",
+    "StructuredReport",
     "SummaryResult",
     "UnderstandingResult",
 ]

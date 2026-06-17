@@ -10,8 +10,11 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from vsa_agent.agents.data_models import AgentOutput
+from vsa_agent.data_models.report import StructuredReport
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.report_gen import ReportSectionInput
+from vsa_agent.tools.report_structuring import build_single_section_report
+from vsa_agent.tools.report_structuring import normalize_understanding_result
 from vsa_agent.tools.video_understanding import analyze_video
 
 VideoUnderstandingCallable = Callable[..., Awaitable[Any]]
@@ -60,20 +63,29 @@ async def execute_multi_report_agent(
     report_gen = report_gen_fn or _default_report_gen_fn
 
     sections: list[ReportSectionInput] = []
+    structured_sections = []
     for index, item in enumerate(report_input.sources, start=1):
         if not item.video_path and not item.sensor_id:
             raise ValueError("每个 source 必须提供 video_path 或 sensor_id")
 
+        item_source_type = _resolve_source_type(item)
         understanding = await video_understanding(
             video_path=item.video_path or "",
             query=report_input.query,
-            source_type=_resolve_source_type(item),
+            source_type=item_source_type,
             sensor_id=item.sensor_id,
         )
         source_name = item.sensor_id or item.video_path or f"source-{index}"
+        section_title = f"事件 {index} - {source_name}"
+        parsed_understanding = normalize_understanding_result(
+            understanding_result=understanding,
+            user_query=report_input.query,
+            source_type=item_source_type,
+        )
+
         sections.append(
             ReportSectionInput(
-                section_title=f"事件 {index} - {source_name}",
+                section_title=section_title,
                 sensor_id=source_name,
                 user_query=report_input.query,
                 understanding_result=(
@@ -81,8 +93,25 @@ async def execute_multi_report_agent(
                 ),
             )
         )
+        structured_sections.append(
+            build_single_section_report(
+                source_name=source_name,
+                source_type=item_source_type,
+                user_query=report_input.query,
+                understanding_result=parsed_understanding,
+                section_title=section_title,
+            ).sections[0]
+        )
+
+    structured_report = StructuredReport(
+        report_title=report_input.report_title,
+        report_type="multi_video",
+        user_query=report_input.query,
+        sections=structured_sections,
+    )
 
     report = await report_gen(
+        structured_report=structured_report,
         report_title=report_input.report_title,
         report_sections=sections,
     )

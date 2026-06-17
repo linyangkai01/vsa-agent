@@ -11,6 +11,8 @@ from pydantic import Field
 
 from vsa_agent.agents.data_models import AgentOutput
 from vsa_agent.registry import register_tool
+from vsa_agent.tools.report_structuring import build_single_section_report
+from vsa_agent.tools.report_structuring import normalize_understanding_result
 from vsa_agent.tools.video_understanding import analyze_video
 
 VideoUnderstandingCallable = Callable[..., Awaitable[Any]]
@@ -71,11 +73,23 @@ async def execute_report_agent(
         source_type=source_type,
         sensor_id=report_input.sensor_id,
     )
+    understanding_result = normalize_understanding_result(
+        understanding_result=understanding_result,
+        user_query=report_input.query,
+        source_type=source_type,
+    )
+
+    structured_report = build_single_section_report(
+        source_name=report_input.sensor_id or report_input.video_path or "uploaded-video",
+        source_type=source_type,
+        user_query=report_input.query,
+        understanding_result=understanding_result,
+    )
 
     report_result = await video_report_gen(
         sensor_id=report_input.sensor_id or "uploaded-video",
         user_query=report_input.query,
-        understanding_result=understanding_result,
+        structured_report=structured_report,
     )
     markdown_content, downloads, summary = _normalize_report_result(report_result)
 
