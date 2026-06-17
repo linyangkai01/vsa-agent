@@ -74,3 +74,24 @@ CRITIC_AGENT_SYSTEM_PROMPT = (
     "Check each result for relevance, accuracy, and completeness. "
     "Return a JSON object with keys matching each result ID and boolean values."
 )
+
+PROMPT_REGISTRY = {
+    "default": SYSTEM_PROMPT_DEFAULT,
+    "safety_inspection": SYSTEM_PROMPT_SAFETY_INSPECTION,
+    "safety_incident": SYSTEM_PROMPT_SAFETY_INCIDENT,
+    "vlm_format": SYSTEM_PROMPT_VLM_FORMAT,
+    "video_understanding": SYSTEM_PROMPT_VIDEO_UNDERSTANDING,
+    "critic_agent": CRITIC_AGENT_SYSTEM_PROMPT,
+    "vlm_human_template": VLM_HUMAN_PROMPT_TEMPLATE,
+}
+
+__all__ = [
+    "SYSTEM_PROMPT_DEFAULT",
+    "SYSTEM_PROMPT_SAFETY_INSPECTION",
+    "SYSTEM_PROMPT_SAFETY_INCIDENT",
+    "SYSTEM_PROMPT_VLM_FORMAT",
+    "SYSTEM_PROMPT_VIDEO_UNDERSTANDING",
+    "VLM_HUMAN_PROMPT_TEMPLATE",
+    "CRITIC_AGENT_SYSTEM_PROMPT",
+    "PROMPT_REGISTRY",
+]

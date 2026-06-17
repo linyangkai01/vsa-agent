@@ -5,6 +5,7 @@ from vsa_agent.prompt import (
     SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE,
     CRITIC_AGENT_SYSTEM_PROMPT,
 )
+from vsa_agent import prompt as prompt_module
 
 class TestSystemPrompts:
     def test_default_system_prompt(self):
@@ -35,3 +36,15 @@ class TestCriticAgentPrompt:
     def test_is_string(self):
         assert isinstance(CRITIC_AGENT_SYSTEM_PROMPT, str)
         assert "critic" in CRITIC_AGENT_SYSTEM_PROMPT.lower()
+
+
+class TestPromptRegistry:
+    def test_exports_prompt_registry_and_all(self):
+        assert "default" in prompt_module.PROMPT_REGISTRY
+        assert "video_understanding" in prompt_module.PROMPT_REGISTRY
+        assert (
+            prompt_module.PROMPT_REGISTRY["video_understanding"]
+            == prompt_module.SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+        )
+        assert "SYSTEM_PROMPT_DEFAULT" in prompt_module.__all__
+        assert "VLM_HUMAN_PROMPT_TEMPLATE" in prompt_module.__all__
