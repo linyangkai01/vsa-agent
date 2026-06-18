@@ -4754,6 +4754,359 @@ Expected: `PASS`
 - [x] Task 7.14 已完成：OpenAIModelAdapter 已接入统一重试语义
 - [x] Task 7.15 已完成：VLLMModelAdapter 与流式异常传播语义已对齐
 - [x] Task 7.16 已完成：Phase 7A3 回归通过，待整理提交
+
+---
+
+## Phase 7 — A4 输出解析基础设施对齐 (P2)
+
+# Phase 7A4 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 补齐 `utils/parser.py` 与 `utils/markdown_parser.py` 两个共享解析模块，并将 `critic_agent` 的 JSON 剥壳逻辑与报告链的最小 markdown 消费场景接入公共解析层。
+
+**Architecture:** 本阶段继续遵循“先补基础设施，再接真实调用点”的原则。`parser.py` 负责 code fence / JSON payload 提取与解析；`markdown_parser.py` 提供轻量 heading、bullet、section 切分能力；`critic_agent.py` 改为依赖共享 parser；报告链只增加最小消费回归，不做大规模业务重构。这样既能补齐原版缺失模块，也能保证当前 markdown 输出风格已经可被共享工具消费。
+
+**Tech Stack:** Python 3.12, stdlib `json`, `dataclasses`, `re`, pytest
+
+---
+
+## 文件结构
+
+**新增文件**
+- `src/vsa_agent/utils/parser.py`
+  - 通用 fenced block / JSON payload 提取与解析
+- `src/vsa_agent/utils/markdown_parser.py`
+  - 轻量 markdown heading / bullet / section 解析
+- `tests/unit/utils/test_parser.py`
+- `tests/unit/utils/test_markdown_parser.py`
+
+**修改文件**
+- `src/vsa_agent/agents/critic_agent.py`
+  - 用共享 parser 替换本地 JSON 剥壳实现
+- `tests/unit/agents/test_critic_agent.py`
+  - 锁定 critic agent 接入共享 parser 后行为不变
+- `tests/unit/tools/test_template_report_gen.py`
+  - 增加 markdown 输出可被 section parser 消费的回归
+- `docs/superpowers/vsa-agent-implementation-plan.md`
+
+**本轮不做**
+- 不引入第三方 markdown parser 库
+- 不重构 report/template/report_gen 的主生成逻辑
+- 不做复杂 JSON 修复器
+- 不做完整 markdown AST
+
+---
+
+### Task 7.17: 新增 `utils/parser.py` 共享解析工具
+
+**Files:**
+- Create: `src/vsa_agent/utils/parser.py`
+- Create: `tests/unit/utils/test_parser.py`
+
+- [ ] **Step 1: 写失败测试，锁定 fenced block 与 JSON payload 契约**
+
+```python
+import json
+
+import pytest
+
+from vsa_agent.utils.parser import extract_fenced_block
+from vsa_agent.utils.parser import extract_json_string
+from vsa_agent.utils.parser import parse_json_payload
+
+
+def test_extract_fenced_block_prefers_matching_language():
+    text = "before```json\n{\"ok\": true}\n```after"
+    assert extract_fenced_block(text, language="json") == "{\"ok\": true}"
+
+
+def test_extract_fenced_block_accepts_any_language_when_unspecified():
+    text = "```python\nprint('x')\n```"
+    assert extract_fenced_block(text) == "print('x')"
+
+
+def test_extract_json_string_falls_back_to_original_text():
+    assert extract_json_string("{\"ok\": true}") == "{\"ok\": true}"
+
+
+def test_parse_json_payload_returns_loaded_object():
+    result = parse_json_payload("```json\n{\"ok\": true}\n```")
+    assert result == {"ok": True}
+
+
+def test_parse_json_payload_raises_on_invalid_json():
+    with pytest.raises(json.JSONDecodeError):
+        parse_json_payload("```json\nnot-json\n```")
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_parser.py -v`
+Expected: FAIL because `utils/parser.py` does not exist yet
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/parser.py
+import json
+import re
+
+
+FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
+
+
+def extract_fenced_block(text: str, language: str | None = None) -> str | None:
+    for match in FENCED_BLOCK_RE.finditer(text or ""):
+        lang = match.group("lang").strip().lower()
+        body = match.group("body").strip()
+        if language is None or lang == language.lower():
+            return body
+    return None
+
+
+def extract_json_string(text: str) -> str:
+    return (
+        extract_fenced_block(text, language="json")
+        or extract_fenced_block(text)
+        or (text or "")
+    ).strip()
+
+
+def parse_json_payload(text: str):
+    return json.loads(extract_json_string(text))
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_parser.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/parser.py tests/unit/utils/test_parser.py
+git commit -m "feat: add shared parser utilities"
+```
+
+### Task 7.18: 新增 `utils/markdown_parser.py` 轻量 markdown 结构解析
+
+**Files:**
+- Create: `src/vsa_agent/utils/markdown_parser.py`
+- Create: `tests/unit/utils/test_markdown_parser.py`
+
+- [ ] **Step 1: 写失败测试，锁定 heading / bullet / section 契约**
+
+```python
+from vsa_agent.utils.markdown_parser import extract_bullet_list
+from vsa_agent.utils.markdown_parser import extract_headings
+from vsa_agent.utils.markdown_parser import split_sections
+
+
+def test_extract_headings_filters_by_level():
+    markdown = "# Title\n\n## Summary\n\n## Details"
+    assert extract_headings(markdown, level=2) == ["Summary", "Details"]
+
+
+def test_extract_bullet_list_returns_plain_items():
+    markdown = "- first\n- second\n\ntext"
+    assert extract_bullet_list(markdown) == ["first", "second"]
+
+
+def test_split_sections_by_h2_returns_section_objects():
+    markdown = "# Report\n\n## Summary\nA\n\n## Details\nB"
+    sections = split_sections(markdown, heading_level=2)
+    assert [section.title for section in sections] == ["Summary", "Details"]
+    assert sections[0].content == "A"
+    assert sections[1].content == "B"
+
+
+def test_split_sections_returns_empty_for_no_matching_heading():
+    assert split_sections("plain text", heading_level=2) == []
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_markdown_parser.py -v`
+Expected: FAIL because `utils/markdown_parser.py` does not exist yet
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/markdown_parser.py
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class MarkdownSection:
+    title: str
+    content: str
+    heading_level: int
+```
+
+```python
+def extract_headings(markdown: str, level: int | None = None) -> list[str]:
+    ...
+
+
+def extract_bullet_list(markdown: str) -> list[str]:
+    ...
+
+
+def split_sections(markdown: str, heading_level: int = 2) -> list[MarkdownSection]:
+    ...
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_markdown_parser.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/markdown_parser.py tests/unit/utils/test_markdown_parser.py
+git commit -m "feat: add shared markdown parsing helpers"
+```
+
+### Task 7.19: 让 `critic_agent.py` 使用共享 parser
+
+**Files:**
+- Modify: `src/vsa_agent/agents/critic_agent.py`
+- Modify: `tests/unit/agents/test_critic_agent.py`
+
+- [ ] **Step 1: 写失败测试，锁定共享 parser 接管 JSON 剥壳**
+
+```python
+from vsa_agent.agents.critic_agent import _get_json_from_string
+
+
+def test_get_json_from_string_uses_shared_parser_behavior():
+    result = _get_json_from_string("```json\n{\"key\": \"value\"}\n```")
+    assert result == "{\"key\": \"value\"}"
+
+
+def test_get_json_from_string_accepts_plain_json():
+    result = _get_json_from_string("{\"key\": \"value\"}")
+    assert result == "{\"key\": \"value\"}"
+```
+
+- [ ] **Step 2: 运行测试，确认当前回归基线**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_critic_agent.py -v`
+Expected: PASS initially, then we refactor internals without changing behavior
+
+- [ ] **Step 3: 写最小实现，把 helper 内部改为共享 parser**
+
+```python
+# src/vsa_agent/agents/critic_agent.py
+from vsa_agent.utils.parser import extract_json_string
+
+
+def _get_json_from_string(string: str) -> str:
+    return extract_json_string(string)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/agents/test_critic_agent.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/critic_agent.py tests/unit/agents/test_critic_agent.py
+git commit -m "feat: route critic agent json parsing through shared parser"
+```
+
+### Task 7.20: 为报告链补最小 markdown 消费回归
+
+**Files:**
+- Modify: `tests/unit/tools/test_template_report_gen.py`
+- Modify: `tests/unit/tools/test_report_gen.py`
+
+- [ ] **Step 1: 写失败测试，锁定报告 markdown 可被 section parser 消费**
+
+```python
+from vsa_agent.utils.markdown_parser import split_sections
+
+
+async def test_template_report_output_is_splitable_by_h2_sections():
+    result = await generate_template_report(
+        report_title="仓库巡检聚合报告",
+        report_sections=[
+            {
+                "section_title": "事件 1 - camera-1",
+                "summary": "person walking near forklift",
+                "markdown_content": "## 摘要\nperson walking near forklift",
+            }
+        ],
+        counts={"walking": 2},
+        chart={"markdown_table": "| 事件类型 | 次数 |\n| --- | --- |\n| walking | 2 |"},
+    )
+    sections = split_sections(result.markdown_content, heading_level=2)
+    assert [section.title for section in sections] == ["报告摘要", "统计概览", "图表", "分事件报告"]
+```
+
+- [ ] **Step 2: 运行测试，确认红灯或基线行为**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_report_gen.py -v`
+Expected: Either FAIL because parser is missing earlier, or PASS after parser implementation and confirm current markdown is consumable
+
+- [ ] **Step 3: 如有必要，做最小实现修正**
+
+```python
+# 只在测试暴露出 section 标题/换行不稳定时，
+# 最小调整 template_report_gen.py 的换行与 heading 结构；
+# 不重写整个 markdown 渲染逻辑。
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_report_gen.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_report_gen.py src/vsa_agent/tools/template_report_gen.py
+git commit -m "test: verify report markdown is consumable by shared parser"
+```
+
+### Task 7.21: Phase 7A4 回归与文档状态更新
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 跑 Phase 7A4 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_parser.py tests/unit/utils/test_markdown_parser.py tests/unit/agents/test_critic_agent.py tests/unit/tools/test_template_report_gen.py tests/unit/tools/test_report_gen.py -q`
+Expected: `PASS`
+
+- [ ] **Step 2: 更新本计划中的 Phase 7A4 状态**
+
+```markdown
+### 当前执行状态（2026-06-18）
+- [x] Task 7.17 已完成：共享 parser 工具已补齐
+- [x] Task 7.18 已完成：共享 markdown parser 已补齐
+- [x] Task 7.19 已完成：critic agent 已接入共享 parser
+- [x] Task 7.20 已完成：报告 markdown 最小消费回归已补齐
+- [x] Task 7.21 已完成：Phase 7A4 回归通过，待整理提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase7a4 execution status"
+```
+
+### 当前执行状态（2026-06-18）
+- [x] Task 7.17 已完成：共享 parser 工具已补齐
+- [x] Task 7.18 已完成：共享 markdown parser 已补齐
+- [x] Task 7.19 已完成：critic agent 已接入共享 parser
+- [x] Task 7.20 已完成：报告 markdown 最小消费回归已补齐
+- [x] Task 7.21 已完成：Phase 7A4 回归通过，待整理提交
 ```
 
 - [ ] **Step 3: Commit**

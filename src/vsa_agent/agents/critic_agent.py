@@ -13,11 +13,12 @@ import json
 import logging
 from enum import Enum
 
-from vsa_agent.registry import register_tool
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 from pydantic import ConfigDict
-from langchain_core.messages import HumanMessage
 from pydantic import Field
+from vsa_agent.registry import register_tool
+from vsa_agent.utils.parser import extract_json_string
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +85,7 @@ class CriticAgentOutput(BaseModel):
 
 def _get_json_from_string(string: str) -> str:
     """Strip JSON from markdown code blocks. Mirrors NVIDIA get_json_from_string."""
-    if "```json" in string:
-        return string.split("```json")[1].split("```")[0].strip()
-    return string
+    return extract_json_string(string)
 
 # ===== Registered Tool Wrapper =====
 

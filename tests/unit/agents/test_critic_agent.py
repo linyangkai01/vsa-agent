@@ -48,6 +48,10 @@ class TestGetJsonFromString:
         result = _get_json_from_string("{\"key\": \"value\"}")
         assert result == "{\"key\": \"value\"}"
 
+    def test_accepts_generic_fenced_block(self):
+        result = _get_json_from_string("```\n{\"key\": \"value\"}\n```")
+        assert result == "{\"key\": \"value\"}"
+
 class TestExecuteCritic:
     async def test_with_mock_adapter(self):
         from unittest.mock import AsyncMock, MagicMock
