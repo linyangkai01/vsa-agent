@@ -14,6 +14,7 @@ import cv2
 
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.frame_store import store_frames
+from vsa_agent.utils.frame_select import select_frame_indices
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,16 @@ def _extract_frames(
         List of base64-encoded JPEG frame images.
     """
     start_frame = min(total_frames - 1, math.floor(start_timestamp * fps))
-    end_frame = min(total_frames - 1, math.ceil(end_timestamp * fps))
-    step_size_frame = max(1, math.floor(step_size * fps))
+    end_frame = min(total_frames, max(start_frame + 1, math.ceil(end_timestamp * fps)))
+    time_window = max(0.0, end_timestamp - start_timestamp)
+    requested_frames = max(1, math.ceil(time_window / step_size)) if step_size > 0 else 1
 
-    frame_indices = list(range(start_frame, end_frame, step_size_frame))
+    frame_indices = select_frame_indices(
+        total_frames,
+        requested_frames,
+        start_frame=start_frame,
+        end_frame=end_frame,
+    )
     if not frame_indices:
         logger.warning(
             "No frames selected from %.2fs to %.2fs (step=%.2fs)",

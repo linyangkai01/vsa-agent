@@ -22,6 +22,7 @@ from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
 from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
+from vsa_agent.utils.frame_select import frames_for_timestamp_range
 from vsa_agent.utils.reasoning_parsing import parse_reasoning_content
 from vsa_agent.utils.time_convert import format_timestamp
 from vsa_agent.utils.time_convert import parse_iso8601_duration
@@ -288,11 +289,13 @@ def _extract_frames(
         if time_window <= 0:
             return [], duration_sec, fps, total_frames
 
-        start_frame = min(total_frames - 1, math.floor(start_ts * fps))
-        end_frame = min(total_frames - 1, math.ceil(end_ts * fps))
-        step_size_frame = max(1, math.floor((time_window / max_frames) * fps))
-
-        frame_indices = list(range(start_frame, end_frame, step_size_frame))
+        frame_indices = frames_for_timestamp_range(
+            fps,
+            duration_sec,
+            max_frames,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
         if not frame_indices:
             return [], duration_sec, fps, total_frames
 

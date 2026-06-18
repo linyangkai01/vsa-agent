@@ -3980,3 +3980,382 @@ Expected: `PASS`
 git add docs/superpowers/vsa-agent-implementation-plan.md
 git commit -m "docs: update phase7a1 execution status"
 ```
+
+---
+
+## Phase 7 — A2 VSS 数据模型与时间/帧工具对齐 (P1)
+
+# Phase 7A2 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 对齐 `data_models/vss.py`、`utils/time_convert.py`、`utils/frame_select.py` 三个基础模块，使其具备更完整的原版兼容接口、稳定的边界语义，以及可被视频理解链复用的公共契约。
+
+**Architecture:** 这一轮继续坚持“对外接口不变、内部契约补齐”的原则。`data_models/vss.py` 作为 VSS 共享模型的兼容出口；`time_convert.py` 统一承担时间戳解析、ISO 时间转换、帧秒换算；`frame_select.py` 统一承担时间窗到帧索引的选择逻辑。最后把 `frame_extract.py` / `video_understanding.py` 的重复时间与选帧逻辑收口到公共工具层。
+
+**Tech Stack:** Python 3.12, dataclasses, datetime, pytest, existing video_understanding/frame_extract pipeline
+
+---
+
+## 文件结构
+
+**修改文件**
+- `src/vsa_agent/data_models/vss.py`
+  - 补齐 `Location` / `Place` 兼容导出
+  - 增强 `MediaInfoOffset` 的序列化与派生属性
+- `src/vsa_agent/data_models/__init__.py`
+  - 对齐新的兼容导出
+- `src/vsa_agent/utils/time_convert.py`
+  - 增加 ISO 时间互转与更稳的时间解析
+- `src/vsa_agent/utils/frame_select.py`
+  - 增强均匀选帧与时间窗裁剪逻辑
+- `src/vsa_agent/tools/frame_extract.py`
+  - 使用共享选帧/换算逻辑
+- `src/vsa_agent/tools/video_understanding.py`
+  - 使用共享时间/选帧逻辑，减少局部重复实现
+- `tests/unit/data_models/test_vss_data_models.py`
+- `tests/unit/utils/test_time_convert.py`
+- `tests/unit/utils/test_frame_select.py`
+- `tests/unit/tools/test_frame_extract.py`
+- `tests/unit/tools/test_video_understanding.py`
+
+**本轮不做**
+- 不改 Agent 层
+- 不改 API 层
+- 不接入真实 VST/NAT 时间锚点换算
+
+---
+
+### Task 7.7: 对齐 `data_models/vss.py` 兼容出口与 `MediaInfoOffset` 契约
+
+**Files:**
+- Modify: `src/vsa_agent/data_models/vss.py`
+- Modify: `src/vsa_agent/data_models/__init__.py`
+- Modify: `tests/unit/data_models/test_vss_data_models.py`
+
+- [ ] **Step 1: 写失败测试，锁定导出与 `MediaInfoOffset` 能力**
+
+```python
+from vsa_agent.data_models import Incident, Location, MediaInfoOffset, Place
+
+
+class TestMediaInfoOffset:
+    def test_current_frame_index_uses_offset_and_fps(self):
+        media = MediaInfoOffset(duration_sec=30.0, fps=10.0, current_offset_sec=2.6)
+        assert media.current_frame_index == 26
+
+    def test_remaining_duration_is_clamped(self):
+        media = MediaInfoOffset(duration_sec=10.0, current_offset_sec=12.0)
+        assert media.remaining_duration_sec == 0.0
+
+    def test_to_dict_round_trip_preserves_metadata(self):
+        media = MediaInfoOffset(
+            video_path="demo.mp4",
+            duration_sec=12.5,
+            fps=25.0,
+            total_frames=312,
+            current_offset_sec=4.0,
+            metadata={"sensor_id": "cam-1"},
+        )
+        restored = MediaInfoOffset.from_dict(media.to_dict())
+        assert restored == media
+
+
+class TestCompatExports:
+    def test_reexports_location_place_and_incident(self):
+        assert Location.__name__ == "Location"
+        assert Place.__name__ == "Place"
+        assert Incident.__name__ == "Incident"
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/data_models/test_vss_data_models.py -v`
+Expected: FAIL because `Location` / `Place` are not re-exported and `MediaInfoOffset` lacks derived properties / round-trip helpers
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/data_models/vss.py
+
+from vsa_agent.video_analytics.nvschema import Incident
+from vsa_agent.video_analytics.nvschema import Location
+from vsa_agent.video_analytics.nvschema import Place
+
+
+@dataclass
+class MediaInfoOffset:
+    ...
+
+    @property
+    def current_frame_index(self) -> int:
+        if self.fps <= 0:
+            return 0
+        return max(0, int(self.current_offset_sec * self.fps))
+
+    @property
+    def remaining_duration_sec(self) -> float:
+        return max(0.0, self.duration_sec - self.current_offset_sec)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "video_path": self.video_path,
+            "duration_sec": self.duration_sec,
+            "fps": self.fps,
+            "total_frames": self.total_frames,
+            "current_offset_sec": self.current_offset_sec,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MediaInfoOffset":
+        return cls(**payload)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/data_models/test_vss_data_models.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/data_models/vss.py src/vsa_agent/data_models/__init__.py tests/unit/data_models/test_vss_data_models.py
+git commit -m "feat: align vss data model compatibility exports"
+```
+
+### Task 7.8: 对齐 `time_convert.py` 的时间解析与 ISO 互转契约
+
+**Files:**
+- Modify: `src/vsa_agent/utils/time_convert.py`
+- Modify: `tests/unit/utils/test_time_convert.py`
+
+- [ ] **Step 1: 写失败测试，锁定 ISO 互转与边界语义**
+
+```python
+from datetime import datetime
+from datetime import timezone
+
+import pytest
+
+from vsa_agent.utils.time_convert import datetime_to_iso8601
+from vsa_agent.utils.time_convert import iso8601_to_datetime
+from vsa_agent.utils.time_convert import parse_iso8601_duration
+from vsa_agent.utils.time_convert import format_timestamp
+
+
+def test_iso8601_to_datetime_supports_z_suffix():
+    value = iso8601_to_datetime("2025-01-01T10:00:00Z")
+    assert value == datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def test_datetime_to_iso8601_outputs_z_for_utc():
+    value = datetime_to_iso8601(datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc))
+    assert value == "2025-01-01T10:00:00Z"
+
+
+def test_parse_iso8601_duration_rejects_empty_payload():
+    with pytest.raises(ValueError):
+        parse_iso8601_duration("PT")
+
+
+def test_format_timestamp_mm_ss_ms_uses_total_minutes():
+    assert format_timestamp(3661.25, fmt="mm:ss.ms") == "61:01.250"
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_time_convert.py -v`
+Expected: FAIL because ISO helpers do not exist and current formatter/parser edge behavior differs
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/time_convert.py
+
+def iso8601_to_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    return datetime.fromisoformat(normalized)
+
+
+def datetime_to_iso8601(value: datetime) -> str:
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    text = normalized.isoformat(timespec="seconds")
+    return text.replace("+00:00", "Z")
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_time_convert.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/time_convert.py tests/unit/utils/test_time_convert.py
+git commit -m "feat: add shared iso time conversion helpers"
+```
+
+### Task 7.9: 对齐 `frame_select.py` 的均匀选帧与时间窗裁剪逻辑
+
+**Files:**
+- Modify: `src/vsa_agent/utils/frame_select.py`
+- Modify: `tests/unit/utils/test_frame_select.py`
+
+- [ ] **Step 1: 写失败测试，锁定首尾覆盖与时间窗裁剪行为**
+
+```python
+from vsa_agent.utils.frame_select import frames_for_timestamp_range
+from vsa_agent.utils.frame_select import select_frame_indices
+
+
+def test_select_frame_indices_spans_window_including_last_frame():
+    assert select_frame_indices(total_frames=10, max_frames=3) == [0, 4, 9]
+
+
+def test_select_frame_indices_clamps_start_and_end():
+    assert select_frame_indices(total_frames=20, max_frames=4, start_frame=-3, end_frame=50) == [0, 6, 12, 19]
+
+
+def test_frames_for_timestamp_range_returns_empty_when_fps_invalid():
+    assert frames_for_timestamp_range(fps=0.0, duration_sec=30.0, max_frames=5) == []
+
+
+def test_frames_for_timestamp_range_clamps_requested_window():
+    assert frames_for_timestamp_range(
+        fps=10.0,
+        duration_sec=5.0,
+        max_frames=3,
+        start_ts=-1.0,
+        end_ts=10.0,
+    ) == [0, 24, 49]
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_frame_select.py -v`
+Expected: FAIL because current logic does not guarantee last-frame coverage and lacks invalid-FPS guard
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/frame_select.py
+
+def select_frame_indices(...):
+    ...
+    if window <= max_frames:
+        return list(range(start_frame, end_frame))
+
+    step = (window - 1) / (max_frames - 1)
+    indices = [
+        min(end_frame - 1, start_frame + round(i * step))
+        for i in range(max_frames)
+    ]
+    return indices
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_frame_select.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/frame_select.py tests/unit/utils/test_frame_select.py
+git commit -m "feat: align shared frame selection helpers"
+```
+
+### Task 7.10: 把 `frame_extract` / `video_understanding` 重复逻辑接回公共工具层
+
+**Files:**
+- Modify: `src/vsa_agent/tools/frame_extract.py`
+- Modify: `src/vsa_agent/tools/video_understanding.py`
+- Modify: `tests/unit/tools/test_frame_extract.py`
+- Modify: `tests/unit/tools/test_video_understanding.py`
+
+- [ ] **Step 1: 写失败测试，锁定工具层对共享工具函数的消费**
+
+```python
+def test_frame_extract_uses_shared_frame_selector(monkeypatch):
+    from vsa_agent.tools import frame_extract
+
+    captured = {}
+
+    def fake_selector(total_frames, max_frames, start_frame=0, end_frame=None):
+        captured["args"] = (total_frames, max_frames, start_frame, end_frame)
+        return [0, 5, 9]
+
+    monkeypatch.setattr(frame_extract, "select_frame_indices", fake_selector)
+    ...
+    assert captured["args"] == (10, 3, 0, 10)
+
+
+def test_video_understanding_timestamp_to_seconds_uses_shared_parser():
+    assert _timestamp_to_seconds("PT5S") == 5.0
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_frame_extract.py tests/unit/tools/test_video_understanding.py -v`
+Expected: FAIL because the shared helpers are not yet wired into both tools
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/frame_extract.py
+from vsa_agent.utils.frame_select import select_frame_indices
+
+# src/vsa_agent/tools/video_understanding.py
+from vsa_agent.utils.frame_select import frames_for_timestamp_range
+from vsa_agent.utils.time_convert import parse_iso8601_duration
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_frame_extract.py tests/unit/tools/test_video_understanding.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/frame_extract.py src/vsa_agent/tools/video_understanding.py tests/unit/tools/test_frame_extract.py tests/unit/tools/test_video_understanding.py
+git commit -m "feat: reuse shared time and frame helpers in video tools"
+```
+
+### Task 7.11: Phase 7A2 回归与文档状态更新
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 跑 Phase 7A2 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/data_models/test_vss_data_models.py tests/unit/utils/test_time_convert.py tests/unit/utils/test_frame_select.py tests/unit/tools/test_frame_extract.py tests/unit/tools/test_video_understanding.py -q`
+Expected: `PASS`
+
+- [ ] **Step 2: 更新本计划中的 Phase 7A2 状态**
+
+```markdown
+### 当前执行状态（2026-06-18）
+- [x] Task 7.7 已完成：VSS 数据模型兼容出口已补齐
+- [x] Task 7.8 已完成：时间转换公共接口已补齐
+- [x] Task 7.9 已完成：共享选帧逻辑已对齐
+- [x] Task 7.10 已完成：视频工具层已接回共享时间/选帧工具
+- [x] Task 7.11 已完成：Phase 7A2 回归通过，待整理提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase7a2 execution status"
+```
+
+### 当前执行状态（2026-06-18）
+- [x] Task 7.7 已完成：VSS 数据模型兼容出口已补齐
+- [x] Task 7.8 已完成：时间转换公共接口已补齐
+- [x] Task 7.9 已完成：共享选帧逻辑已对齐
+- [x] Task 7.10 已完成：视频工具层已接回共享时间/选帧工具
+- [x] Task 7.11 已完成：Phase 7A2 回归通过，待整理提交

@@ -7,6 +7,7 @@ from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
 from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.tools.video_understanding import (
     VideoUnderstandingInput, VideoUnderstandingConfig,
+    _extract_frames,
     _analyze_frames, _build_vlm_messages, _normalize_model_response,
     _parse_thinking_from_content, _prepare_video_path, analyze_video,
     analyze_video_segment,
@@ -51,6 +52,62 @@ class TestBuildVlmMessages:
             if part["type"] == "text"
         )
         assert text_part == VLM_HUMAN_PROMPT_TEMPLATE.format(query="what happened")
+
+
+class TestExtractFrames:
+    def test_uses_shared_timestamp_range_selector(self, monkeypatch):
+        from vsa_agent.tools import video_understanding
+
+        captured = {}
+
+        class FakeBuffer:
+            def tobytes(self):
+                return b"abc"
+
+        class FakeCapture:
+            def __init__(self, video_path):
+                self.video_path = video_path
+
+            def isOpened(self):
+                return True
+
+            def get(self, prop):
+                if prop == video_understanding.cv2.CAP_PROP_FPS:
+                    return 10.0
+                if prop == video_understanding.cv2.CAP_PROP_FRAME_COUNT:
+                    return 50
+                return 0
+
+            def set(self, prop, value):
+                captured.setdefault("positions", []).append((prop, value))
+
+            def read(self):
+                return True, object()
+
+            def release(self):
+                captured["released"] = True
+
+        def fake_select(fps, duration_sec, max_frames, start_ts=0.0, end_ts=None):
+            captured["args"] = (fps, duration_sec, max_frames, start_ts, end_ts)
+            return [0, 24, 49]
+
+        monkeypatch.setattr(video_understanding, "_require_cv2", lambda: None)
+        monkeypatch.setattr(video_understanding.cv2, "VideoCapture", FakeCapture)
+        monkeypatch.setattr(video_understanding.cv2, "imencode", lambda ext, frame: (True, FakeBuffer()))
+        monkeypatch.setattr(video_understanding, "frames_for_timestamp_range", fake_select, raising=False)
+
+        frames, duration_sec, fps, total_frames = _extract_frames(
+            "video.mp4",
+            max_frames=3,
+            start_timestamp=0.0,
+            end_timestamp=5.0,
+        )
+
+        assert captured["args"] == (10.0, 5.0, 3, 0.0, 5.0)
+        assert len(frames) == 3
+        assert duration_sec == 5.0
+        assert fps == 10.0
+        assert total_frames == 50
 
 class TestNormalizeModelResponse:
     def test_returns_understanding_result(self):
