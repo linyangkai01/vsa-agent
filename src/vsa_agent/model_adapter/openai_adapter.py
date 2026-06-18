@@ -15,11 +15,13 @@ class OpenAIModelAdapter(BaseModelAdapter):
             base_url=dev.base_url,
             api_key=dev.api_key if dev.api_key else None,
             temperature=0,
-            max_retries=2,
+            max_retries=0,
         )
 
     async def invoke(self, messages):
-        return await self.llm.ainvoke(messages)
+        return await self._invoke_with_retry(
+            lambda: self.llm.ainvoke(messages)
+        )
 
     async def astream(self, messages):
         async for chunk in self.llm.astream(messages):

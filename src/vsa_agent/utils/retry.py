@@ -1,37 +1,65 @@
-"""Retry decorator for async functions. Mirrors NVIDIA utils/retry.py."""
+"""Shared async retry utilities."""
+
+from __future__ import annotations
 
 import asyncio
 import functools
 import logging
+from collections.abc import Awaitable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def async_retry(max_retries=3, delay=1.0, backoff=2.0, exceptions=(Exception,)):
-    """Decorator: retry async function on exception with exponential backoff.
+async def call_with_async_retry(
+    func: Callable[..., Awaitable[Any]],
+    *args,
+    max_retries: int = 3,
+    delay: float = 1.0,
+    backoff: float = 2.0,
+    exceptions: tuple[type[Exception], ...] = (Exception,),
+    **kwargs,
+) -> Any:
+    """Call an async function with exponential-backoff retry."""
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await func(*args, **kwargs)
+        except exceptions as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                wait = delay * (backoff ** attempt)
+                logger.warning(
+                    "Retry %d/%d for %s after %.1fs: %s",
+                    attempt + 1,
+                    max_retries,
+                    getattr(func, "__name__", repr(func)),
+                    wait,
+                    exc,
+                )
+                await asyncio.sleep(wait)
+    if last_exc is None:
+        raise RuntimeError("Retry loop exited without result or captured exception")
+    raise last_exc
 
-    Args:
-        max_retries: Maximum retry attempts (default 3).
-        delay: Initial delay in seconds (default 1.0).
-        backoff: Multiplier for each subsequent retry (default 2.0).
-        exceptions: Tuple of exception types to catch (default all).
-    """
+
+def async_retry(max_retries=3, delay=1.0, backoff=2.0, exceptions=(Exception,)):
+    """Decorator: retry async function on exception with exponential backoff."""
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            last_exc = None
-            for attempt in range(max_retries + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except exceptions as e:
-                    last_exc = e
-                    if attempt < max_retries:
-                        wait = delay * (backoff ** attempt)
-                        logger.warning(
-                            "Retry %d/%d for %s after %.1fs: %s",
-                            attempt + 1, max_retries, func.__name__, wait, e,
-                        )
-                        await asyncio.sleep(wait)
-            raise last_exc
+            return await call_with_async_retry(
+                func,
+                *args,
+                max_retries=max_retries,
+                delay=delay,
+                backoff=backoff,
+                exceptions=exceptions,
+                **kwargs,
+            )
+
         return wrapper
+
     return decorator

@@ -4344,6 +4344,431 @@ Expected: `PASS`
 - [x] Task 7.9 已完成：共享选帧逻辑已对齐
 - [x] Task 7.10 已完成：视频工具层已接回共享时间/选帧工具
 - [x] Task 7.11 已完成：Phase 7A2 回归通过，待整理提交
+
+---
+
+## Phase 7 — A3 重试基础设施与 Model Adapter 对齐 (P1)
+
+# Phase 7A3 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 对齐 `utils/retry.py` 与 `model_adapter` 主链，让 OpenAI / vLLM 两类 adapter 在不改变现有对外接口的前提下共享统一、可测试的异步重试语义。
+
+**Architecture:** 本阶段继续遵循“原版接口优先、内部契约补齐”的原则。`utils/retry.py` 作为统一重试能力入口；`BaseModelAdapter` 补充内部共享调用包装；`OpenAIModelAdapter` 与 `VLLMModelAdapter` 的 `invoke()` 走相同的共享 retry 语义，`astream()` 则保持保守的异常透明传播。实现上避免依赖底层 SDK 的隐式默认重试，优先让仓库自己的行为可验证、可复用。
+
+**Tech Stack:** Python 3.12, asyncio, LangChain `ChatOpenAI`, pytest, unittest.mock
+
+---
+
+## 文件结构
+
+**修改文件**
+- `src/vsa_agent/utils/retry.py`
+  - 补强 async retry 契约与共享调用包装
+- `src/vsa_agent/model_adapter/base.py`
+  - 增加内部共享 retry 包装入口
+- `src/vsa_agent/model_adapter/openai_adapter.py`
+  - `invoke()` 接入共享 retry
+  - 收紧底层 SDK 隐式重试
+- `src/vsa_agent/model_adapter/vllm_adapter.py`
+  - `invoke()` 接入共享 retry
+  - 与 OpenAI adapter 保持一致语义
+- `tests/unit/utils/test_retry.py`
+- `tests/unit/model_adapter/test_model_adapter.py`
+
+**本轮不做**
+- 不改 `create_model_adapter(...)` 外部签名
+- 不做 `astream()` 自动重放
+- 不引入新的全局 retry 配置文件层
+- 不做熔断、指标、超时治理
+
+---
+
+### Task 7.12: 补强 `utils/retry.py` 的共享重试契约
+
+**Files:**
+- Modify: `src/vsa_agent/utils/retry.py`
+- Modify: `tests/unit/utils/test_retry.py`
+
+- [ ] **Step 1: 写失败测试，锁定退避等待与共享调用包装契约**
+
+```python
+import pytest
+
+from vsa_agent.utils.retry import async_retry
+from vsa_agent.utils.retry import call_with_async_retry
+
+
+@pytest.mark.asyncio
+async def test_call_with_async_retry_retries_and_returns_value(monkeypatch):
+    attempts = {"count": 0}
+    waits = []
+
+    async def fake_sleep(delay):
+        waits.append(delay)
+
+    async def flaky():
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise ValueError("temporary")
+        return "ok"
+
+    monkeypatch.setattr("vsa_agent.utils.retry.asyncio.sleep", fake_sleep)
+
+    result = await call_with_async_retry(
+        flaky,
+        max_retries=2,
+        delay=0.5,
+        backoff=2.0,
+        exceptions=(ValueError,),
+    )
+
+    assert result == "ok"
+    assert attempts["count"] == 3
+    assert waits == [0.5, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_call_with_async_retry_does_not_retry_unlisted_exception(monkeypatch):
+    waits = []
+
+    async def fake_sleep(delay):
+        waits.append(delay)
+
+    async def fail():
+        raise TypeError("wrong type")
+
+    monkeypatch.setattr("vsa_agent.utils.retry.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(TypeError):
+        await call_with_async_retry(
+            fail,
+            max_retries=3,
+            exceptions=(ValueError,),
+        )
+
+    assert waits == []
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_retry.py -v`
+Expected: FAIL because `call_with_async_retry` does not exist yet
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/retry.py
+
+async def call_with_async_retry(
+    func,
+    *args,
+    max_retries=3,
+    delay=1.0,
+    backoff=2.0,
+    exceptions=(Exception,),
+    **kwargs,
+):
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await func(*args, **kwargs)
+        except exceptions as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                wait = delay * (backoff ** attempt)
+                await asyncio.sleep(wait)
+    raise last_exc
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_retry.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/retry.py tests/unit/utils/test_retry.py
+git commit -m "feat: strengthen shared async retry utilities"
+```
+
+### Task 7.13: 在 `BaseModelAdapter` 补充内部共享 retry 包装
+
+**Files:**
+- Modify: `src/vsa_agent/model_adapter/base.py`
+- Modify: `tests/unit/model_adapter/test_model_adapter.py`
+
+- [ ] **Step 1: 写失败测试，锁定基类共享包装入口**
+
+```python
+import pytest
+
+from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
+
+from vsa_agent.model_adapter.base import BaseModelAdapter
+
+
+class DummyAdapter(BaseModelAdapter):
+    async def invoke(self, messages):
+        return await self._invoke_with_retry(lambda: self._call(messages))
+
+    async def astream(self, messages):
+        yield "x"
+
+    async def _call(self, messages):
+        return AIMessage(content="ok")
+
+
+@pytest.mark.asyncio
+async def test_base_model_adapter_exposes_retry_wrapper():
+    adapter = DummyAdapter()
+    result = await adapter.invoke([HumanMessage(content="hello")])
+    assert result.content == "ok"
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py -v`
+Expected: FAIL because `_invoke_with_retry` is missing
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/model_adapter/base.py
+from vsa_agent.utils.retry import call_with_async_retry
+
+
+class BaseModelAdapter(ABC):
+    retry_max_retries: int = 2
+    retry_delay: float = 0.5
+    retry_backoff: float = 2.0
+    retry_exceptions: tuple[type[Exception], ...] = (Exception,)
+
+    async def _invoke_with_retry(self, func):
+        return await call_with_async_retry(
+            func,
+            max_retries=self.retry_max_retries,
+            delay=self.retry_delay,
+            backoff=self.retry_backoff,
+            exceptions=self.retry_exceptions,
+        )
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/model_adapter/base.py tests/unit/model_adapter/test_model_adapter.py
+git commit -m "feat: add retry wrapper to base model adapter"
+```
+
+### Task 7.14: 对齐 `OpenAIModelAdapter` 的共享重试语义
+
+**Files:**
+- Modify: `src/vsa_agent/model_adapter/openai_adapter.py`
+- Modify: `tests/unit/model_adapter/test_model_adapter.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `invoke()` 的共享 retry 与 SDK 参数收紧**
+
+```python
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
+
+
+@pytest.mark.asyncio
+@patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+async def test_openai_adapter_invoke_retries_transient_failure(chat_openai_cls):
+    from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+    llm = MagicMock()
+    attempts = {"count": 0}
+
+    async def fake_ainvoke(messages):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("temporary")
+        return AIMessage(content="ok")
+
+    llm.ainvoke.side_effect = fake_ainvoke
+    chat_openai_cls.return_value = llm
+
+    adapter = OpenAIModelAdapter(model_name="gpt-4o")
+    result = await adapter.invoke([HumanMessage(content="hello")])
+
+    assert result.content == "ok"
+    assert attempts["count"] == 3
+    assert chat_openai_cls.call_args.kwargs["max_retries"] == 0
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py -v`
+Expected: FAIL because `invoke()` does not yet use shared retry and SDK retries are still nonzero
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/model_adapter/openai_adapter.py
+
+class OpenAIModelAdapter(BaseModelAdapter):
+    ...
+    def __init__(...):
+        self.llm = ChatOpenAI(..., max_retries=0)
+
+    async def invoke(self, messages):
+        return await self._invoke_with_retry(
+            lambda: self.llm.ainvoke(messages)
+        )
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/model_adapter/openai_adapter.py tests/unit/model_adapter/test_model_adapter.py
+git commit -m "feat: align openai adapter retry behavior"
+```
+
+### Task 7.15: 对齐 `VLLMModelAdapter` 与 `astream()` 透明传播语义
+
+**Files:**
+- Modify: `src/vsa_agent/model_adapter/vllm_adapter.py`
+- Modify: `tests/unit/model_adapter/test_model_adapter.py`
+
+- [ ] **Step 1: 写失败测试，锁定 vLLM retry 与流式异常传播**
+
+```python
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
+
+
+@pytest.mark.asyncio
+@patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+async def test_vllm_adapter_invoke_retries_transient_failure(chat_openai_cls):
+    from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+    llm = MagicMock()
+    attempts = {"count": 0}
+
+    async def fake_ainvoke(messages):
+        attempts["count"] += 1
+        if attempts["count"] < 2:
+            raise RuntimeError("temporary")
+        return AIMessage(content="ok")
+
+    llm.ainvoke.side_effect = fake_ainvoke
+    chat_openai_cls.return_value = llm
+
+    adapter = VLLMModelAdapter(model_name="qwen")
+    result = await adapter.invoke([HumanMessage(content="hello")])
+
+    assert result.content == "ok"
+    assert attempts["count"] == 2
+
+
+@pytest.mark.asyncio
+@patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+async def test_vllm_adapter_astream_propagates_error(chat_openai_cls):
+    from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+    llm = MagicMock()
+
+    async def fake_astream(messages):
+        raise RuntimeError("stream failed")
+        yield  # pragma: no cover
+
+    llm.astream.side_effect = fake_astream
+    chat_openai_cls.return_value = llm
+
+    adapter = VLLMModelAdapter(model_name="qwen")
+    with pytest.raises(RuntimeError):
+        async for _ in adapter.astream([HumanMessage(content="hello")]):
+            pass
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py -v`
+Expected: FAIL because `VLLMModelAdapter.invoke()` does not yet use shared retry consistently
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/model_adapter/vllm_adapter.py
+
+class VLLMModelAdapter(BaseModelAdapter):
+    ...
+    async def invoke(self, messages):
+        return await self._invoke_with_retry(
+            lambda: self.llm.ainvoke(messages)
+        )
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/model_adapter/test_model_adapter.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/model_adapter/vllm_adapter.py tests/unit/model_adapter/test_model_adapter.py
+git commit -m "feat: align vllm adapter retry behavior"
+```
+
+### Task 7.16: Phase 7A3 回归与文档状态更新
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 跑 Phase 7A3 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_retry.py tests/unit/model_adapter/test_model_adapter.py -q`
+Expected: `PASS`
+
+- [ ] **Step 2: 更新本计划中的 Phase 7A3 状态**
+
+```markdown
+### 当前执行状态（2026-06-18）
+- [x] Task 7.12 已完成：共享 async retry 契约已补强
+- [x] Task 7.13 已完成：BaseModelAdapter 已补充内部 retry 包装
+- [x] Task 7.14 已完成：OpenAIModelAdapter 已接入统一重试语义
+- [x] Task 7.15 已完成：VLLMModelAdapter 与流式异常传播语义已对齐
+- [x] Task 7.16 已完成：Phase 7A3 回归通过，待整理提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase7a3 execution status"
+```
+
+### 当前执行状态（2026-06-18）
+- [x] Task 7.12 已完成：共享 async retry 契约已补强
+- [x] Task 7.13 已完成：BaseModelAdapter 已补充内部 retry 包装
+- [x] Task 7.14 已完成：OpenAIModelAdapter 已接入统一重试语义
+- [x] Task 7.15 已完成：VLLMModelAdapter 与流式异常传播语义已对齐
+- [x] Task 7.16 已完成：Phase 7A3 回归通过，待整理提交
 ```
 
 - [ ] **Step 3: Commit**

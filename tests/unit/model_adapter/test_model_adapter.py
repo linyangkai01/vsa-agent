@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
 
 
 class TestModelAdapterFactory:
@@ -63,6 +65,30 @@ class TestOpenAIModelAdapter:
         kwargs = chat_openai_cls.call_args.kwargs
         assert kwargs["api_key"] is None
 
+    @pytest.mark.asyncio
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    async def test_invoke_retries_transient_failure(self, chat_openai_cls):
+        from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+        llm = MagicMock()
+        attempts = {"count": 0}
+
+        async def fake_ainvoke(messages):
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise RuntimeError("temporary")
+            return AIMessage(content="ok")
+
+        llm.ainvoke.side_effect = fake_ainvoke
+        chat_openai_cls.return_value = llm
+
+        adapter = OpenAIModelAdapter(model_name="gpt-4o")
+        result = await adapter.invoke([HumanMessage(content="hello")])
+
+        assert result.content == "ok"
+        assert attempts["count"] == 3
+        assert chat_openai_cls.call_args.kwargs["max_retries"] == 0
+
 
 class TestVLLMModelAdapter:
     @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False)
@@ -104,3 +130,45 @@ class TestVLLMModelAdapter:
 
         llm.bind_tools.assert_called_once()
         assert adapter.llm is llm
+
+    @pytest.mark.asyncio
+    @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+    async def test_invoke_retries_transient_failure(self, chat_openai_cls):
+        from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+        llm = MagicMock()
+        attempts = {"count": 0}
+
+        async def fake_ainvoke(messages):
+            attempts["count"] += 1
+            if attempts["count"] < 2:
+                raise RuntimeError("temporary")
+            return AIMessage(content="ok")
+
+        llm.ainvoke.side_effect = fake_ainvoke
+        chat_openai_cls.return_value = llm
+
+        adapter = VLLMModelAdapter(model_name="qwen")
+        result = await adapter.invoke([HumanMessage(content="hello")])
+
+        assert result.content == "ok"
+        assert attempts["count"] == 2
+
+    @pytest.mark.asyncio
+    @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+    async def test_astream_propagates_error(self, chat_openai_cls):
+        from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+        llm = MagicMock()
+
+        async def fake_astream(messages):
+            raise RuntimeError("stream failed")
+            yield  # pragma: no cover
+
+        llm.astream.side_effect = fake_astream
+        chat_openai_cls.return_value = llm
+
+        adapter = VLLMModelAdapter(model_name="qwen")
+        with pytest.raises(RuntimeError):
+            async for _ in adapter.astream([HumanMessage(content="hello")]):
+                pass

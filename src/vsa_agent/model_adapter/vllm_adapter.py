@@ -15,10 +15,13 @@ class VLLMModelAdapter(BaseModelAdapter):
             base_url=prod.base_url,
             api_key=prod.api_key if prod.api_key else None,
             temperature=0,
+            max_retries=0,
         )
 
     async def invoke(self, messages):
-        return await self.llm.ainvoke(messages)
+        return await self._invoke_with_retry(
+            lambda: self.llm.ainvoke(messages)
+        )
 
     async def astream(self, messages):
         async for chunk in self.llm.astream(messages):
