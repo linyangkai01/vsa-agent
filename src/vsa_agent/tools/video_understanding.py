@@ -28,6 +28,7 @@ from vsa_agent.utils.time_convert import format_timestamp
 from vsa_agent.utils.time_convert import parse_iso8601_duration
 from vsa_agent.utils.url_translation import is_remote_url
 from vsa_agent.utils.url_translation import translate_url
+from vsa_agent.utils.video_file import ensure_local_video_path
 
 try:
     import cv2
@@ -377,11 +378,9 @@ def _prepare_video_path(
             or translated.startswith("https://")
         ):
             return translated
-        if is_remote_url(translated):
-            raise ValueError(f"Video path is not accessible as a local file: {video_path}")
-        return translated
+        return ensure_local_video_path(translated)
 
-    return video_path
+    return ensure_local_video_path(video_path)
 
 
 def _get_requested_window_duration(

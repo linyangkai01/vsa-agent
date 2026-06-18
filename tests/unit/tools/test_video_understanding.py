@@ -175,6 +175,13 @@ class TestNormalizeModelResponse:
 
 
 class TestPrepareVideoPath:
+    def test_normalizes_local_windows_path(self):
+        resolved = _prepare_video_path(
+            "C:\\videos\\demo.mp4",
+            VideoUnderstandingConfig(source_mode="local"),
+        )
+        assert resolved == "C:/videos/demo.mp4"
+
     def test_translates_remote_source_when_configured(self, monkeypatch):
         monkeypatch.setattr(
             "vsa_agent.tools.video_understanding.translate_url",
@@ -191,7 +198,7 @@ class TestPrepareVideoPath:
             "vsa_agent.tools.video_understanding.translate_url",
             lambda url, target_base=None: "https://example.com/video.mp4",
         )
-        with pytest.raises(ValueError, match="not accessible as a local file"):
+        with pytest.raises(ValueError, match="local video file"):
             _prepare_video_path(
                 "https://example.com/video.mp4",
                 VideoUnderstandingConfig(source_mode="translated"),

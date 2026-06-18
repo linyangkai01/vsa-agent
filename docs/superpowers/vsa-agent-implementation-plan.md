@@ -5092,6 +5092,271 @@ Expected: `PASS`
 - [x] Task 7.19 已完成：critic agent 已接入共享 parser
 - [x] Task 7.20 已完成：报告 markdown 最小消费回归已补齐
 - [x] Task 7.21 已完成：Phase 7A4 回归通过，待整理提交
+
+---
+
+## Phase 7 — A5 源路径翻译与视频文件工具对齐 (P2)
+
+# Phase 7A5 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 补强 `utils/url_translation.py`，新增 `utils/video_file.py`，并让 `video_understanding._prepare_video_path()` 改用共享文件源工具，从而统一本地路径、file URL、S3/MinIO 挂载路径与远程 clip 的处理语义。
+
+**Architecture:** 本阶段继续按“共享工具先行、主链最小接入”的方式推进。`url_translation.py` 负责翻译与基础规范化；`video_file.py` 负责本地视频文件候选判断与本地路径校验；`video_understanding.py` 只保留 RTSP/HTTP clip 的业务特判，不再自己承担全部文件可达性判断。这样既补齐原版缺失工具，又让当前主链的职责边界更清楚。
+
+**Tech Stack:** Python 3.12, stdlib `os`, `pathlib`, `urllib.parse`, pytest
+
+---
+
+## 文件结构
+
+**新增文件**
+- `src/vsa_agent/utils/video_file.py`
+- `tests/unit/utils/test_video_file.py`
+
+**修改文件**
+- `src/vsa_agent/utils/url_translation.py`
+- `src/vsa_agent/tools/video_understanding.py`
+- `tests/unit/utils/test_url_translation.py`
+- `tests/unit/tools/test_video_understanding.py`
+- `docs/superpowers/vsa-agent-implementation-plan.md`
+
+**本轮不做**
+- 不做远程下载
+- 不做视频 metadata 探测
+- 不引入缓存目录管理
+- 不实现 file_mapping / VST 缓存注册
+
+---
+
+### Task 7.22: 补强 `url_translation.py` 的本地路径与 URI 语义
+
+**Files:**
+- Modify: `src/vsa_agent/utils/url_translation.py`
+- Modify: `tests/unit/utils/test_url_translation.py`
+
+- [ ] **Step 1: 写失败测试，锁定本地路径规范化与远程识别边界**
+
+```python
+from vsa_agent.utils.url_translation import is_remote_url
+from vsa_agent.utils.url_translation import normalize_local_path
+from vsa_agent.utils.url_translation import translate_url
+
+
+def test_normalize_local_path_preserves_windows_drive_style():
+    result = normalize_local_path("C:\\videos\\demo.mp4")
+    assert result == "C:/videos/demo.mp4"
+
+
+def test_is_remote_url_treats_rtsp_as_remote():
+    assert is_remote_url("rtsp://camera-1/stream") is True
+
+
+def test_translate_file_url_without_target_base_returns_local_path():
+    assert translate_url("file:///var/data/video.mp4") == "/var/data/video.mp4"
+
+
+def test_translate_windows_path_passthrough_is_normalized():
+    assert translate_url("C:\\videos\\demo.mp4") == "C:/videos/demo.mp4"
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_url_translation.py -v`
+Expected: FAIL because `normalize_local_path` does not exist yet and translation behavior is not fully locked
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/url_translation.py
+
+def normalize_local_path(path: str) -> str:
+    return path.replace("\\", "/")
+```
+
+```python
+def translate_url(url: str, target_base: str | None = None) -> str:
+    ...
+    if parsed.scheme in ("", "c", "d"):
+        return normalize_local_path(url)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_url_translation.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/url_translation.py tests/unit/utils/test_url_translation.py
+git commit -m "feat: strengthen url translation utilities"
+```
+
+### Task 7.23: 新增 `video_file.py` 共享本地视频文件工具
+
+**Files:**
+- Create: `src/vsa_agent/utils/video_file.py`
+- Create: `tests/unit/utils/test_video_file.py`
+
+- [ ] **Step 1: 写失败测试，锁定本地文件候选判断与校验行为**
+
+```python
+import pytest
+
+from vsa_agent.utils.video_file import ensure_local_video_path
+from vsa_agent.utils.video_file import is_local_video_candidate
+
+
+def test_is_local_video_candidate_accepts_windows_and_posix_paths():
+    assert is_local_video_candidate("C:/videos/demo.mp4") is True
+    assert is_local_video_candidate("/var/data/demo.mp4") is True
+
+
+def test_is_local_video_candidate_rejects_remote_urls():
+    assert is_local_video_candidate("https://example.com/video.mp4") is False
+    assert is_local_video_candidate("rtsp://camera-1/stream") is False
+
+
+def test_ensure_local_video_path_returns_normalized_local_path():
+    assert ensure_local_video_path("C:\\videos\\demo.mp4") == "C:/videos/demo.mp4"
+
+
+def test_ensure_local_video_path_rejects_remote_url():
+    with pytest.raises(ValueError, match="local video file"):
+        ensure_local_video_path("https://example.com/video.mp4")
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_video_file.py -v`
+Expected: FAIL because `video_file.py` does not exist yet
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/video_file.py
+from vsa_agent.utils.url_translation import is_remote_url
+from vsa_agent.utils.url_translation import normalize_local_path
+
+
+def is_local_video_candidate(path: str) -> bool:
+    return bool(path) and not is_remote_url(path)
+
+
+def ensure_local_video_path(path: str) -> str:
+    if not is_local_video_candidate(path):
+        raise ValueError(f"Expected a local video file path, got: {path}")
+    return normalize_local_path(path)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_video_file.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/video_file.py tests/unit/utils/test_video_file.py
+git commit -m "feat: add shared video file utilities"
+```
+
+### Task 7.24: 让 `video_understanding._prepare_video_path()` 接入共享文件源工具
+
+**Files:**
+- Modify: `src/vsa_agent/tools/video_understanding.py`
+- Modify: `tests/unit/tools/test_video_understanding.py`
+
+- [ ] **Step 1: 写失败测试，锁定共享工具接入后的行为**
+
+```python
+def test_prepare_video_path_normalizes_local_windows_path():
+    resolved = _prepare_video_path(
+        "C:\\videos\\demo.mp4",
+        VideoUnderstandingConfig(source_mode="local"),
+    )
+    assert resolved == "C:/videos/demo.mp4"
+
+
+def test_prepare_video_path_rejects_remote_translation_for_video_file(monkeypatch):
+    monkeypatch.setattr(
+        "vsa_agent.tools.video_understanding.translate_url",
+        lambda url, target_base=None: "https://example.com/video.mp4",
+    )
+    with pytest.raises(ValueError, match="local file"):
+        _prepare_video_path(
+            "https://example.com/video.mp4",
+            VideoUnderstandingConfig(source_mode="translated"),
+            source_type="video_file",
+        )
+```
+
+- [ ] **Step 2: 运行测试，确认红灯或行为缺口**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py -v`
+Expected: FAIL or behavior mismatch because `_prepare_video_path()` has not yet delegated to shared `video_file` helpers
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/video_understanding.py
+from vsa_agent.utils.video_file import ensure_local_video_path
+```
+
+```python
+def _prepare_video_path(...):
+    ...
+    if source_type == "rtsp" and translated.startswith(("rtsp://", "http://", "https://")):
+        return translated
+    return ensure_local_video_path(translated)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/video_understanding.py tests/unit/tools/test_video_understanding.py
+git commit -m "feat: route video understanding path handling through shared file utilities"
+```
+
+### Task 7.25: Phase 7A5 回归与文档状态更新
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 跑 Phase 7A5 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_url_translation.py tests/unit/utils/test_video_file.py tests/unit/tools/test_video_understanding.py -q`
+Expected: `PASS`
+
+- [ ] **Step 2: 更新本计划中的 Phase 7A5 状态**
+
+```markdown
+### 当前执行状态（2026-06-18）
+- [x] Task 7.22 已完成：URL 翻译工具语义已补强
+- [x] Task 7.23 已完成：共享 video_file 工具已补齐
+- [x] Task 7.24 已完成：video_understanding 已接入共享文件源工具
+- [x] Task 7.25 已完成：Phase 7A5 回归通过，待整理提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase7a5 execution status"
+```
+
+### 当前执行状态（2026-06-18）
+- [x] Task 7.22 已完成：URL 翻译工具语义已补强
+- [x] Task 7.23 已完成：共享 video_file 工具已补齐
+- [x] Task 7.24 已完成：video_understanding 已接入共享文件源工具
+- [x] Task 7.25 已完成：Phase 7A5 回归通过，待整理提交
 ```
 
 - [ ] **Step 3: Commit**
