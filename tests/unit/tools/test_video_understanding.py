@@ -1,5 +1,6 @@
 """Tests for tools/video_understanding.py."""
 import pytest
+from contextlib import asynccontextmanager
 
 from vsa_agent.config import AppConfig
 from vsa_agent.data_models.understanding import UnderstandingResult
@@ -477,6 +478,30 @@ class TestAnalyzeVideoSegment:
 
 
 class TestAnalyzeFramesRetry:
+    @pytest.mark.asyncio
+    async def test_uses_async_measure_time(self, monkeypatch):
+        called = {"value": False}
+
+        @asynccontextmanager
+        async def fake_async_measure_time(label, logger=None):
+            called["value"] = True
+            yield type("Result", (), {"label": label, "elapsed_sec": 0.0})()
+
+        class FakeAdapter:
+            async def invoke(self, messages):
+                return type("Response", (), {"content": "ok"})()
+
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding.async_measure_time",
+            fake_async_measure_time,
+            raising=False,
+        )
+
+        result = await _analyze_frames(["frame-a"], "describe", model_adapter=FakeAdapter())
+
+        assert result == "ok"
+        assert called["value"] is True
+
     @pytest.mark.asyncio
     async def test_retries_transient_model_failure(self):
         class FakeAdapter:

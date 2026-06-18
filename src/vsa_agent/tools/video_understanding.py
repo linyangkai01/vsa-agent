@@ -24,6 +24,7 @@ from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
 from vsa_agent.utils.frame_select import frames_for_timestamp_range
 from vsa_agent.utils.reasoning_parsing import parse_reasoning_content
+from vsa_agent.utils.time_measure import async_measure_time
 from vsa_agent.utils.time_convert import format_timestamp
 from vsa_agent.utils.time_convert import parse_iso8601_duration
 from vsa_agent.utils.url_translation import is_remote_url
@@ -344,7 +345,8 @@ async def _analyze_frames(
     last_error: Exception | None = None
     for attempt in range(1, tool_config.max_retries + 1):
         try:
-            response = await model_adapter.invoke(messages)
+            async with async_measure_time("video_understanding._analyze_frames", logger=logger):
+                response = await model_adapter.invoke(messages)
             result = str(response.content) if response.content is not None else ""
             logger.info("VLM response length: %d chars", len(result))
             return result

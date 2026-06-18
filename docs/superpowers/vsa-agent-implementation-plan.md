@@ -5343,6 +5343,231 @@ Expected: `PASS`
 - [x] Task 7.23 已完成：共享 video_file 工具已补齐
 - [x] Task 7.24 已完成：video_understanding 已接入共享文件源工具
 - [x] Task 7.25 已完成：Phase 7A5 回归通过，待整理提交
+
+---
+
+## Phase 7 — A6 轻量计时工具对齐 (P3)
+
+# Phase 7A6 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 补齐 `utils/time_measure.py` 轻量计时工具，并在 `video_understanding` 主链的一个真实调用点完成最小接入，在不改变外部接口的前提下获得可复用的耗时测量能力。
+
+**Architecture:** 本阶段继续沿用“共享工具先行、业务最小接入”的策略。`time_measure.py` 负责同步/异步上下文计时；业务侧只在 `_analyze_frames(...)` 这一条 VLM 分析主链接入，不扩散到更多模块。计时工具不吞异常，只负责记录 elapsed 并可选输出 logger，保持它是一层观察能力，而不是控制逻辑。
+
+**Tech Stack:** Python 3.12, stdlib `time`, `contextlib`, `dataclasses`, pytest
+
+---
+
+## 文件结构
+
+**新增文件**
+- `src/vsa_agent/utils/time_measure.py`
+- `tests/unit/utils/test_time_measure.py`
+
+**修改文件**
+- `src/vsa_agent/tools/video_understanding.py`
+- `tests/unit/tools/test_video_understanding.py`
+- `docs/superpowers/vsa-agent-implementation-plan.md`
+
+**本轮不做**
+- 不做 tracing/span
+- 不做 metrics 上报
+- 不做全链路大规模埋点
+- 不做跨模块统一观测框架
+
+---
+
+### Task 7.26: 新增 `utils/time_measure.py` 共享计时工具
+
+**Files:**
+- Create: `src/vsa_agent/utils/time_measure.py`
+- Create: `tests/unit/utils/test_time_measure.py`
+
+- [ ] **Step 1: 写失败测试，锁定同步/异步计时契约**
+
+```python
+import asyncio
+
+import pytest
+
+from vsa_agent.utils.time_measure import TimeMeasureResult
+from vsa_agent.utils.time_measure import async_measure_time
+from vsa_agent.utils.time_measure import measure_time
+
+
+def test_measure_time_returns_elapsed_result():
+    with measure_time("sync-block") as result:
+        pass
+    assert isinstance(result, TimeMeasureResult)
+    assert result.label == "sync-block"
+    assert result.elapsed_sec >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_async_measure_time_returns_elapsed_result():
+    async with async_measure_time("async-block") as result:
+        await asyncio.sleep(0)
+    assert isinstance(result, TimeMeasureResult)
+    assert result.label == "async-block"
+    assert result.elapsed_sec >= 0.0
+
+
+def test_measure_time_logs_when_logger_provided():
+    records = []
+
+    class DummyLogger:
+        def info(self, message, *args):
+            records.append(message % args)
+
+    with measure_time("logged-block", logger=DummyLogger()):
+        pass
+
+    assert any("logged-block" in line for line in records)
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_time_measure.py -v`
+Expected: FAIL because `time_measure.py` does not exist yet
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/utils/time_measure.py
+from contextlib import asynccontextmanager
+from contextlib import contextmanager
+from dataclasses import dataclass
+import time
+
+
+@dataclass
+class TimeMeasureResult:
+    label: str
+    elapsed_sec: float = 0.0
+```
+
+```python
+@contextmanager
+def measure_time(label: str, logger=None):
+    ...
+
+
+@asynccontextmanager
+async def async_measure_time(label: str, logger=None):
+    ...
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_time_measure.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/utils/time_measure.py tests/unit/utils/test_time_measure.py
+git commit -m "feat: add shared time measurement utilities"
+```
+
+### Task 7.27: 在 `video_understanding._analyze_frames()` 接入共享计时工具
+
+**Files:**
+- Modify: `src/vsa_agent/tools/video_understanding.py`
+- Modify: `tests/unit/tools/test_video_understanding.py`
+
+- [ ] **Step 1: 写失败测试，锁定计时工具接入且外部行为不变**
+
+```python
+@pytest.mark.asyncio
+async def test_analyze_frames_uses_async_measure_time(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from vsa_agent.tools.video_understanding import _analyze_frames
+
+    called = {"value": False}
+
+    @asynccontextmanager
+    async def fake_async_measure_time(label, logger=None):
+        called["value"] = True
+        yield type("Result", (), {"label": label, "elapsed_sec": 0.0})()
+
+    class FakeAdapter:
+        async def invoke(self, messages):
+            return type("Response", (), {"content": "ok"})()
+
+    monkeypatch.setattr(
+        "vsa_agent.tools.video_understanding.async_measure_time",
+        fake_async_measure_time,
+    )
+
+    result = await _analyze_frames(["frame-a"], "describe", model_adapter=FakeAdapter())
+    assert result == "ok"
+    assert called["value"] is True
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py -v`
+Expected: FAIL because `_analyze_frames()` has not yet entered `async_measure_time`
+
+- [ ] **Step 3: 写最小实现**
+
+```python
+# src/vsa_agent/tools/video_understanding.py
+from vsa_agent.utils.time_measure import async_measure_time
+```
+
+```python
+async def _analyze_frames(...):
+    ...
+    async with async_measure_time("video_understanding._analyze_frames", logger=logger):
+        response = await model_adapter.invoke(messages)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/tools/test_video_understanding.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/video_understanding.py tests/unit/tools/test_video_understanding.py
+git commit -m "feat: add timing measurement to video understanding"
+```
+
+### Task 7.28: Phase 7A6 回归与文档状态更新
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 跑 Phase 7A6 相关回归**
+
+Run: `C:\working\orther\anaconda3\envs\vsa-agent\python.exe -m pytest tests/unit/utils/test_time_measure.py tests/unit/tools/test_video_understanding.py -q`
+Expected: `PASS`
+
+- [ ] **Step 2: 更新本计划中的 Phase 7A6 状态**
+
+```markdown
+### 当前执行状态（2026-06-18）
+- [x] Task 7.26 已完成：共享 time_measure 工具已补齐
+- [x] Task 7.27 已完成：video_understanding 已接入轻量计时工具
+- [x] Task 7.28 已完成：Phase 7A6 回归通过，待整理提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase7a6 execution status"
+```
+
+### 当前执行状态（2026-06-18）
+- [x] Task 7.26 已完成：共享 time_measure 工具已补齐
+- [x] Task 7.27 已完成：video_understanding 已接入轻量计时工具
+- [x] Task 7.28 已完成：Phase 7A6 回归通过，待整理提交
 ```
 
 - [ ] **Step 3: Commit**
