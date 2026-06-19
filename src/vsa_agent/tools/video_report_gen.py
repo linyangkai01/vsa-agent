@@ -55,6 +55,14 @@ def _format_timeline(
     return "\n".join(non_empty_lines)
 
 
+def _format_validation_feedback(section: ReportSection) -> str:
+    if not section.validation_feedback:
+        return ""
+    lines = ["## 校验反馈"]
+    lines.extend(f"- {item}" for item in section.validation_feedback)
+    return "\n".join(lines)
+
+
 def _coerce_report_section(
     *,
     report_section: ReportSection | None = None,
@@ -122,6 +130,7 @@ async def generate_video_report(
     )
     summary_text = section.summary_text
     timeline_text = _format_timeline(section.understanding_result)
+    validation_feedback_text = _format_validation_feedback(section)
     markdown_content = (
         "# 单视频分析报告\n"
         "## 视频源\n"
@@ -133,6 +142,8 @@ async def generate_video_report(
         "## 事件时间线\n"
         f"{timeline_text}\n"
     )
+    if validation_feedback_text:
+        markdown_content = f"{markdown_content}\n\n{validation_feedback_text}\n"
     return VideoReportGenOutput(
         markdown_content=markdown_content,
         downloads={

@@ -147,3 +147,36 @@ async def test_generate_video_report_accepts_structured_report():
 
     assert isinstance(result, VideoReportGenOutput)
     assert "forklift stops near doorway" in result.markdown_content
+
+
+@pytest.mark.anyio
+async def test_generate_video_report_renders_validation_feedback_section():
+    structured_report = StructuredReport(
+        report_title="report-title",
+        report_type="single_video",
+        user_query="生成详细报告",
+        sections=[
+            ReportSection(
+                section_id="section-1",
+                section_title="事件 - camera-1",
+                source_name="camera-1",
+                source_type="rtsp",
+                user_query="生成详细报告",
+                summary_text="",
+                understanding_result=UnderstandingResult(
+                    query="生成详细报告",
+                    source_type="rtsp",
+                    summary_text="",
+                    chunks=[],
+                    events=[],
+                ),
+                validation_feedback=["[non_empty_response_validator] FAILED: Response is empty"],
+            )
+        ],
+        global_validation_feedback=["[non_empty_response_validator] FAILED: Response is empty"],
+    )
+
+    result = await generate_video_report(structured_report=structured_report)
+
+    assert "## 校验反馈" in result.markdown_content
+    assert "- [non_empty_response_validator] FAILED: Response is empty" in result.markdown_content
