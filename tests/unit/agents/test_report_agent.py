@@ -4,6 +4,8 @@ import pytest
 
 from vsa_agent.agents.data_models import AgentOutput
 
+VALIDATION_FEEDBACK = "[non_empty_response_validator] FAILED: Response is empty"
+
 
 class TestReportAgentInput:
     def test_defaults(self):
@@ -227,6 +229,7 @@ async def test_execute_report_agent_accepts_lax_event_dicts():
 @pytest.mark.anyio
 async def test_execute_report_agent_keeps_success_status_and_exposes_validation_feedback():
     from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult
+    from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
     from vsa_agent.agents.report_agent import ReportAgentInput
     from vsa_agent.agents.report_agent import execute_report_agent
     from vsa_agent.data_models.report import StructuredReport
@@ -240,20 +243,13 @@ async def test_execute_report_agent_keeps_success_status_and_exposes_validation_
             "events": [],
         }
 
-    class FakePipeline:
-        async def process_report(self, report):
-            report.sections[0].validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
-            report.global_validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
-            return PostprocessingResult(
-                passed=False,
-                feedback="[non_empty_response_validator] FAILED: Response is empty",
-            )
+    class FailingValidationPipeline(ValidationPipeline):
+        async def process(self, output: str) -> PostprocessingResult:
+            return PostprocessingResult(passed=False, feedback=VALIDATION_FEEDBACK)
 
     async def fake_video_report_gen(**kwargs):
         assert isinstance(kwargs["structured_report"], StructuredReport)
-        assert kwargs["structured_report"].global_validation_feedback == [
-            "[non_empty_response_validator] FAILED: Response is empty"
-        ]
+        assert kwargs["structured_report"].global_validation_feedback == [VALIDATION_FEEDBACK]
         return {
             "markdown_content": "# 单视频分析报告\n\n## 校验反馈\n- [non_empty_response_validator] FAILED: Response is empty",
             "downloads": {"markdown": {"filename": "report.md"}},
@@ -264,11 +260,9 @@ async def test_execute_report_agent_keeps_success_status_and_exposes_validation_
         ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
         video_understanding_fn=fake_video_understanding,
         video_report_gen_fn=fake_video_report_gen,
-        validation_pipeline=FakePipeline(),
+        validation_pipeline=FailingValidationPipeline(),
     )
 
     assert result.status == "success"
     assert result.metadata["validation_passed"] is False
-    assert result.metadata["validation_feedback"] == [
-        "[non_empty_response_validator] FAILED: Response is empty"
-    ]
+    assert result.metadata["validation_feedback"] == [VALIDATION_FEEDBACK]
