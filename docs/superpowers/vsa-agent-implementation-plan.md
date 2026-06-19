@@ -4345,6 +4345,553 @@ Expected: `PASS`
 - [x] Task 7.10 已完成：视频工具层已接回共享时间/选帧工具
 - [x] Task 7.11 已完成：Phase 7A2 回归通过，待整理提交
 
+## Phase 8 — 业务能力闭环（总目标）
+
+**目标**：正式结束“基础设施对齐优先”的推进方式，回到业务主线，围绕现有 `search / critic / understanding / incidents / report / API` 能力，构建可交付、可验收、可审查的核心业务闭环。
+
+**阶段判断**：
+
+- Phase 7 已完成高价值基础设施对齐
+- 当前继续补工具层的边际收益已明显下降
+- Phase 8 的重点不再是“补模块”，而是“把现有模块拉成稳定业务链”
+
+### Phase 8 核心推进方案
+
+本阶段采用“业务编排优先”方案。
+
+含义是：
+
+- 先定义用户请求如何穿过现有模块，最终产出回答、报告或接口响应
+- 再按主链补齐断点、统一错误语义、补验收测试
+- 不优先推进真实 ES / 更真实 VST 深接入
+
+### Phase 8 三条核心业务闭环
+
+1. 检索问答闭环  
+   `query -> search_agent -> critic_agent(可选) -> incidents / summarize -> 最终结构化回答`
+
+2. 单视频分析报告闭环  
+   `video_path / sensor_id -> video_understanding -> structured_report -> postprocessing -> markdown 报告`
+
+3. 多源汇总报告闭环  
+   `sources[] -> multi_report_agent -> understanding 聚合 -> structured_report -> 汇总报告`
+
+在线 RTSP / VST 入口保留为支撑链，不作为本阶段第一优先级主线。
+
+### Phase 8 实施顺序
+
+#### P1：单视频分析报告闭环
+
+这是 Phase 8 第一优先级子项目，也是当前最适合先收口的一条业务链。
+
+目标：
+
+- 固定主链为  
+  `video_understanding -> structured_report -> postprocessing -> markdown`
+- 让 `StructuredReport` 成为内部主契约
+- 让 `postprocessing` 正式进入报告主链
+- 用单元测试与验收测试锁定成功流、兼容流、校验失败流、理解失败流
+
+#### P1：检索问答闭环
+
+目标：
+
+- 收敛 `search_agent`、`tools/search.py`、`critic_agent`、`incidents.py`、`vss_summarize.py`
+- 明确检索结果、critic 验证、事件标准化、最终摘要之间的协作顺序
+- 用验收测试锁定“可选 critic”与“当前 mock search 边界”
+
+#### P2：多源汇总报告闭环
+
+目标：
+
+- 收敛 `multi_report_agent` 与多 source 的理解结果聚合
+- 统一走结构化报告与渲染链
+- 明确空 source、部分 source 失败、顺序稳定性等语义
+
+#### P2：API 业务映射层验收
+
+目标：
+
+- 检查 `api/routes.py` 及相关 API 是否正确映射到内部业务主链
+- 统一错误语义
+- 避免 API 层与 agent 主链出现分叉行为
+
+#### P3：阶段收口与可审查输出
+
+输出：
+
+- 唯一总计划文档中的阶段状态更新
+- Phase 8 业务链说明
+- 验收测试清单
+- 当前已知边界说明（真实 ES、真实 VST 历史片段、生产级观测等）
+
+### 当前 Phase 8 子项目选择
+
+已确认优先进入：
+
+1. 子项目：单视频分析报告闭环
+2. 范围：内部主链闭环
+3. 方案：结构化报告主链化
+
+# Phase 8A1 单视频分析报告闭环实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 将单视频分析报告链稳定收敛为“理解结果 -> 结构化报告 -> 后处理校验 -> Markdown 交付”的可验收业务闭环。
+
+**Architecture:** 本轮不改对外工具名和主要返回结构，只收口内部编排。`report_agent.py` 负责驱动主链，`report_structuring.py` 负责报告域装配，`ValidationPipeline` 负责摘要校验与反馈回写，`video_report_gen.py` 只消费 `StructuredReport` 并渲染最终 Markdown。
+
+**Tech Stack:** Python 3.12, Pydantic, pytest, anyio, 现有 `vsa_agent` agents/tools/data_models/postprocessing 组件。
+
+---
+
+### Task 8.1: 先补红灯，锁定单视频报告闭环的验收与编排语义
+
+**Files:**
+- Modify: `tests/acceptance/test_report_flow.py`
+- Modify: `tests/unit/agents/test_report_agent.py`
+
+- [ ] **Step 1: 写失败中的验收测试，覆盖“后处理失败仍可交付”和“理解失败直接中断”**
+
+```python
+# tests/acceptance/test_report_flow.py
+@pytest.mark.anyio
+async def test_single_video_report_flow_keeps_markdown_when_postprocessing_fails():
+    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.tools.video_report_gen import generate_video_report
+
+    class FakePipeline:
+        async def process_report(self, report):
+            report.sections[0].validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
+            report.global_validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
+            return PostprocessingResult(
+                passed=False,
+                feedback="[non_empty_response_validator] FAILED: Response is empty",
+            )
+
+    async def fake_video_understanding_fn(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": "",
+            "chunks": [],
+            "events": [],
+        }
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+        video_understanding_fn=fake_video_understanding_fn,
+        video_report_gen_fn=generate_video_report,
+        validation_pipeline=FakePipeline(),
+    )
+
+    assert result.status == "success"
+    assert result.metadata["validation_passed"] is False
+    assert result.metadata["validation_feedback"] == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
+    assert "## 校验反馈" in result.side_effects["markdown_content"]
+
+
+@pytest.mark.anyio
+async def test_single_video_report_flow_raises_when_understanding_fails():
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.tools.video_report_gen import generate_video_report
+
+    async def broken_video_understanding(**kwargs):
+        raise RuntimeError("vlm call failed")
+
+    with pytest.raises(RuntimeError, match="vlm call failed"):
+        await execute_report_agent(
+            ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+            video_understanding_fn=broken_video_understanding,
+            video_report_gen_fn=generate_video_report,
+        )
+```
+
+- [ ] **Step 2: 写失败中的单元测试，锁定 `report_agent` 会带出校验反馈元数据**
+
+```python
+# tests/unit/agents/test_report_agent.py
+@pytest.mark.anyio
+async def test_execute_report_agent_keeps_success_status_and_exposes_validation_feedback():
+    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.data_models.report import StructuredReport
+
+    async def fake_video_understanding(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": "",
+            "chunks": [],
+            "events": [],
+        }
+
+    class FakePipeline:
+        async def process_report(self, report):
+            report.sections[0].validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
+            report.global_validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
+            return PostprocessingResult(
+                passed=False,
+                feedback="[non_empty_response_validator] FAILED: Response is empty",
+            )
+
+    async def fake_video_report_gen(**kwargs):
+        assert isinstance(kwargs["structured_report"], StructuredReport)
+        assert kwargs["structured_report"].global_validation_feedback == [
+            "[non_empty_response_validator] FAILED: Response is empty"
+        ]
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 校验反馈\n- [non_empty_response_validator] FAILED: Response is empty",
+            "downloads": {"markdown": {"filename": "report.md"}},
+            "summary": "",
+        }
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+        video_understanding_fn=fake_video_understanding,
+        video_report_gen_fn=fake_video_report_gen,
+        validation_pipeline=FakePipeline(),
+    )
+
+    assert result.status == "success"
+    assert result.metadata["validation_passed"] is False
+    assert result.metadata["validation_feedback"] == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
+```
+
+- [ ] **Step 3: 运行测试，确认当前还是红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/acceptance/test_report_flow.py tests/unit/agents/test_report_agent.py -q`
+Expected: `FAIL` because `execute_report_agent()` 还没有接入 `validation_pipeline`，也不会带出 `validation_feedback`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/acceptance/test_report_flow.py tests/unit/agents/test_report_agent.py
+git commit -m "test: lock single video report closure semantics"
+```
+
+### Task 8.2: 让 `ValidationPipeline.process_report()` 正式回写结构化报告反馈
+
+**Files:**
+- Modify: `tests/unit/agents/postprocessing/test_pipeline.py`
+- Modify: `src/vsa_agent/agents/postprocessing/pipeline.py`
+
+- [ ] **Step 1: 写失败中的 pipeline 测试，锁定 section/global feedback 回写**
+
+```python
+# tests/unit/agents/postprocessing/test_pipeline.py
+@pytest.mark.anyio
+async def test_process_report_writes_feedback_back_to_structured_report():
+    from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
+    from vsa_agent.data_models.report import ReportSection
+    from vsa_agent.data_models.report import StructuredReport
+
+    report = StructuredReport(
+        report_title="report-title",
+        report_type="single_video",
+        user_query="生成详细报告",
+        sections=[
+            ReportSection(
+                section_id="section-1",
+                section_title="事件 - camera-1",
+                source_name="camera-1",
+                source_type="rtsp",
+                user_query="生成详细报告",
+                summary_text="",
+                understanding_result={
+                    "query": "生成详细报告",
+                    "source_type": "rtsp",
+                    "summary_text": "",
+                    "chunks": [],
+                    "events": [],
+                },
+            )
+        ],
+    )
+
+    pipeline = ValidationPipeline([NonEmptyValidator()])
+    result = await pipeline.process_report(report)
+
+    assert result.passed is False
+    assert report.sections[0].validation_feedback == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
+    assert report.global_validation_feedback == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/postprocessing/test_pipeline.py -q`
+Expected: `FAIL` because `process_report()` 当前只返回 `PostprocessingResult`，不会回写 `validation_feedback`
+
+- [ ] **Step 3: 写最小实现，让 pipeline 在失败时回写 feedback**
+
+```python
+# src/vsa_agent/agents/postprocessing/pipeline.py
+    async def process_report(self, report) -> PostprocessingResult:
+        """Run validators against each report section summary and write feedback back."""
+        for section in getattr(report, "sections", []):
+            result = await self.process(section.summary_text)
+            if not result.passed:
+                feedback = result.feedback
+                if hasattr(section, "validation_feedback"):
+                    section.validation_feedback.append(feedback)
+                if hasattr(report, "global_validation_feedback"):
+                    report.global_validation_feedback.append(feedback)
+                return result
+        return PostprocessingResult(passed=True)
+```
+
+- [ ] **Step 4: 运行测试并确认通过**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/postprocessing/test_pipeline.py -q`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/postprocessing/pipeline.py tests/unit/agents/postprocessing/test_pipeline.py
+git commit -m "feat: write report validation feedback back to structured report"
+```
+
+### Task 8.3: 让 `report_agent.py` 正式编排“结构化报告 -> 后处理 -> 渲染”
+
+**Files:**
+- Modify: `src/vsa_agent/agents/report_agent.py`
+- Modify: `tests/unit/agents/test_report_agent.py`
+
+- [ ] **Step 1: 运行当前 `report_agent` 测试，确认新的闭环断言仍未满足**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_report_agent.py -q`
+Expected: `FAIL` because `execute_report_agent()` 还没有接入 `ValidationPipeline`
+
+- [ ] **Step 2: 写最小实现，给 `execute_report_agent()` 增加可注入 pipeline，并补充 metadata**
+
+```python
+# src/vsa_agent/agents/report_agent.py
+from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
+from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
+```
+
+```python
+async def execute_report_agent(
+    report_input: ReportAgentInput,
+    video_understanding_fn: VideoUnderstandingCallable | None = None,
+    video_report_gen_fn: VideoReportCallable | None = None,
+    validation_pipeline: ValidationPipeline | None = None,
+) -> AgentOutput:
+    ...
+    structured_report = build_single_section_report(
+        source_name=report_input.sensor_id or report_input.video_path or "uploaded-video",
+        source_type=source_type,
+        user_query=report_input.query,
+        understanding_result=understanding_result,
+    )
+
+    pipeline = validation_pipeline or ValidationPipeline([NonEmptyValidator()])
+    validation_result = await pipeline.process_report(structured_report)
+
+    report_result = await video_report_gen(
+        sensor_id=report_input.sensor_id or "uploaded-video",
+        user_query=report_input.query,
+        structured_report=structured_report,
+    )
+    markdown_content, downloads, summary = _normalize_report_result(report_result)
+
+    return AgentOutput(
+        messages=[summary] if summary else [],
+        side_effects={
+            "markdown_content": markdown_content,
+            "downloads": downloads,
+        },
+        metadata={
+            "report_type": "single_video",
+            "source_type": source_type,
+            "validation_passed": validation_result.passed,
+            "validation_feedback": list(structured_report.global_validation_feedback),
+        },
+        status="success",
+    )
+```
+
+- [ ] **Step 3: 运行测试并确认通过**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_report_agent.py -q`
+Expected: `PASS`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/vsa_agent/agents/report_agent.py tests/unit/agents/test_report_agent.py
+git commit -m "feat: route report agent through postprocessing pipeline"
+```
+
+### Task 8.4: 收口 `video_report_gen.py` 的结构化报告主路径消费契约
+
+**Files:**
+- Modify: `tests/unit/tools/test_video_report_gen.py`
+- Modify: `src/vsa_agent/tools/video_report_gen.py`
+
+- [ ] **Step 1: 写失败中的渲染测试，锁定“有 feedback 时渲染校验反馈区块”**
+
+```python
+# tests/unit/tools/test_video_report_gen.py
+@pytest.mark.anyio
+async def test_generate_video_report_renders_validation_feedback_section():
+    from vsa_agent.data_models.report import ReportSection
+    from vsa_agent.data_models.report import StructuredReport
+    from vsa_agent.data_models.understanding import UnderstandingResult
+
+    structured_report = StructuredReport(
+        report_title="report-title",
+        report_type="single_video",
+        user_query="生成详细报告",
+        sections=[
+            ReportSection(
+                section_id="section-1",
+                section_title="事件 - camera-1",
+                source_name="camera-1",
+                source_type="rtsp",
+                user_query="生成详细报告",
+                summary_text="",
+                understanding_result=UnderstandingResult(
+                    query="生成详细报告",
+                    source_type="rtsp",
+                    summary_text="",
+                    chunks=[],
+                    events=[],
+                ),
+                validation_feedback=["[non_empty_response_validator] FAILED: Response is empty"],
+            )
+        ],
+        global_validation_feedback=["[non_empty_response_validator] FAILED: Response is empty"],
+    )
+
+    result = await generate_video_report(structured_report=structured_report)
+
+    assert "## 校验反馈" in result.markdown_content
+    assert "- [non_empty_response_validator] FAILED: Response is empty" in result.markdown_content
+```
+
+- [ ] **Step 2: 运行测试，确认红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/tools/test_video_report_gen.py -q`
+Expected: `FAIL` because `generate_video_report()` 当前还不会渲染 `validation_feedback`
+
+- [ ] **Step 3: 写最小实现，让 Markdown 输出显式带上校验反馈**
+
+```python
+# src/vsa_agent/tools/video_report_gen.py
+def _format_validation_feedback(section: ReportSection) -> str:
+    if not section.validation_feedback:
+        return ""
+    lines = ["## 校验反馈"]
+    lines.extend(f"- {item}" for item in section.validation_feedback)
+    return "\n".join(lines)
+```
+
+```python
+async def generate_video_report(...):
+    ...
+    validation_feedback_text = _format_validation_feedback(section)
+    markdown_content = (
+        "# 单视频分析报告\n"
+        "## 视频源\n"
+        f"- sensor_id: {section.source_name}\n\n"
+        "## 用户问题\n"
+        f"{section.user_query}\n\n"
+        "## 摘要\n"
+        f"{summary_text}\n\n"
+        "## 事件时间线\n"
+        f"{timeline_text}\n"
+    )
+    if validation_feedback_text:
+        markdown_content = f"{markdown_content}\n\n{validation_feedback_text}\n"
+```
+
+- [ ] **Step 4: 运行测试并确认通过**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/tools/test_video_report_gen.py -q`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/video_report_gen.py tests/unit/tools/test_video_report_gen.py
+git commit -m "feat: render report validation feedback in markdown output"
+```
+
+### Task 8.5: 补齐 `report_structuring.py` 的兼容回归并跑通闭环验收
+
+**Files:**
+- Modify: `tests/unit/tools/test_report_structuring.py`
+- Modify: `tests/acceptance/test_report_flow.py`
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 写兼容测试，锁定宽松事件 dict 仍会被转换成 `StructuredReport` incidents**
+
+```python
+# tests/unit/tools/test_report_structuring.py
+def test_build_single_section_report_accepts_lax_event_dicts():
+    from vsa_agent.tools.report_structuring import build_single_section_report
+
+    report = build_single_section_report(
+        source_name="video.mp4",
+        source_type="video_file",
+        user_query="生成报告",
+        understanding_result={
+            "query": "生成报告",
+            "source_type": "video_file",
+            "summary_text": "person walking near forklift",
+            "chunks": [],
+            "events": [
+                {
+                    "start_timestamp": "00:00:05",
+                    "end_timestamp": "00:00:09",
+                    "description": "person walking near forklift",
+                }
+            ],
+        },
+    )
+
+    assert report.sections[0].incidents[0].description == "person walking near forklift"
+    assert report.sections[0].incidents[0].start_timestamp == "00:00:05"
+    assert report.sections[0].incidents[0].end_timestamp == "00:00:09"
+```
+
+- [ ] **Step 2: 跑 Phase 8A1 相关回归**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_report_agent.py tests/unit/agents/postprocessing/test_pipeline.py tests/unit/tools/test_report_structuring.py tests/unit/tools/test_video_report_gen.py tests/acceptance/test_report_flow.py -q`
+Expected: `PASS`
+
+- [ ] **Step 3: 更新本计划中的 Phase 8A1 状态**
+
+```markdown
+### 当前执行状态（2026-06-19）
+- [x] Task 8.1 已完成：单视频报告闭环的验收与编排语义已锁定
+- [x] Task 8.2 已完成：ValidationPipeline 已能回写结构化报告反馈
+- [x] Task 8.3 已完成：report_agent 已接入后处理主链
+- [x] Task 8.4 已完成：video_report_gen 已显式渲染校验反馈
+- [x] Task 8.5 已完成：Phase 8A1 回归通过，待整理提交
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/unit/tools/test_report_structuring.py tests/acceptance/test_report_flow.py docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase8a1 execution status"
+```
+
 ---
 
 ## Phase 7 — A3 重试基础设施与 Model Adapter 对齐 (P1)

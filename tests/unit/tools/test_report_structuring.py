@@ -67,3 +67,30 @@ def test_build_single_section_report_sets_location_summary():
     )
 
     assert "unknown" in report.sections[0].location_summary
+
+def test_build_single_section_report_accepts_lax_event_dicts():
+    from vsa_agent.tools.report_structuring import build_single_section_report
+
+    report = build_single_section_report(
+        source_name="video.mp4",
+        source_type="video_file",
+        user_query="????",
+        understanding_result={
+            "query": "????",
+            "source_type": "video_file",
+            "summary_text": "person walking near forklift",
+            "chunks": [],
+            "events": [
+                {
+                    "start_timestamp": "00:00:05",
+                    "end_timestamp": "00:00:09",
+                    "description": "person walking near forklift",
+                }
+            ],
+        },
+    )
+
+    assert report.sections[0].incidents[0].description == "person walking near forklift"
+    assert report.sections[0].incidents[0].start_timestamp == "00:00:05"
+    assert report.sections[0].incidents[0].end_timestamp == "00:00:09"
+
