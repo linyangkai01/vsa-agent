@@ -65,3 +65,44 @@ class TestValidationPipeline:
         pipeline = ValidationPipeline([])
         result = await pipeline.process("any content")
         assert result.passed is True
+
+
+@pytest.mark.anyio
+async def test_process_report_writes_feedback_back_to_structured_report():
+    from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
+    from vsa_agent.data_models.report import ReportSection
+    from vsa_agent.data_models.report import StructuredReport
+
+    report = StructuredReport(
+        report_title="report-title",
+        report_type="single_video",
+        user_query="生成详细报告",
+        sections=[
+            ReportSection(
+                section_id="section-1",
+                section_title="事件 - camera-1",
+                source_name="camera-1",
+                source_type="rtsp",
+                user_query="生成详细报告",
+                summary_text="",
+                understanding_result={
+                    "query": "生成详细报告",
+                    "source_type": "rtsp",
+                    "summary_text": "",
+                    "chunks": [],
+                    "events": [],
+                },
+            )
+        ],
+    )
+
+    pipeline = ValidationPipeline([NonEmptyValidator()])
+    result = await pipeline.process_report(report)
+
+    assert result.passed is False
+    assert report.sections[0].validation_feedback == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
+    assert report.global_validation_feedback == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
