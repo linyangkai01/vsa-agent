@@ -216,9 +216,59 @@ async def test_execute_report_agent_accepts_lax_event_dicts():
         }
 
     result = await execute_report_agent(
-        ReportAgentInput(video_path="video.mp4", query="鐢熸垚璇︾粏鎶ュ憡"),
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
         video_understanding_fn=fake_video_understanding,
         video_report_gen_fn=fake_video_report_gen,
     )
 
     assert result.status == "success"
+
+
+@pytest.mark.anyio
+async def test_execute_report_agent_keeps_success_status_and_exposes_validation_feedback():
+    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult
+    from vsa_agent.agents.report_agent import ReportAgentInput
+    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.data_models.report import StructuredReport
+
+    async def fake_video_understanding(**kwargs):
+        return {
+            "query": kwargs["query"],
+            "source_type": kwargs["source_type"],
+            "summary_text": "",
+            "chunks": [],
+            "events": [],
+        }
+
+    class FakePipeline:
+        async def process_report(self, report):
+            report.sections[0].validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
+            report.global_validation_feedback.append("[non_empty_response_validator] FAILED: Response is empty")
+            return PostprocessingResult(
+                passed=False,
+                feedback="[non_empty_response_validator] FAILED: Response is empty",
+            )
+
+    async def fake_video_report_gen(**kwargs):
+        assert isinstance(kwargs["structured_report"], StructuredReport)
+        assert kwargs["structured_report"].global_validation_feedback == [
+            "[non_empty_response_validator] FAILED: Response is empty"
+        ]
+        return {
+            "markdown_content": "# 单视频分析报告\n\n## 校验反馈\n- [non_empty_response_validator] FAILED: Response is empty",
+            "downloads": {"markdown": {"filename": "report.md"}},
+            "summary": "",
+        }
+
+    result = await execute_report_agent(
+        ReportAgentInput(video_path="video.mp4", query="生成详细报告"),
+        video_understanding_fn=fake_video_understanding,
+        video_report_gen_fn=fake_video_report_gen,
+        validation_pipeline=FakePipeline(),
+    )
+
+    assert result.status == "success"
+    assert result.metadata["validation_passed"] is False
+    assert result.metadata["validation_feedback"] == [
+        "[non_empty_response_validator] FAILED: Response is empty"
+    ]
