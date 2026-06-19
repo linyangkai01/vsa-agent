@@ -55,17 +55,6 @@ def _format_timeline(
     return "\n".join(non_empty_lines)
 
 
-def _format_validation_feedback(structured_report: StructuredReport | None, section: ReportSection) -> str:
-    feedback_items = [*section.validation_feedback]
-    if structured_report is not None:
-        feedback_items.extend(structured_report.global_validation_feedback)
-
-    deduped_feedback = list(dict.fromkeys(item for item in feedback_items if item))
-    if not deduped_feedback:
-        return ""
-    return "## 校验反馈\n" + "\n".join(f"- {item}" for item in deduped_feedback) + "\n\n"
-
-
 def _coerce_report_section(
     *,
     report_section: ReportSection | None = None,
@@ -106,7 +95,9 @@ def _coerce_report_section(
         source_type=parsed_understanding.source_type,
         user_query=user_query,
         summary_text=parsed_understanding.summary_text,
-        understanding_result=raw_understanding,
+        understanding_result=(
+            raw_understanding if isinstance(raw_understanding, UnderstandingResult) else raw_understanding
+        ),
     )
 
 
@@ -131,7 +122,6 @@ async def generate_video_report(
     )
     summary_text = section.summary_text
     timeline_text = _format_timeline(section.understanding_result)
-    validation_feedback_text = _format_validation_feedback(structured_report, section)
     markdown_content = (
         "# 单视频分析报告\n"
         "## 视频源\n"
@@ -140,7 +130,6 @@ async def generate_video_report(
         f"{section.user_query}\n\n"
         "## 摘要\n"
         f"{summary_text}\n\n"
-        f"{validation_feedback_text}"
         "## 事件时间线\n"
         f"{timeline_text}\n"
     )
