@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from vsa_agent.agents.data_models import AgentOutput
+from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
+from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.report_structuring import build_single_section_report
 from vsa_agent.tools.report_structuring import normalize_understanding_result
@@ -58,6 +60,7 @@ async def execute_report_agent(
     report_input: ReportAgentInput,
     video_understanding_fn: VideoUnderstandingCallable | None = None,
     video_report_gen_fn: VideoReportCallable | None = None,
+    validation_pipeline: ValidationPipeline | None = None,
 ) -> AgentOutput:
     """Execute the single-video report generation flow."""
     if not report_input.video_path and not report_input.sensor_id:
@@ -86,6 +89,9 @@ async def execute_report_agent(
         understanding_result=understanding_result,
     )
 
+    pipeline = validation_pipeline or ValidationPipeline([NonEmptyValidator()])
+    validation_result = await pipeline.process_report(structured_report)
+
     report_result = await video_report_gen(
         sensor_id=report_input.sensor_id or "uploaded-video",
         user_query=report_input.query,
@@ -102,6 +108,8 @@ async def execute_report_agent(
         metadata={
             "report_type": "single_video",
             "source_type": source_type,
+            "validation_passed": validation_result.passed,
+            "validation_feedback": list(structured_report.global_validation_feedback),
         },
         status="success",
     )
