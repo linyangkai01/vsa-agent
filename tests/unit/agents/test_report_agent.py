@@ -55,6 +55,8 @@ async def test_execute_report_agent_for_uploaded_video_path():
     assert result.side_effects["markdown_content"].startswith("# 单视频分析报告")
     assert result.side_effects["downloads"]["markdown"]["filename"] == "report.md"
     assert result.metadata["report_type"] == "single_video"
+    assert result.metadata["validation_passed"] is True
+    assert result.metadata["validation_feedback"] == []
     assert understanding_calls[0]["video_path"] == "video.mp4"
     assert understanding_calls[0]["source_type"] == "video_file"
     assert report_calls[0]["sensor_id"] == "uploaded-video"
