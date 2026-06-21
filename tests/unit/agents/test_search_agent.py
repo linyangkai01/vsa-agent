@@ -1,5 +1,7 @@
 """Tests for agents/search_agent.py."""
 
+import inspect
+
 import pytest
 
 from vsa_agent.agents.search_agent import SearchAgentConfig
@@ -157,6 +159,19 @@ async def test_execute_search_keeps_returning_search_output():
 
     assert isinstance(result, SearchOutput)
     assert result.data[0].description == "forklift enters aisle"
+
+
+def test_execute_search_public_signature_stays_stable():
+    from vsa_agent.agents.search_agent import execute_search
+
+    signature = inspect.signature(execute_search)
+
+    assert list(signature.parameters) == [
+        "search_input",
+        "model_adapter",
+        "embed_search",
+        "attribute_search",
+    ]
 
 
 @pytest.mark.asyncio
@@ -383,4 +398,80 @@ async def test_execute_search_agent_flow_records_critic_error_and_continues(monk
         "critic_requested": True,
         "critic_applied": False,
         "critic_error": "critic unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_search_agent_flow_does_not_apply_critic_on_default_config(monkeypatch):
+    from vsa_agent.agents.search_agent import execute_search_agent_flow
+    from vsa_agent.tools.search import DecomposedQuery
+
+    critic_called = False
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-61.mp4",
+                    description="worker opens gate",
+                    start_time="2026-06-19T17:00:00",
+                    end_time="2026-06-19T17:00:05",
+                    sensor_id="cam-61",
+                    screenshot_url="",
+                    similarity=0.88,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    async def fake_attribute_search():
+        return SearchOutput(data=[])
+
+    async def fake_critic_agent(**kwargs):
+        nonlocal critic_called
+        critic_called = True
+        return {"ok": True}
+
+    async def fake_decompose_query(query, model_adapter):
+        return DecomposedQuery(
+            query=query,
+            attributes=["worker"],
+            has_action=True,
+        )
+
+    async def fake_summarize_search_incidents(incidents, query):
+        return "worker opens gate"
+
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.decompose_query",
+        fake_decompose_query,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.search_output_to_incidents",
+        lambda output: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.summarize_search_incidents",
+        fake_summarize_search_incidents,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get",
+        lambda name: fake_critic_agent if name == "critic_agent" else None,
+    )
+
+    result = await execute_search_agent_flow(
+        SearchAgentInput(query="worker opens gate", use_critic=True),
+        model_adapter=object(),
+        embed_search=fake_embed_search,
+        attribute_search=fake_attribute_search,
+    )
+
+    assert critic_called is False
+    assert result.metadata == {
+        "critic_requested": True,
+        "critic_applied": False,
+        "critic_error": None,
     }

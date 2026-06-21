@@ -180,6 +180,14 @@ async def _run_search_critic(
     return metadata
 
 
+def _build_critic_metadata(search_input: SearchAgentInput) -> dict[str, bool | str | None]:
+    return {
+        "critic_requested": bool(search_input.use_critic),
+        "critic_applied": False,
+        "critic_error": None,
+    }
+
+
 async def _execute_search_with_metadata(
     search_input: SearchAgentInput,
     model_adapter=None,
@@ -190,7 +198,7 @@ async def _execute_search_with_metadata(
 ) -> tuple[SearchOutput, dict[str, bool | str | None]]:
     """Execute search and return internal critic metadata for orchestration flows."""
     if config is None:
-        config = SearchAgentConfig(enable_critic=search_input.use_critic)
+        config = SearchAgentConfig()
 
     if model_adapter is not None and search_input.agent_mode:
         decomposed = await decompose_query(search_input.query, model_adapter)
@@ -210,26 +218,26 @@ async def _execute_search_with_metadata(
         try:
             results = await attribute_search()
             if isinstance(results, SearchOutput):
-                return results, {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+                return results, _build_critic_metadata(search_input)
             if isinstance(results, list):
-                return SearchOutput(data=results), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
-            return SearchOutput(data=getattr(results, "data", [])), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+                return SearchOutput(data=results), _build_critic_metadata(search_input)
+            return SearchOutput(data=getattr(results, "data", [])), _build_critic_metadata(search_input)
         except Exception as e:
             logger.error("Attribute search failed: %s", e)
-            return SearchOutput(data=[]), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+            return SearchOutput(data=[]), _build_critic_metadata(search_input)
 
     if not has_attributes and embed_search is not None:
         logger.info("Path 2: embed-only search")
         try:
             results = await embed_search()
             if isinstance(results, SearchOutput):
-                return results, {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+                return results, _build_critic_metadata(search_input)
             if hasattr(results, "data"):
-                return SearchOutput(data=results.data), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
-            return SearchOutput(data=results if isinstance(results, list) else []), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+                return SearchOutput(data=results.data), _build_critic_metadata(search_input)
+            return SearchOutput(data=results if isinstance(results, list) else []), _build_critic_metadata(search_input)
         except Exception as e:
             logger.error("Embed search failed: %s", e)
-            return SearchOutput(data=[]), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+            return SearchOutput(data=[]), _build_critic_metadata(search_input)
 
     if has_action and has_attributes:
         logger.info("Path 3: fusion search")
@@ -266,7 +274,7 @@ async def _execute_search_with_metadata(
         )
         return result, metadata
 
-    return SearchOutput(data=[]), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+    return SearchOutput(data=[]), _build_critic_metadata(search_input)
 
 
 async def execute_search(
@@ -274,8 +282,6 @@ async def execute_search(
     model_adapter=None,
     embed_search=None,
     attribute_search=None,
-    config: SearchAgentConfig | None = None,
-    critic_agent=None,
 ) -> SearchOutput:
     """Execute search with query decomposition and three-path routing.
 
@@ -290,8 +296,6 @@ async def execute_search(
         model_adapter=model_adapter,
         embed_search=embed_search,
         attribute_search=attribute_search,
-        config=config,
-        critic_agent=critic_agent,
     )
     return search_output
 
