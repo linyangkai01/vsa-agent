@@ -1,4 +1,4 @@
-"""Search Agent — orchestrates search workflow via three-path routing.
+"""Search Agent - orchestrates search workflow via three-path routing.
 
 Accepts SearchAgentInput, calls tools/search.decompose_query(), then
 routes through embed/attribute/fusion search paths.
@@ -14,12 +14,14 @@ from pydantic import Field
 
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.incidents import incidents_to_tagged_json
+from vsa_agent.tools.incidents import search_output_to_incidents
 from vsa_agent.tools.search import DecomposedQuery
 from vsa_agent.tools.search import SearchOutput
 from vsa_agent.tools.search import SearchResult
 from vsa_agent.tools.search import _resolve_search_callable
 from vsa_agent.tools.search import decompose_query
-from vsa_agent.tools.incidents import search_output_to_incidents
+from vsa_agent.tools.vss_summarize import summarize_search_incidents
+from vsa_agent.video_analytics.nvschema import Incident
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,15 @@ class SearchAgentConfig(BaseModel):
     search_max_iterations: int = Field(default=1, ge=1)
 
 
+class SearchAgentExecutionResult(BaseModel):
+    """Internal orchestration result for search QA flow."""
+
+    search_output: SearchOutput
+    incidents: list[Incident] = Field(default_factory=list)
+    text_answer: str = Field(default="")
+    metadata: dict[str, bool | str | None] = Field(default_factory=dict)
+
+
 # ===== Presentation Converters =====
 
 
@@ -91,7 +102,6 @@ def _to_incidents_output(search_output) -> str:
     return incidents_to_tagged_json(incidents)
 
 
-
 # ===== Three-Path Routing =====
 
 # ===== Registered Tool Wrapper =====
@@ -120,7 +130,6 @@ async def search_agent_tool(
             f"time: {r.start_time} to {r.end_time})"
         )
     return "\n".join(lines)
-
 
 
 async def execute_search(
@@ -225,3 +234,31 @@ async def execute_search(
         return result
 
     return SearchOutput(data=[])
+
+
+async def execute_search_agent_flow(
+    search_input: SearchAgentInput,
+    model_adapter=None,
+    embed_search=None,
+    attribute_search=None,
+) -> SearchAgentExecutionResult:
+    """Run internal search QA orchestration while preserving public search output."""
+    search_output = await execute_search(
+        search_input=search_input,
+        model_adapter=model_adapter,
+        embed_search=embed_search,
+        attribute_search=attribute_search,
+    )
+    incidents = search_output_to_incidents(search_output)
+    text_answer = await summarize_search_incidents(incidents, search_input.query)
+    metadata = {
+        "critic_requested": bool(search_input.use_critic),
+        "critic_applied": False,
+        "critic_error": None,
+    }
+    return SearchAgentExecutionResult(
+        search_output=search_output,
+        incidents=incidents,
+        text_answer=text_answer,
+        metadata=metadata,
+    )
