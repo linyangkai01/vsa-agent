@@ -35,29 +35,34 @@ def understanding_to_incidents(result: UnderstandingResult) -> list[Incident]:
     return incidents
 
 
+def _search_result_to_incident(item: SearchResult, index: int) -> Incident:
+    return Incident(
+        id=f"search-incident-{index}",
+        timestamp_sec=0.0,
+        duration_sec=0.0,
+        description=item.description,
+        severity="medium",
+        category="search_hit",
+        confidence=float(item.similarity),
+        metadata={
+            "video_name": item.video_name,
+            "sensor_id": item.sensor_id,
+            "start_time": item.start_time,
+            "end_time": item.end_time,
+            "screenshot_url": item.screenshot_url,
+        },
+    )
+
+
+
 def search_output_to_incidents(search_output: SearchOutput | list[SearchResult]) -> list[Incident]:
-    results = search_output.data if hasattr(search_output, "data") else search_output
+    results = search_output.data if isinstance(search_output, SearchOutput) else search_output
     incidents: list[Incident] = []
     for index, item in enumerate(results, start=1):
-        incidents.append(
-            Incident(
-                id=f"search-incident-{index}",
-                timestamp_sec=0.0,
-                duration_sec=0.0,
-                description=item.description,
-                severity="medium",
-                category="search_hit",
-                confidence=float(item.similarity),
-                metadata={
-                    "video_name": item.video_name,
-                    "sensor_id": item.sensor_id,
-                    "start_time": item.start_time,
-                    "end_time": item.end_time,
-                    "screenshot_url": item.screenshot_url,
-                },
-            )
-        )
+        validated_item = item if isinstance(item, SearchResult) else SearchResult.model_validate(item)
+        incidents.append(_search_result_to_incident(validated_item, index))
     return incidents
+
 
 
 def incidents_to_tagged_json(incidents: list[Incident]) -> str:
@@ -91,4 +96,3 @@ async def incidents_tool(*, understanding_result: dict[str, Any] | None = None, 
     if search_output is not None:
         incidents.extend(search_output_to_incidents(SearchOutput.model_validate(search_output)))
     return incidents_to_tagged_json(incidents)
-

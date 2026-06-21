@@ -4,6 +4,7 @@ from vsa_agent.data_models.understanding import DetectedEvent
 from vsa_agent.data_models.understanding import SummaryResult
 from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.registry import register_tool
+from vsa_agent.video_analytics.nvschema import Incident
 
 
 def _parse_hhmmss(value: str) -> int | None:
@@ -15,6 +16,7 @@ def _parse_hhmmss(value: str) -> int | None:
     except ValueError:
         return None
     return hours * 3600 + minutes * 60 + seconds
+
 
 
 def _merge_summary_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
@@ -51,6 +53,7 @@ def _merge_summary_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
     return merged
 
 
+
 def _events_to_text(events: list[DetectedEvent]) -> str:
     merged_events = _merge_summary_events(events)
     lines = []
@@ -60,6 +63,29 @@ def _events_to_text(events: list[DetectedEvent]) -> str:
         else:
             lines.append(event.description)
     return "\n".join(line for line in lines if line)
+
+
+
+def _incident_time_window(incident: Incident) -> tuple[str, str]:
+    metadata = incident.metadata or {}
+    start_time = str(metadata.get("start_time", "") or "")
+    end_time = str(metadata.get("end_time", "") or "")
+    return start_time, end_time
+
+
+async def summarize_search_incidents(incidents: list[Incident], query: str) -> str:
+    del query
+    if not incidents:
+        return "No matching videos found."
+
+    lines: list[str] = []
+    for incident in incidents:
+        start_time, end_time = _incident_time_window(incident)
+        if start_time or end_time:
+            lines.append(f"[{start_time} - {end_time}] {incident.description}")
+        else:
+            lines.append(incident.description)
+    return "\n".join(lines)
 
 
 @register_tool(

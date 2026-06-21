@@ -65,6 +65,33 @@ def test_search_output_to_incidents_uses_clip_time_and_description():
     assert incidents[0].metadata["start_time"] == "2025-01-01T10:00:00Z"
 
 
+def test_search_output_to_incidents_preserves_video_metadata():
+    from vsa_agent.tools.incidents import search_output_to_incidents
+
+    output = SearchOutput(
+        data=[
+            SearchResult(
+                video_name="cam-04.mp4",
+                description="person crosses lane",
+                start_time="2026-06-19T10:20:00",
+                end_time="2026-06-19T10:20:07",
+                sensor_id="cam-04",
+                screenshot_url="shot.png",
+                similarity=0.79,
+                object_ids=["obj-1"],
+            )
+        ]
+    )
+
+    incidents = search_output_to_incidents(output)
+
+    assert incidents[0].metadata["video_name"] == "cam-04.mp4"
+    assert incidents[0].metadata["start_time"] == "2026-06-19T10:20:00"
+    assert incidents[0].metadata["end_time"] == "2026-06-19T10:20:07"
+    assert incidents[0].metadata["sensor_id"] == "cam-04"
+    assert incidents[0].metadata["screenshot_url"] == "shot.png"
+
+
 def test_incidents_to_tagged_json_wraps_payload():
     from vsa_agent.tools.incidents import incidents_to_tagged_json
     from vsa_agent.video_analytics.nvschema import Incident
