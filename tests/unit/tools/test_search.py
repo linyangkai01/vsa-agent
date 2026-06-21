@@ -1,8 +1,12 @@
 """Tests for tools/search.py."""
+
+import pytest
+
 from vsa_agent.tools.search import (
     DecomposedQuery, SearchResult, SearchOutput, SearchConfig, SearchInput,
     _apply_weighted_linear_fusion, _apply_rrf_fusion,
 )
+
 
 class TestDecomposedQuery:
     def test_defaults(self):
@@ -15,26 +19,31 @@ class TestDecomposedQuery:
         assert dq.query == "person walking"
         assert dq.has_action is True
 
+
 class TestSearchResult:
     def test_required_fields(self):
         sr = SearchResult(video_name="test.mp4", description="d", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.85)
         assert sr.video_name == "test.mp4"
         assert sr.similarity == 0.85
 
+
 class TestSearchOutput:
     def test_defaults(self):
         so = SearchOutput()
         assert so.data == []
+
 
 class TestSearchConfig:
     def test_defaults(self):
         cfg = SearchConfig()
         assert cfg.fusion_method == "rrf"
 
+
 class TestSearchInput:
     def test_required_fields(self):
         si = SearchInput(query="test query")
         assert si.query == "test query"
+
 
 class TestFusionFunctions:
     def test_weighted_linear_fusion(self):
@@ -46,8 +55,6 @@ class TestFusionFunctions:
         results = _apply_weighted_linear_fusion(video_data, w_embed=0.4, w_attribute=0.6)
         assert len(results) == 2
         assert isinstance(results[0], SearchResult)
-        # v1: 0.8*0.4 + 0.6*0.6 = 0.68, v2: 0.5*0.4 + 0.9*0.6 = 0.74
-        # Sorted by fusion_score descending, so v2 should be first
         assert results[0].video_name == "v2"
         assert results[1].video_name == "v1"
 
@@ -60,3 +67,85 @@ class TestFusionFunctions:
         results = _apply_rrf_fusion(video_data, rrf_k=60, rrf_w=0.5)
         assert len(results) == 2
         assert isinstance(results[0], SearchResult)
+
+
+def test_should_apply_critic_requires_enable_flag_request_flag_and_agent():
+    from vsa_agent.tools.search import should_apply_critic
+
+    assert should_apply_critic(enable_critic=True, use_critic=True, critic_agent=object()) is True
+    assert should_apply_critic(enable_critic=False, use_critic=True, critic_agent=object()) is False
+    assert should_apply_critic(enable_critic=True, use_critic=False, critic_agent=object()) is False
+    assert should_apply_critic(enable_critic=True, use_critic=True, critic_agent=None) is False
+
+
+@pytest.mark.asyncio
+async def test_execute_core_search_does_not_invoke_critic_when_use_critic_is_false():
+    from vsa_agent.tools.search import execute_core_search
+
+    critic_called = False
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-41.mp4",
+                    description="worker enters dock",
+                    start_time="2026-06-19T15:00:00",
+                    end_time="2026-06-19T15:00:05",
+                    sensor_id="cam-41",
+                    similarity=0.86,
+                )
+            ]
+        )
+
+    async def fake_critic_agent(_critic_input):
+        nonlocal critic_called
+        critic_called = True
+        return None
+
+    updates = []
+    async for update in execute_core_search(
+        search_input=SearchInput(query="worker enters dock", use_critic=False, agent_mode=False),
+        embed_search=fake_embed_search,
+        config=SearchConfig(enable_critic=True),
+        critic_agent=fake_critic_agent,
+    ):
+        updates.append(update)
+
+    assert critic_called is False
+    assert isinstance(updates[-1], SearchOutput)
+    assert updates[-1].data[0].video_name == "cam-41.mp4"
+
+
+@pytest.mark.asyncio
+async def test_execute_core_search_continues_when_critic_raises():
+    from vsa_agent.tools.search import execute_core_search
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-51.mp4",
+                    description="worker enters dock",
+                    start_time="2026-06-19T16:00:00",
+                    end_time="2026-06-19T16:00:05",
+                    sensor_id="cam-51",
+                    similarity=0.93,
+                )
+            ]
+        )
+
+    async def fake_critic_agent(_critic_input):
+        raise RuntimeError("critic offline")
+
+    updates = []
+    async for update in execute_core_search(
+        search_input=SearchInput(query="worker enters dock", use_critic=True, agent_mode=False),
+        embed_search=fake_embed_search,
+        config=SearchConfig(enable_critic=True),
+        critic_agent=fake_critic_agent,
+    ):
+        updates.append(update)
+
+    assert isinstance(updates[-1], SearchOutput)
+    assert updates[-1].data[0].video_name == "cam-51.mp4"

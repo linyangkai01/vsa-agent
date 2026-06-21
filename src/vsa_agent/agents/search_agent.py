@@ -7,6 +7,7 @@ Matches NVIDIA original where agents/search_agent.py imports
 decompose_query + execute_core_search from tools/search.py.
 """
 
+import json
 import logging
 
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ from vsa_agent.tools.search import SearchOutput
 from vsa_agent.tools.search import SearchResult
 from vsa_agent.tools.search import _resolve_search_callable
 from vsa_agent.tools.search import decompose_query
+from vsa_agent.tools.search import should_apply_critic
 from vsa_agent.tools.vss_summarize import summarize_search_incidents
 from vsa_agent.video_analytics.nvschema import Incident
 
@@ -132,20 +134,64 @@ async def search_agent_tool(
     return "\n".join(lines)
 
 
-async def execute_search(
+async def _run_search_critic(
+    search_input: SearchAgentInput,
+    search_output: SearchOutput,
+    *,
+    config: SearchAgentConfig,
+    critic_agent=None,
+) -> dict[str, bool | str | None]:
+    metadata: dict[str, bool | str | None] = {
+        "critic_requested": bool(search_input.use_critic),
+        "critic_applied": False,
+        "critic_error": None,
+    }
+
+    if not search_output.data:
+        return metadata
+
+    critic_fn = critic_agent
+    if critic_fn is None:
+        from vsa_agent.registry import ToolRegistry
+        critic_fn = ToolRegistry.get("critic_agent")
+
+    if not should_apply_critic(
+        enable_critic=config.enable_critic,
+        use_critic=search_input.use_critic,
+        critic_agent=critic_fn,
+    ):
+        return metadata
+
+    videos_data = [
+        {"sensor_id": r.sensor_id, "start_timestamp": r.start_time, "end_timestamp": r.end_time}
+        for r in search_output.data
+    ]
+    try:
+        critic_result = await critic_fn(
+            query=search_input.query,
+            videos_json=json.dumps(videos_data),
+        )
+        metadata["critic_applied"] = True
+        logger.info("Critic verification completed: %s", str(critic_result)[:200])
+    except Exception as exc:
+        metadata["critic_error"] = str(exc)
+        logger.warning("Critic verification failed: %s", exc)
+
+    return metadata
+
+
+async def _execute_search_with_metadata(
     search_input: SearchAgentInput,
     model_adapter=None,
     embed_search=None,
     attribute_search=None,
-) -> SearchOutput:
-    """Execute search with query decomposition and three-path routing.
+    config: SearchAgentConfig | None = None,
+    critic_agent=None,
+) -> tuple[SearchOutput, dict[str, bool | str | None]]:
+    """Execute search and return internal critic metadata for orchestration flows."""
+    if config is None:
+        config = SearchAgentConfig(enable_critic=search_input.use_critic)
 
-    Decomposes the query via LLM (tools/search.decompose_query), then routes
-    through one of three paths:
-    - Path 1: attribute-only (has_action=False, attributes present)
-    - Path 2: embed-only (no attributes)
-    - Path 3: fusion (has_action=True, attributes present)
-    """
     if model_adapter is not None and search_input.agent_mode:
         decomposed = await decompose_query(search_input.query, model_adapter)
     else:
@@ -164,26 +210,26 @@ async def execute_search(
         try:
             results = await attribute_search()
             if isinstance(results, SearchOutput):
-                return results
+                return results, {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
             if isinstance(results, list):
-                return SearchOutput(data=results)
-            return SearchOutput(data=getattr(results, "data", []))
+                return SearchOutput(data=results), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+            return SearchOutput(data=getattr(results, "data", [])), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
         except Exception as e:
             logger.error("Attribute search failed: %s", e)
-            return SearchOutput(data=[])
+            return SearchOutput(data=[]), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
 
     if not has_attributes and embed_search is not None:
         logger.info("Path 2: embed-only search")
         try:
             results = await embed_search()
             if isinstance(results, SearchOutput):
-                return results
+                return results, {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
             if hasattr(results, "data"):
-                return SearchOutput(data=results.data)
-            return SearchOutput(data=results if isinstance(results, list) else [])
+                return SearchOutput(data=results.data), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
+            return SearchOutput(data=results if isinstance(results, list) else []), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
         except Exception as e:
             logger.error("Embed search failed: %s", e)
-            return SearchOutput(data=[])
+            return SearchOutput(data=[]), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
 
     if has_action and has_attributes:
         logger.info("Path 3: fusion search")
@@ -212,28 +258,42 @@ async def execute_search(
                 merged[r.video_name] = r
         combined = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
         result = SearchOutput(data=combined)
+        metadata = await _run_search_critic(
+            search_input,
+            result,
+            config=config,
+            critic_agent=critic_agent,
+        )
+        return result, metadata
 
-        # Optional: run critic verification if critic_agent is registered
-        try:
-            from vsa_agent.registry import ToolRegistry
-            critic_fn = ToolRegistry.get("critic_agent")
-            if critic_fn and combined:
-                import json as json_
-                videos_data = [
-                    {"sensor_id": r.sensor_id, "start_timestamp": r.start_time, "end_timestamp": r.end_time}
-                    for r in combined
-                ]
-                critic_result = await critic_fn(
-                    query=search_input.query,
-                    videos_json=json_.dumps(videos_data),
-                )
-                logger.info("Critic verification completed: %s", str(critic_result)[:200])
-        except Exception:
-            pass  # Critic is optional; failure doesn't block search
+    return SearchOutput(data=[]), {"critic_requested": bool(search_input.use_critic), "critic_applied": False, "critic_error": None}
 
-        return result
 
-    return SearchOutput(data=[])
+async def execute_search(
+    search_input: SearchAgentInput,
+    model_adapter=None,
+    embed_search=None,
+    attribute_search=None,
+    config: SearchAgentConfig | None = None,
+    critic_agent=None,
+) -> SearchOutput:
+    """Execute search with query decomposition and three-path routing.
+
+    Decomposes the query via LLM (tools/search.decompose_query), then routes
+    through one of three paths:
+    - Path 1: attribute-only (has_action=False, attributes present)
+    - Path 2: embed-only (no attributes)
+    - Path 3: fusion (has_action=True, attributes present)
+    """
+    search_output, _ = await _execute_search_with_metadata(
+        search_input=search_input,
+        model_adapter=model_adapter,
+        embed_search=embed_search,
+        attribute_search=attribute_search,
+        config=config,
+        critic_agent=critic_agent,
+    )
+    return search_output
 
 
 async def execute_search_agent_flow(
@@ -241,21 +301,20 @@ async def execute_search_agent_flow(
     model_adapter=None,
     embed_search=None,
     attribute_search=None,
+    config: SearchAgentConfig | None = None,
+    critic_agent=None,
 ) -> SearchAgentExecutionResult:
     """Run internal search QA orchestration while preserving public search output."""
-    search_output = await execute_search(
+    search_output, metadata = await _execute_search_with_metadata(
         search_input=search_input,
         model_adapter=model_adapter,
         embed_search=embed_search,
         attribute_search=attribute_search,
+        config=config,
+        critic_agent=critic_agent,
     )
     incidents = search_output_to_incidents(search_output)
     text_answer = await summarize_search_incidents(incidents, search_input.query)
-    metadata = {
-        "critic_requested": bool(search_input.use_critic),
-        "critic_applied": False,
-        "critic_error": None,
-    }
     return SearchAgentExecutionResult(
         search_output=search_output,
         incidents=incidents,

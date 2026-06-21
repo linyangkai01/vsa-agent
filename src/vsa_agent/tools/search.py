@@ -100,6 +100,11 @@ class SearchInput(BaseModel):
 # ===== Core Search (async generator) =====
 
 
+def should_apply_critic(*, enable_critic: bool, use_critic: bool, critic_agent) -> bool:
+    """Return True only when critic verification is explicitly enabled and available."""
+    return bool(enable_critic and use_critic and critic_agent is not None)
+
+
 async def execute_core_search(
     search_input: SearchInput,
     embed_search,
@@ -201,7 +206,11 @@ async def execute_core_search(
                 search_results = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
             yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Fusion search returned {len(search_results)} results")
 
-        if config.enable_critic and search_input.use_critic and critic_agent is not None and search_results:
+        if should_apply_critic(
+            enable_critic=config.enable_critic,
+            use_critic=search_input.use_critic,
+            critic_agent=critic_agent,
+        ) and search_results:
             try:
                 from vsa_agent.agents.critic_agent import CriticAgentInput, CriticAgentResult, VideoInfo
                 yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Verifying {len(search_results)} results with critic")
@@ -224,7 +233,11 @@ async def execute_core_search(
             except Exception as e:
                 logger.error("Critic verification failed: %s", e)
 
-        if not config.enable_critic or not search_input.use_critic or critic_agent is None:
+        if not should_apply_critic(
+            enable_critic=config.enable_critic,
+            use_critic=search_input.use_critic,
+            critic_agent=critic_agent,
+        ):
             do_search = False
 
     if original_top_k is not None:
