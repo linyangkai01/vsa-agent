@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 .env
 .venv/
@@ -17,3 +17,5 @@ config.yaml
 
 logs/
 data/
+.superpowers/
+
