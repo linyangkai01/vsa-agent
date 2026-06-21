@@ -62,6 +62,8 @@ class TestSearchFlow:
             embed_search=fake_embed_search,
         )
 
+        # Task 8.6 acceptance stays on the legacy public contract: execute_search()
+        # returns SearchOutput directly rather than a new aggregate response object.
         assert isinstance(result, SearchOutput)
         assert result.data[0].video_name == "cam-01.mp4"
 
@@ -134,6 +136,81 @@ class TestSearchFlow:
         assert critic_calls
         assert critic_calls[0]["query"] == "forklift turns left"
         assert "videos_json" in critic_calls[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Task 8.8 is expected to complete the explicit critic gate; "
+            "for now fusion search still invokes critic even when use_critic=False."
+        ),
+    )
+    async def test_execute_search_skips_critic_when_disabled_in_fusion_flow(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from vsa_agent.agents.search_agent import SearchAgentInput
+        from vsa_agent.agents.search_agent import execute_search
+        from vsa_agent.tools.search import DecomposedQuery
+        from vsa_agent.tools.search import SearchOutput
+        from vsa_agent.tools.search import SearchResult
+
+        critic_calls = []
+
+        async def fake_decompose_query(query, model_adapter):
+            return DecomposedQuery(query=query, attributes=["forklift"], has_action=True)
+
+        async def fake_embed_search():
+            return SearchOutput(
+                data=[
+                    SearchResult(
+                        video_name="cam-02.mp4",
+                        description="forklift turns left",
+                        start_time="2026-06-19T10:05:00",
+                        end_time="2026-06-19T10:05:08",
+                        sensor_id="cam-02",
+                        screenshot_url="",
+                        similarity=0.88,
+                        object_ids=[],
+                    )
+                ]
+            )
+
+        async def fake_attribute_search():
+            return SearchOutput(
+                data=[
+                    SearchResult(
+                        video_name="cam-02.mp4",
+                        description="forklift turns left",
+                        start_time="2026-06-19T10:05:00",
+                        end_time="2026-06-19T10:05:08",
+                        sensor_id="cam-02",
+                        screenshot_url="",
+                        similarity=0.82,
+                        object_ids=[],
+                    )
+                ]
+            )
+
+        async def fake_critic_agent(**kwargs):
+            critic_calls.append(kwargs)
+            return "critic-ok"
+
+        monkeypatch.setattr("vsa_agent.agents.search_agent.decompose_query", fake_decompose_query)
+        monkeypatch.setattr(
+            "vsa_agent.registry.ToolRegistry.get",
+            lambda name: fake_critic_agent if name == "critic_agent" else None,
+        )
+
+        result = await execute_search(
+            SearchAgentInput(query="forklift turns left", use_critic=False),
+            model_adapter=SimpleNamespace(),
+            embed_search=fake_embed_search,
+            attribute_search=fake_attribute_search,
+        )
+
+        assert isinstance(result, SearchOutput)
+        assert [r.video_name for r in result.data] == ["cam-02.mp4"]
+        assert critic_calls == []
 
     @pytest.mark.asyncio
     async def test_execute_search_degrades_when_critic_fails_in_fusion_flow(self, monkeypatch):
@@ -224,3 +301,4 @@ class TestSearchFlow:
 
         assert isinstance(result, SearchOutput)
         assert result.data == []
+
