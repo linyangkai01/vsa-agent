@@ -6174,3 +6174,460 @@ git commit -m "docs: update phase7a2 execution status"
 - [x] Task 7.9 已完成：共享选帧逻辑已对齐
 - [x] Task 7.10 已完成：视频工具层已接回共享时间/选帧工具
 - [x] Task 7.11 已完成：Phase 7A2 回归通过，待整理提交
+
+---
+
+# Phase 8B1 检索问答闭环实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 建立检索问答内部主链闭环，将查询稳定收口为“搜索结果 + 标准化事件 + 最终文本回答 + 运行元数据”。
+
+**Architecture:** 以 `src/vsa_agent/agents/search_agent.py` 作为主编排器，串联 `tools/search.py` 的三路径搜索执行、可选 `critic_agent` 验证、`tools/incidents.py` 的事件标准化，以及 `tools/vss_summarize.py` 的最终文本输出。保持现有对外接口尽量不变，只补强内部协作语义、降级语义和测试验收闭环。
+
+**Tech Stack:** Python 3.12, Pydantic, pytest, pytest-asyncio, anyio, 现有 `agents/` 与 `tools/` 模块体系
+
+---
+
+## 文件结构与职责锁定
+
+- `src/vsa_agent/agents/search_agent.py`
+  - 检索问答主编排器
+  - 负责 `query -> search -> optional critic -> incidents -> summarize -> answer`
+  - 输出面向业务消费的统一结果对象或兼容返回结构
+- `src/vsa_agent/tools/search.py`
+  - 搜索执行层
+  - 负责三路径搜索与 critic 相关的底层路由兼容
+  - 不负责最终文本回答生成
+- `src/vsa_agent/tools/incidents.py`
+  - `SearchOutput -> list[Incident]` 标准化层
+  - 负责把搜索命中转成业务事件表达
+- `src/vsa_agent/tools/vss_summarize.py`
+  - 文本总结层
+  - 为搜索侧新增最小文本出口，不重做现有理解链摘要体系
+- `tests/unit/agents/test_search_agent.py`
+  - 锁定主编排语义、critic 可选语义、降级语义
+- `tests/unit/tools/test_search.py`
+  - 锁定搜索执行层的 critic 元数据与空结果/异常降级
+- `tests/unit/tools/test_incidents.py`
+  - 锁定搜索结果到事件模型的映射
+- `tests/unit/tools/test_vss_summarize.py`
+  - 锁定搜索事件摘要文本出口
+- `tests/acceptance/test_search_flow.py`
+  - 锁定默认检索问答成功流与空结果流
+- `tests/acceptance/test_critic_flow.py`
+  - 锁定 critic 显式启用成功流与 critic 失败降级流
+
+### Task 8.6: 先补红灯，锁定检索问答闭环验收语义
+
+**Files:**
+- Modify: `tests/acceptance/test_search_flow.py`
+- Modify: `tests/acceptance/test_critic_flow.py`
+- Reference: `src/vsa_agent/agents/search_agent.py`
+
+- [ ] **Step 1: 写默认成功流验收测试**
+
+```python
+@pytest.mark.asyncio
+async def test_search_flow_returns_text_answer_and_incidents(monkeypatch):
+    from vsa_agent.agents.search_agent import SearchAgentInput
+    from vsa_agent.agents.search_agent import execute_search
+    from vsa_agent.tools.search import SearchOutput, SearchResult
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-01.mp4",
+                    description="person enters loading area",
+                    start_time="2026-06-19T10:00:00",
+                    end_time="2026-06-19T10:00:12",
+                    sensor_id="cam-01",
+                    screenshot_url="",
+                    similarity=0.91,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    result = await execute_search(
+        SearchAgentInput(query="person enters loading area", use_critic=False),
+        embed_search=fake_embed_search,
+    )
+
+    assert result.data[0].video_name == "cam-01.mp4"
+```
+
+- [ ] **Step 2: 写 critic 显式启用成功流验收测试**
+
+```python
+@pytest.mark.asyncio
+async def test_critic_flow_applies_only_when_requested(monkeypatch):
+    from vsa_agent.agents.search_agent import SearchAgentInput
+    from vsa_agent.agents.search_agent import execute_search
+    from vsa_agent.tools.search import SearchOutput, SearchResult
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-02.mp4",
+                    description="forklift turns left",
+                    start_time="2026-06-19T10:05:00",
+                    end_time="2026-06-19T10:05:08",
+                    sensor_id="cam-02",
+                    screenshot_url="",
+                    similarity=0.88,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    result = await execute_search(
+        SearchAgentInput(query="forklift turns left", use_critic=True),
+        embed_search=fake_embed_search,
+    )
+
+    assert result.data
+```
+
+- [ ] **Step 3: 写 critic 失败降级流与空结果流验收测试**
+
+```python
+@pytest.mark.asyncio
+async def test_critic_flow_degrades_when_critic_fails(monkeypatch):
+    from vsa_agent.agents.search_agent import SearchAgentInput
+    from vsa_agent.agents.search_agent import execute_search
+    from vsa_agent.tools.search import SearchOutput
+
+    async def fake_embed_search():
+        return SearchOutput(data=[])
+
+    result = await execute_search(
+        SearchAgentInput(query="no match query", use_critic=True),
+        embed_search=fake_embed_search,
+    )
+
+    assert result.data == []
+```
+
+- [ ] **Step 4: 运行验收测试，确认红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/acceptance/test_search_flow.py tests/acceptance/test_critic_flow.py -v`
+Expected: FAIL，因为当前实现还没有完整锁定“文本回答 / incidents / critic metadata / 降级语义”的主链闭环
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/acceptance/test_search_flow.py tests/acceptance/test_critic_flow.py
+git commit -m "test: lock acceptance semantics for phase8b search qa flow"
+```
+
+### Task 8.7: 在 `search_agent.py` 建立检索问答内部主链编排
+
+**Files:**
+- Modify: `src/vsa_agent/agents/search_agent.py`
+- Modify: `tests/unit/agents/test_search_agent.py`
+- Reference: `src/vsa_agent/tools/incidents.py`
+- Reference: `src/vsa_agent/tools/vss_summarize.py`
+
+- [ ] **Step 1: 写失败测试，锁定主链会串联 incidents 与 summarize**
+
+```python
+@pytest.mark.asyncio
+async def test_execute_search_builds_incidents_and_text_answer(monkeypatch):
+    from vsa_agent.agents.search_agent import SearchAgentInput
+    from vsa_agent.agents.search_agent import execute_search
+    from vsa_agent.tools.search import SearchOutput, SearchResult
+
+    called = {"incidents": False, "summary": False}
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-03.mp4",
+                    description="worker approaches gate",
+                    start_time="2026-06-19T10:10:00",
+                    end_time="2026-06-19T10:10:05",
+                    sensor_id="cam-03",
+                    screenshot_url="",
+                    similarity=0.83,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    def fake_search_output_to_incidents(output):
+        called["incidents"] = True
+        return ["incident"]
+
+    async def fake_summarize_search_incidents(incidents, query):
+        called["summary"] = True
+        return "worker approaches gate"
+
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.search_output_to_incidents",
+        fake_search_output_to_incidents,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.summarize_search_incidents",
+        fake_summarize_search_incidents,
+    )
+
+    result = await execute_search(
+        SearchAgentInput(query="worker approaches gate", use_critic=False),
+        embed_search=fake_embed_search,
+    )
+
+    assert result.data[0].description == "worker approaches gate"
+    assert called["incidents"] is True
+    assert called["summary"] is True
+```
+
+- [ ] **Step 2: 运行单测，确认红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_search_agent.py -v`
+Expected: FAIL，因为当前 `execute_search()` 还没有正式承担“incidents + 文本回答 + metadata”主链职责
+
+- [ ] **Step 3: 写最小实现，补强主编排返回结构**
+
+```python
+class SearchAgentExecutionResult(BaseModel):
+    search_output: SearchOutput
+    incidents: list[Incident] = Field(default_factory=list)
+    text_answer: str = Field(default="")
+    metadata: dict = Field(default_factory=dict)
+```
+
+```python
+async def execute_search(...):
+    ...
+    search_output = await _run_existing_search_logic(...)
+    incidents = search_output_to_incidents(search_output)
+    text_answer = await summarize_search_incidents(incidents, search_input.query)
+    metadata = {
+        "critic_requested": bool(search_input.use_critic),
+        "critic_applied": False,
+        "critic_error": None,
+    }
+    return SearchAgentExecutionResult(
+        search_output=search_output,
+        incidents=incidents,
+        text_answer=text_answer,
+        metadata=metadata,
+    )
+```
+
+- [ ] **Step 4: 跑单测并确认通过**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_search_agent.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/search_agent.py tests/unit/agents/test_search_agent.py
+git commit -m "feat: add internal search qa orchestration flow"
+```
+
+### Task 8.8: 收口 critic 可选增强语义与 metadata
+
+**Files:**
+- Modify: `src/vsa_agent/agents/search_agent.py`
+- Modify: `src/vsa_agent/tools/search.py`
+- Modify: `tests/unit/agents/test_search_agent.py`
+- Modify: `tests/unit/tools/test_search.py`
+
+- [ ] **Step 1: 写失败测试，锁定 critic 只有显式启用时才介入**
+
+```python
+@pytest.mark.asyncio
+async def test_execute_search_records_critic_metadata(monkeypatch):
+    from vsa_agent.agents.search_agent import SearchAgentExecutionResult
+    from vsa_agent.agents.search_agent import SearchAgentInput
+    from vsa_agent.agents.search_agent import execute_search
+    from vsa_agent.tools.search import SearchOutput
+
+    async def fake_embed_search():
+        return SearchOutput(data=[])
+
+    result = await execute_search(
+        SearchAgentInput(query="empty", use_critic=True),
+        embed_search=fake_embed_search,
+    )
+
+    assert isinstance(result, SearchAgentExecutionResult)
+    assert result.metadata["critic_requested"] is True
+    assert "critic_applied" in result.metadata
+    assert "critic_error" in result.metadata
+```
+
+- [ ] **Step 2: 运行相关单测，确认红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_search_agent.py tests/unit/tools/test_search.py -v`
+Expected: FAIL，因为当前 critic 语义分散且 metadata 未形成稳定契约
+
+- [ ] **Step 3: 写最小实现，明确 critic 降级语义**
+
+```python
+metadata = {
+    "critic_requested": bool(search_input.use_critic),
+    "critic_applied": False,
+    "critic_error": None,
+}
+
+if config.enable_critic and search_input.use_critic and critic_agent is not None:
+    try:
+        ...
+        metadata["critic_applied"] = True
+    except Exception as exc:
+        metadata["critic_error"] = str(exc)
+```
+
+```python
+if critic fails:
+    return original_search_output
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_search_agent.py tests/unit/tools/test_search.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/agents/search_agent.py src/vsa_agent/tools/search.py tests/unit/agents/test_search_agent.py tests/unit/tools/test_search.py
+git commit -m "feat: align optional critic semantics for search qa flow"
+```
+
+### Task 8.9: 让 `incidents` 与 `vss_summarize` 正式进入搜索主链
+
+**Files:**
+- Modify: `src/vsa_agent/tools/incidents.py`
+- Modify: `src/vsa_agent/tools/vss_summarize.py`
+- Modify: `tests/unit/tools/test_incidents.py`
+- Modify: `tests/unit/tools/test_vss_summarize.py`
+- Reference: `src/vsa_agent/agents/search_agent.py`
+
+- [ ] **Step 1: 写失败测试，锁定搜索侧摘要文本与空结果回退**
+
+```python
+@pytest.mark.asyncio
+async def test_summarize_search_incidents_returns_fallback_for_empty_results():
+    from vsa_agent.tools.vss_summarize import summarize_search_incidents
+
+    summary = await summarize_search_incidents([], "person in loading area")
+
+    assert summary == "No matching videos found."
+```
+
+```python
+def test_search_output_to_incidents_preserves_video_metadata():
+    from vsa_agent.tools.incidents import search_output_to_incidents
+    from vsa_agent.tools.search import SearchOutput, SearchResult
+
+    output = SearchOutput(
+        data=[
+            SearchResult(
+                video_name="cam-04.mp4",
+                description="person crosses lane",
+                start_time="2026-06-19T10:20:00",
+                end_time="2026-06-19T10:20:07",
+                sensor_id="cam-04",
+                screenshot_url="shot.png",
+                similarity=0.79,
+                object_ids=["obj-1"],
+            )
+        ]
+    )
+
+    incidents = search_output_to_incidents(output)
+
+    assert incidents[0].metadata["video_name"] == "cam-04.mp4"
+    assert incidents[0].metadata["start_time"] == "2026-06-19T10:20:00"
+```
+
+- [ ] **Step 2: 运行相关单测，确认红灯**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/tools/test_incidents.py tests/unit/tools/test_vss_summarize.py -v`
+Expected: FAIL，因为当前 `vss_summarize.py` 还没有搜索侧文本出口
+
+- [ ] **Step 3: 写最小实现，补搜索侧文本总结函数**
+
+```python
+async def summarize_search_incidents(incidents: list[Incident], query: str) -> str:
+    if not incidents:
+        return "No matching videos found."
+
+    lines = []
+    for incident in incidents:
+        start_time = incident.metadata.get("start_time", "")
+        end_time = incident.metadata.get("end_time", "")
+        if start_time or end_time:
+            lines.append(f"[{start_time} - {end_time}] {incident.description}")
+        else:
+            lines.append(incident.description)
+    return "\n".join(lines)
+```
+
+- [ ] **Step 4: 跑测试并确认通过**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/tools/test_incidents.py tests/unit/tools/test_vss_summarize.py -v`
+Expected: `PASS`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vsa_agent/tools/incidents.py src/vsa_agent/tools/vss_summarize.py tests/unit/tools/test_incidents.py tests/unit/tools/test_vss_summarize.py
+git commit -m "feat: add search incident summarization output"
+```
+
+### Task 8.10: 跑 Phase 8B1 回归并更新唯一总计划文档状态
+
+**Files:**
+- Modify: `docs/superpowers/vsa-agent-implementation-plan.md`
+
+- [ ] **Step 1: 运行 Phase 8B1 相关回归**
+
+Run: `conda run -n vsa-agent python -m pytest tests/unit/agents/test_search_agent.py tests/unit/tools/test_search.py tests/unit/tools/test_incidents.py tests/unit/tools/test_vss_summarize.py tests/acceptance/test_search_flow.py tests/acceptance/test_critic_flow.py -q`
+Expected: `PASS`
+
+- [ ] **Step 2: 更新本计划中的执行状态**
+
+```markdown
+### 当前执行状态（2026-06-19）
+- [x] Task 8.6 已完成：检索问答闭环验收红灯已补齐
+- [x] Task 8.7 已完成：search_agent 已建立内部主链编排
+- [x] Task 8.8 已完成：critic 可选增强语义与 metadata 已收口
+- [x] Task 8.9 已完成：incidents 与 vss_summarize 已正式进入搜索主链
+- [x] Task 8.10 已完成：Phase 8B1 回归通过，待整理提交
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/superpowers/vsa-agent-implementation-plan.md
+git commit -m "docs: update phase8b1 execution status"
+```
+
+### ???????2026-06-21?
+- [x] Task 8.6 ?????????????????
+- [x] Task 8.7 ????search_agent ?????????
+- [x] Task 8.8 ????critic ??????? metadata ???
+- [x] Task 8.9 ????incidents ? vss_summarize ?????????
+- [x] Task 8.10 ????Phase 8B1 ??????????
+- [x] ??????????? optional critic?attribute-only?embed-only?fusion ??? `use_critic=True` ???????
+- [x] `search_agent_tool()` ?????? `execute_search_agent_flow()`????????????????? `text_answer`
+## Phase 8B1 自检
+
+- Spec 覆盖性
+  - 已覆盖默认成功流、critic 显式启用流、critic 失败降级流、空结果流
+  - 已覆盖主链编排、critic metadata、incidents 标准化、搜索侧摘要输出
+- 占位符扫描
+  - 本节未使用 `TBD`、`TODO`、`implement later` 一类占位表达
+- 类型一致性
+  - 计划统一以现有 `execute_search()`、`SearchOutput`、`search_output_to_incidents()` 为基础推进
+  - 新增内部返回结构名固定为 `SearchAgentExecutionResult`
+

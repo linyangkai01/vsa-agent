@@ -138,13 +138,6 @@ class TestSearchFlow:
         assert "videos_json" in critic_calls[0]
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Task 8.8 is expected to complete the explicit critic gate; "
-            "for now fusion search still invokes critic even when use_critic=False."
-        ),
-    )
     async def test_execute_search_skips_critic_when_disabled_in_fusion_flow(self, monkeypatch):
         from types import SimpleNamespace
 
@@ -302,3 +295,57 @@ class TestSearchFlow:
         assert isinstance(result, SearchOutput)
         assert result.data == []
 
+
+
+    @pytest.mark.asyncio
+    async def test_search_agent_tool_returns_text_answer_from_agent_flow(self, monkeypatch):
+        from vsa_agent.agents.search_agent import SearchAgentExecutionResult
+        from vsa_agent.agents.search_agent import search_agent_tool
+        from vsa_agent.tools.search import SearchOutput
+        from vsa_agent.tools.search import SearchResult
+
+        flow_calls = []
+
+        async def fake_execute_search_agent_flow(search_input, **kwargs):
+            flow_calls.append((search_input, kwargs))
+            return SearchAgentExecutionResult(
+                search_output=SearchOutput(data=[]),
+                incidents=[],
+                text_answer="answer from summarize layer",
+                metadata={},
+            )
+
+        async def fake_execute_search(search_input):
+            return SearchOutput(
+                data=[
+                    SearchResult(
+                        video_name="cam-legacy.mp4",
+                        description="legacy search result",
+                        start_time="2026-06-19T20:00:00",
+                        end_time="2026-06-19T20:00:04",
+                        sensor_id="cam-legacy",
+                        screenshot_url="",
+                        similarity=0.5,
+                        object_ids=[],
+                    )
+                ]
+            )
+
+        monkeypatch.setattr(
+            "vsa_agent.agents.search_agent.execute_search_agent_flow",
+            fake_execute_search_agent_flow,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "vsa_agent.agents.search_agent.execute_search",
+            fake_execute_search,
+            raising=False,
+        )
+
+        answer = await search_agent_tool("summarize this search", agent_mode=False, max_results=2)
+
+        assert answer == "answer from summarize layer"
+        assert flow_calls
+        assert flow_calls[0][0].query == "summarize this search"
+        assert flow_calls[0][0].agent_mode is False
+        assert flow_calls[0][0].max_results == 2

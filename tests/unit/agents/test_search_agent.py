@@ -402,7 +402,7 @@ async def test_execute_search_agent_flow_records_critic_error_and_continues(monk
 
 
 @pytest.mark.asyncio
-async def test_execute_search_agent_flow_does_not_apply_critic_on_default_config(monkeypatch):
+async def test_execute_search_agent_flow_uses_requested_critic_on_default_config(monkeypatch):
     from vsa_agent.agents.search_agent import execute_search_agent_flow
     from vsa_agent.tools.search import DecomposedQuery
 
@@ -469,9 +469,211 @@ async def test_execute_search_agent_flow_does_not_apply_critic_on_default_config
         attribute_search=fake_attribute_search,
     )
 
-    assert critic_called is False
+    assert critic_called is True
     assert result.metadata == {
         "critic_requested": True,
-        "critic_applied": False,
+        "critic_applied": True,
         "critic_error": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_execute_search_agent_flow_applies_critic_for_attribute_only_path(monkeypatch):
+    from vsa_agent.agents.search_agent import execute_search_agent_flow
+    from vsa_agent.tools.search import DecomposedQuery
+
+    critic_calls = []
+
+    async def fake_embed_search():
+        return SearchOutput(data=[])
+
+    async def fake_attribute_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-71.mp4",
+                    description="person in red vest",
+                    start_time="2026-06-19T18:00:00",
+                    end_time="2026-06-19T18:00:05",
+                    sensor_id="cam-71",
+                    screenshot_url="",
+                    similarity=0.9,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    async def fake_critic_agent(**kwargs):
+        critic_calls.append(kwargs)
+        return {"ok": True}
+
+    async def fake_decompose_query(query, model_adapter):
+        return DecomposedQuery(
+            query=query,
+            attributes=["person in red vest"],
+            has_action=False,
+        )
+
+    async def fake_summarize_search_incidents(incidents, query):
+        return "person in red vest"
+
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.decompose_query",
+        fake_decompose_query,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.search_output_to_incidents",
+        lambda output: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.summarize_search_incidents",
+        fake_summarize_search_incidents,
+        raising=False,
+    )
+
+    result = await execute_search_agent_flow(
+        SearchAgentInput(query="person in red vest", use_critic=True),
+        model_adapter=object(),
+        embed_search=fake_embed_search,
+        attribute_search=fake_attribute_search,
+        critic_agent=fake_critic_agent,
+    )
+
+    assert critic_calls
+    assert critic_calls[0]["query"] == "person in red vest"
+    assert result.metadata == {
+        "critic_requested": True,
+        "critic_applied": True,
+        "critic_error": None,
+    }
+
+@pytest.mark.asyncio
+async def test_execute_search_agent_flow_applies_critic_for_embed_only_path(monkeypatch):
+    from vsa_agent.agents.search_agent import execute_search_agent_flow
+    from vsa_agent.tools.search import DecomposedQuery
+
+    critic_calls = []
+
+    async def fake_embed_search():
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-72.mp4",
+                    description="forklift leaves loading dock",
+                    start_time="2026-06-19T18:05:00",
+                    end_time="2026-06-19T18:05:08",
+                    sensor_id="cam-72",
+                    screenshot_url="",
+                    similarity=0.86,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    async def fake_critic_agent(**kwargs):
+        critic_calls.append(kwargs)
+        return {"ok": True}
+
+    async def fake_decompose_query(query, model_adapter):
+        return DecomposedQuery(query=query, attributes=[], has_action=True)
+
+    async def fake_summarize_search_incidents(incidents, query):
+        return "forklift leaves loading dock"
+
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.decompose_query",
+        fake_decompose_query,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.search_output_to_incidents",
+        lambda output: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.summarize_search_incidents",
+        fake_summarize_search_incidents,
+        raising=False,
+    )
+
+    result = await execute_search_agent_flow(
+        SearchAgentInput(query="forklift leaves loading dock", use_critic=True),
+        model_adapter=object(),
+        embed_search=fake_embed_search,
+        critic_agent=fake_critic_agent,
+    )
+
+    assert critic_calls
+    assert critic_calls[0]["query"] == "forklift leaves loading dock"
+    assert result.metadata == {
+        "critic_requested": True,
+        "critic_applied": True,
+        "critic_error": None,
+    }
+
+@pytest.mark.asyncio
+async def test_search_agent_tool_returns_text_answer_from_agent_flow(monkeypatch):
+    from vsa_agent.agents.search_agent import SearchAgentExecutionResult
+    from vsa_agent.agents.search_agent import search_agent_tool
+
+    flow_calls = []
+
+    async def fake_execute_search_agent_flow(search_input, **kwargs):
+        flow_calls.append((search_input, kwargs))
+        return SearchAgentExecutionResult(
+            search_output=SearchOutput(
+                data=[
+                    SearchResult(
+                        video_name="cam-81.mp4",
+                        description="worker closes gate",
+                        start_time="2026-06-19T19:00:00",
+                        end_time="2026-06-19T19:00:06",
+                        sensor_id="cam-81",
+                        screenshot_url="",
+                        similarity=0.84,
+                        object_ids=[],
+                    )
+                ]
+            ),
+            incidents=[],
+            text_answer="worker closes gate after inspection",
+            metadata={},
+        )
+
+    async def fake_execute_search(search_input):
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="cam-legacy.mp4",
+                    description="legacy search result",
+                    start_time="2026-06-19T19:10:00",
+                    end_time="2026-06-19T19:10:05",
+                    sensor_id="cam-legacy",
+                    screenshot_url="",
+                    similarity=0.5,
+                    object_ids=[],
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.execute_search_agent_flow",
+        fake_execute_search_agent_flow,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.execute_search",
+        fake_execute_search,
+        raising=False,
+    )
+
+    answer = await search_agent_tool("worker closes gate", agent_mode=False, max_results=3)
+
+    assert answer == "worker closes gate after inspection"
+    assert flow_calls
+    assert flow_calls[0][0].query == "worker closes gate"
+    assert flow_calls[0][0].agent_mode is False
+    assert flow_calls[0][0].max_results == 3
+

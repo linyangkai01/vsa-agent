@@ -119,19 +119,14 @@ async def search_agent_tool(
     agent_mode: bool = True,
     max_results: int = 5,
 ) -> str:
-    """Tool wrapper: converts simple args to SearchAgentInput, calls execute_search."""
+    """Tool wrapper: converts simple args to SearchAgentInput, calls the search QA flow."""
     search_input = SearchAgentInput(query=query, agent_mode=agent_mode, max_results=max_results)
-    result = await execute_search(search_input=search_input)
-    # Convert SearchOutput to readable string for LLM
-    if not result.data:
+    result = await execute_search_agent_flow(search_input=search_input)
+    if result.text_answer:
+        return result.text_answer
+    if not result.search_output.data:
         return "No matching videos found."
-    lines = [f"Found {len(result.data)} result(s):"]
-    for r in result.data:
-        lines.append(
-            f"- {r.video_name} (similarity: {r.similarity:.2f}, "
-            f"time: {r.start_time} to {r.end_time})"
-        )
-    return "\n".join(lines)
+    return _to_incidents_output(result.search_output)
 
 
 async def _run_search_critic(
@@ -198,7 +193,7 @@ async def _execute_search_with_metadata(
 ) -> tuple[SearchOutput, dict[str, bool | str | None]]:
     """Execute search and return internal critic metadata for orchestration flows."""
     if config is None:
-        config = SearchAgentConfig()
+        config = SearchAgentConfig(enable_critic=search_input.use_critic)
 
     if model_adapter is not None and search_input.agent_mode:
         decomposed = await decompose_query(search_input.query, model_adapter)
@@ -213,33 +208,35 @@ async def _execute_search_with_metadata(
     if attribute_search is None and has_attributes:
         attribute_search = _resolve_search_callable("attribute_search", attributes=decomposed.attributes)
 
+    result = SearchOutput(data=[])
+
     if not has_action and has_attributes and attribute_search is not None:
         logger.info("Path 1: attribute-only search")
         try:
             results = await attribute_search()
             if isinstance(results, SearchOutput):
-                return results, _build_critic_metadata(search_input)
-            if isinstance(results, list):
-                return SearchOutput(data=results), _build_critic_metadata(search_input)
-            return SearchOutput(data=getattr(results, "data", [])), _build_critic_metadata(search_input)
+                result = results
+            elif isinstance(results, list):
+                result = SearchOutput(data=results)
+            else:
+                result = SearchOutput(data=getattr(results, "data", []))
         except Exception as e:
             logger.error("Attribute search failed: %s", e)
-            return SearchOutput(data=[]), _build_critic_metadata(search_input)
 
-    if not has_attributes and embed_search is not None:
+    elif not has_attributes and embed_search is not None:
         logger.info("Path 2: embed-only search")
         try:
             results = await embed_search()
             if isinstance(results, SearchOutput):
-                return results, _build_critic_metadata(search_input)
-            if hasattr(results, "data"):
-                return SearchOutput(data=results.data), _build_critic_metadata(search_input)
-            return SearchOutput(data=results if isinstance(results, list) else []), _build_critic_metadata(search_input)
+                result = results
+            elif hasattr(results, "data"):
+                result = SearchOutput(data=results.data)
+            else:
+                result = SearchOutput(data=results if isinstance(results, list) else [])
         except Exception as e:
             logger.error("Embed search failed: %s", e)
-            return SearchOutput(data=[]), _build_critic_metadata(search_input)
 
-    if has_action and has_attributes:
+    elif has_action and has_attributes:
         logger.info("Path 3: fusion search")
         embed_results: list[SearchResult] = []
         attr_results: list[SearchResult] = []
@@ -266,15 +263,14 @@ async def _execute_search_with_metadata(
                 merged[r.video_name] = r
         combined = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
         result = SearchOutput(data=combined)
-        metadata = await _run_search_critic(
-            search_input,
-            result,
-            config=config,
-            critic_agent=critic_agent,
-        )
-        return result, metadata
 
-    return SearchOutput(data=[]), _build_critic_metadata(search_input)
+    metadata = await _run_search_critic(
+        search_input,
+        result,
+        config=config,
+        critic_agent=critic_agent,
+    )
+    return result, metadata
 
 
 async def execute_search(
