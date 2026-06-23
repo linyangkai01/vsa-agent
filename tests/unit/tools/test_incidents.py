@@ -90,6 +90,7 @@ def test_search_output_to_incidents_preserves_video_metadata():
     assert incidents[0].metadata["end_time"] == "2026-06-19T10:20:07"
     assert incidents[0].metadata["sensor_id"] == "cam-04"
     assert incidents[0].metadata["screenshot_url"] == "shot.png"
+    assert incidents[0].metadata["object_ids"] == ["obj-1"]
 
 
 def test_incidents_to_tagged_json_wraps_payload():

@@ -50,6 +50,7 @@ def _search_result_to_incident(item: SearchResult, index: int) -> Incident:
             "start_time": item.start_time,
             "end_time": item.end_time,
             "screenshot_url": item.screenshot_url,
+            "object_ids": list(item.object_ids),
         },
     )
 
