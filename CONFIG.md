@@ -12,21 +12,25 @@ FastAPI, fastmcp, Pydantic v2, OpenCV, PyYAML.
 ## Commands
 
 ```powershell
-# Setup (requires network in sandbox)
-& .conda-env\python.exe -m pip install -e . --no-build-isolation
+# Create env
+conda create -n vsa-agent python=3.12 pip -y
+
+# Setup (run from repo root; requires network)
+conda activate vsa-agent
+python -m pip install -e ".[dev]" elasticsearch
 
 # Test (all)
-& .conda-env\python.exe -m pytest tests\unit -v
+python -m pytest tests\unit -v
 
 # Test (single file)
-& .conda-env\python.exe -m pytest tests\unit\agents\test_top_agent.py -v
+python -m pytest tests\unit\agents\test_top_agent.py -v
 
 # Lint
-ruff check src\
+python -m ruff check src\
 
 # Run
 $env:PYTHONPATH = "src"
-& .conda-env\python.exe -m vsa_agent.main
+python -m vsa_agent.main
 ```
 
 ## Architecture

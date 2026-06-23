@@ -9,8 +9,8 @@ from vsa_agent.api.rtsp_stream_api import router as rtsp_router
 from vsa_agent.api.video_delete import router as video_delete_router
 
 app = FastAPI(title='vsa-agent', description='Video Safety Analysis Agent')
-app.include_router(rtsp_router)
-app.include_router(video_delete_router)
+app.router.routes.extend(rtsp_router.routes)
+app.router.routes.extend(video_delete_router.routes)
 
 
 class ChatRequest(BaseModel):

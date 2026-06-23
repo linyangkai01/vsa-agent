@@ -1,3 +1,4 @@
+import httpx
 from langchain_openai import ChatOpenAI
 
 from vsa_agent.config import get_config
@@ -16,6 +17,8 @@ class OpenAIModelAdapter(BaseModelAdapter):
             api_key=dev.api_key if dev.api_key else None,
             temperature=0,
             max_retries=0,
+            http_client=httpx.Client(trust_env=False),
+            http_async_client=httpx.AsyncClient(trust_env=False),
         )
 
     async def invoke(self, messages):

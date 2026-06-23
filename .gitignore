@@ -9,6 +9,7 @@ _nvidia-original/
 .conda-env/
 .conda-pkgs/
 .pytest_cache/
+pytest-cache-files-*/
 .worktrees/
 
 
