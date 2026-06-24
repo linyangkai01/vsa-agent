@@ -64,6 +64,7 @@ def test_to_incidents_output_delegates_to_incident_serializer(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_search_agent_flow_builds_incidents_text_and_metadata(monkeypatch):
     from vsa_agent.agents.search_agent import execute_search_agent_flow
+    from vsa_agent.tools.search import DecomposedQuery
 
     called = {"incidents": False, "summary": False}
     incident = Incident(
@@ -93,6 +94,13 @@ async def test_execute_search_agent_flow_builds_incidents_text_and_metadata(monk
             ]
         )
 
+    async def fake_decompose_query(query, model_adapter):
+        return DecomposedQuery(
+            query=query,
+            attributes=[],
+            has_action=False,
+        )
+
     def fake_search_output_to_incidents(output):
         called["incidents"] = True
         assert output.data[0].description == "worker approaches gate"
@@ -110,6 +118,11 @@ async def test_execute_search_agent_flow_builds_incidents_text_and_metadata(monk
         raising=False,
     )
     monkeypatch.setattr(
+        "vsa_agent.agents.search_agent.decompose_query",
+        fake_decompose_query,
+        raising=False,
+    )
+    monkeypatch.setattr(
         "vsa_agent.agents.search_agent.summarize_search_incidents",
         fake_summarize_search_incidents,
         raising=False,
@@ -117,6 +130,7 @@ async def test_execute_search_agent_flow_builds_incidents_text_and_metadata(monk
 
     result = await execute_search_agent_flow(
         SearchAgentInput(query="worker approaches gate", use_critic=False),
+        model_adapter=object(),
         embed_search=fake_embed_search,
     )
 
@@ -127,6 +141,9 @@ async def test_execute_search_agent_flow_builds_incidents_text_and_metadata(monk
         "critic_requested": False,
         "critic_applied": False,
         "critic_error": None,
+        "decomposed_query": "worker approaches gate",
+        "decomposed_attributes": [],
+        "decomposed_has_action": False,
     }
     assert called["incidents"] is True
     assert called["summary"] is True
@@ -323,11 +340,12 @@ async def test_execute_search_agent_flow_marks_critic_applied_when_enabled(monke
     )
 
     assert result.search_output.data[0].video_name == "cam-21.mp4"
-    assert result.metadata == {
-        "critic_requested": True,
-        "critic_applied": True,
-        "critic_error": None,
-    }
+    assert result.metadata["critic_requested"] is True
+    assert result.metadata["critic_applied"] is True
+    assert result.metadata["critic_error"] is None
+    assert result.metadata["decomposed_query"] == "worker in blue jacket opens gate"
+    assert result.metadata["decomposed_attributes"] == ["worker in blue jacket"]
+    assert result.metadata["decomposed_has_action"] is True
 
 
 @pytest.mark.asyncio
@@ -394,11 +412,12 @@ async def test_execute_search_agent_flow_records_critic_error_and_continues(monk
 
     assert result.search_output.data[0].video_name == "cam-31.mp4"
     assert result.text_answer == "forklift enters aisle"
-    assert result.metadata == {
-        "critic_requested": True,
-        "critic_applied": False,
-        "critic_error": "critic unavailable",
-    }
+    assert result.metadata["critic_requested"] is True
+    assert result.metadata["critic_applied"] is False
+    assert result.metadata["critic_error"] == "critic unavailable"
+    assert result.metadata["decomposed_query"] == "forklift enters aisle"
+    assert result.metadata["decomposed_attributes"] == ["forklift"]
+    assert result.metadata["decomposed_has_action"] is True
 
 
 @pytest.mark.asyncio
@@ -470,11 +489,12 @@ async def test_execute_search_agent_flow_uses_requested_critic_on_default_config
     )
 
     assert critic_called is True
-    assert result.metadata == {
-        "critic_requested": True,
-        "critic_applied": True,
-        "critic_error": None,
-    }
+    assert result.metadata["critic_requested"] is True
+    assert result.metadata["critic_applied"] is True
+    assert result.metadata["critic_error"] is None
+    assert result.metadata["decomposed_query"] == "worker opens gate"
+    assert result.metadata["decomposed_attributes"] == ["worker"]
+    assert result.metadata["decomposed_has_action"] is True
 
 
 @pytest.mark.asyncio
@@ -543,11 +563,12 @@ async def test_execute_search_agent_flow_applies_critic_for_attribute_only_path(
 
     assert critic_calls
     assert critic_calls[0]["query"] == "person in red vest"
-    assert result.metadata == {
-        "critic_requested": True,
-        "critic_applied": True,
-        "critic_error": None,
-    }
+    assert result.metadata["critic_requested"] is True
+    assert result.metadata["critic_applied"] is True
+    assert result.metadata["critic_error"] is None
+    assert result.metadata["decomposed_query"] == "person in red vest"
+    assert result.metadata["decomposed_attributes"] == ["person in red vest"]
+    assert result.metadata["decomposed_has_action"] is False
 
 @pytest.mark.asyncio
 async def test_execute_search_agent_flow_applies_critic_for_embed_only_path(monkeypatch):
@@ -607,11 +628,12 @@ async def test_execute_search_agent_flow_applies_critic_for_embed_only_path(monk
 
     assert critic_calls
     assert critic_calls[0]["query"] == "forklift leaves loading dock"
-    assert result.metadata == {
-        "critic_requested": True,
-        "critic_applied": True,
-        "critic_error": None,
-    }
+    assert result.metadata["critic_requested"] is True
+    assert result.metadata["critic_applied"] is True
+    assert result.metadata["critic_error"] is None
+    assert result.metadata["decomposed_query"] == "forklift leaves loading dock"
+    assert result.metadata["decomposed_attributes"] == []
+    assert result.metadata["decomposed_has_action"] is True
 
 @pytest.mark.asyncio
 async def test_search_agent_tool_returns_text_answer_from_agent_flow(monkeypatch):

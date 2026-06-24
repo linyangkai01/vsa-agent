@@ -10,6 +10,8 @@ decompose_query + execute_core_search from tools/search.py.
 import json
 import logging
 
+from typing import Any
+
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -67,7 +69,7 @@ class SearchAgentExecutionResult(BaseModel):
     search_output: SearchOutput
     incidents: list[Incident] = Field(default_factory=list)
     text_answer: str = Field(default="")
-    metadata: dict[str, bool | str | None] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # ===== Presentation Converters =====
@@ -190,7 +192,7 @@ async def _execute_search_with_metadata(
     attribute_search=None,
     config: SearchAgentConfig | None = None,
     critic_agent=None,
-) -> tuple[SearchOutput, dict[str, bool | str | None]]:
+) -> tuple[SearchOutput, dict[str, bool | str | None], DecomposedQuery]:
     """Execute search and return internal critic metadata for orchestration flows."""
     if config is None:
         config = SearchAgentConfig(enable_critic=search_input.use_critic)
@@ -270,7 +272,7 @@ async def _execute_search_with_metadata(
         config=config,
         critic_agent=critic_agent,
     )
-    return result, metadata
+    return result, metadata, decomposed
 
 
 async def execute_search(
@@ -287,7 +289,7 @@ async def execute_search(
     - Path 2: embed-only (no attributes)
     - Path 3: fusion (has_action=True, attributes present)
     """
-    search_output, _ = await _execute_search_with_metadata(
+    search_output, _, _ = await _execute_search_with_metadata(
         search_input=search_input,
         model_adapter=model_adapter,
         embed_search=embed_search,
@@ -305,7 +307,7 @@ async def execute_search_agent_flow(
     critic_agent=None,
 ) -> SearchAgentExecutionResult:
     """Run internal search QA orchestration while preserving public search output."""
-    search_output, metadata = await _execute_search_with_metadata(
+    search_output, metadata, decomposed = await _execute_search_with_metadata(
         search_input=search_input,
         model_adapter=model_adapter,
         embed_search=embed_search,
@@ -313,6 +315,12 @@ async def execute_search_agent_flow(
         config=config,
         critic_agent=critic_agent,
     )
+    metadata = {
+        **metadata,
+        "decomposed_query": decomposed.query,
+        "decomposed_attributes": list(decomposed.attributes),
+        "decomposed_has_action": decomposed.has_action,
+    }
     incidents = search_output_to_incidents(search_output)
     text_answer = await summarize_search_incidents(incidents, search_input.query)
     return SearchAgentExecutionResult(

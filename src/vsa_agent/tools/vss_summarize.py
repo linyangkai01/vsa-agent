@@ -1,5 +1,8 @@
 """Summary layer for dual-track video understanding output."""
 
+from langchain_core.messages import HumanMessage
+from langchain_core.messages import SystemMessage
+
 from vsa_agent.data_models.understanding import DetectedEvent
 from vsa_agent.data_models.understanding import SummaryResult
 from vsa_agent.data_models.understanding import UnderstandingResult
@@ -98,7 +101,24 @@ async def summarize_understanding_result(
     model_adapter=None,
 ) -> SummaryResult:
     """Generate dual-track output from a structured understanding result."""
-    if result.summary_text:
+    if model_adapter is not None:
+        prompt_body = result.summary_text or _events_to_text(result.events) or "No notable events detected."
+        response = await model_adapter.invoke(
+            [
+                SystemMessage(content="You summarize structured video understanding results into concise plain text."),
+                HumanMessage(
+                    content=(
+                        f"User query: {query}\n\n"
+                        f"Structured summary:\n{prompt_body}\n\n"
+                        "Write a concise natural-language answer."
+                    )
+                ),
+            ]
+        )
+        text_output = str(response.content).strip() if response.content is not None else ""
+        if not text_output:
+            text_output = prompt_body
+    elif result.summary_text:
         text_output = result.summary_text
     elif result.events:
         text_output = _events_to_text(result.events)

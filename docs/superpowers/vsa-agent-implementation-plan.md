@@ -29,44 +29,18 @@
 | MCP Server | mcp/ | 完成 |
 | 测试框架 | tests/ | 完成 |
 
-### 未实现模块 (Gap)
+### 当前验证状态（2026-06-23）
 
-| 模块 | NVIDIA 文件 | 说明 | 优先级 |
-|------|------------|------|--------|
-| agents/multi_report_agent.py | multi_report_agent.py | 多事件报告 Agent | P2 |
-| agents/postprocessing/ | postprocessing/ | 后处理管道 | P2 |
-| tools/report_gen.py | report_gen.py | 报告生成工具 | P2 |
-| tools/template_report_gen.py | template_report_gen.py | 模板报告生成 | P2 |
-| tools/chart_generator.py | chart_generator.py | 图表生成 | P2 |
-| tools/fov_counts_with_chart.py | fov_counts_with_chart.py | FOV 计数+图表 | P2 |
-| tools/incidents.py | incidents.py | 事件管理 | P2 |
-| tools/geolocation.py | geolocation.py | 地理位置 | P2 |
-| tools/multi_incident_formatter.py | multi_incident_formatter.py | 多事件格式化 | P2 |
-| tools/video_caption.py | video_caption.py | 视频字幕 | P2 |
-| tools/video_detailed_caption.py | video_detailed_caption.py | 详细视频字幕 | P2 |
-| tools/video_skim_caption.py | video_skim_caption.py | 视频快速字幕 | P2 |
-| tools/video_frame_timestamp.py | video_frame_timestamp.py | 视频帧时间戳 | P2 |
-| tools/lvs_video_understanding.py | lvs_video_understanding.py | 长视频理解 | P1 |
-| tools/vss_summarize.py | vss_summarize.py | VSS 汇总 | P1 |
-| tools/prompt_gen.py | prompt_gen.py | VLM prompt 生成 | P1 |
-| embed/embed.py | embed.py | EmbedClient ABC | P1 |
-| embed/cosmos_embed.py | cosmos_embed.py | Cosmos 嵌入客户端 | P1 |
-| embed/rtvi_cv_embed.py | rtvi_cv_embed.py | RTVI CV 嵌入客户端 | P1 |
-| data_models/vss.py | vss.py | MediaInfoOffset/Incident | P1 |
-| utils/frame_select.py | frame_select.py | 帧选择 | P1 |
-| utils/time_convert.py | time_convert.py | 时间转换 | P1 |
-| utils/time_measure.py | time_measure.py | 时间测量 | P3 |
-| utils/url_translation.py | url_translation.py | URL 翻译 | P1 |
-| utils/reasoning_parsing.py | reasoning_parsing.py | 推理内容解析 | P1 |
-| utils/reasoning_utils.py | reasoning_utils.py | 推理工具 | P1 |
-| utils/markdown_parser.py | markdown_parser.py | Markdown 解析 | P3 |
-| utils/parser.py | parser.py | 通用解析 | P3 |
-| utils/video_file.py | video_file.py | 视频文件工具 | P3 |
-| utils/asyncmixin.py | asyncmixin.py | 异步初始化 | P1 |
-| api/rtsp_stream_api.py | rtsp_stream_api.py | RTSP 流管理 | P3 |
-| api/video_delete.py | video_delete.py | 视频删除 | P3 |
-| evaluators/ | evaluators/ | 评估框架 | P3 |
-| prompt.py | prompt.py | 独立 prompt 常量 | P1 |
+- [x] 已创建专用 `conda` 环境 `vsa-agent`
+- [x] 已完成环境安装：`python -m pip install -e ".[dev]" elasticsearch`
+- [x] 已修复 FastAPI 路由枚举兼容问题
+- [x] 已修复代理环境变量导致的 `httpx` / `ChatOpenAI` 初始化失败
+- [x] 已完成全量回归验证：`406 passed, 2 warnings`
+- [x] 已补齐 `evaluators/` 最小确定性评估框架：`4 passed`
+- [x] 已新增 evaluator fixture 回归入口与默认跳过的 live API 效果验证入口：`5 passed, 1 skipped`
+
+### 未实现模块 (Gap)
+无
 
 ### 需要去 NVIDIA 化的依赖
 
@@ -98,7 +72,7 @@
 ### Task 0.3: 补齐 embed/ 层
 - [ ] 实现 embed/embed.py (EmbedClient ABC)
 - [ ] 实现 embed/cosmos_embed.py (OpenAI 替代 Cosmos)
-- [ ] 实现 embed/rtvi_cv_embed.py (OpenAI 替代 RTVI CV)
+- [x] 实现 embed/rtvi_cv_embed.py (OpenAI 替代 RTVI CV)
 
 ### Task 0.4: 补齐 utils/ 工具函数
 - [ ] 实现 utils/frame_select.py
@@ -107,6 +81,9 @@
 - [ ] 实现 utils/reasoning_parsing.py
 - [ ] 实现 utils/reasoning_utils.py
 - [ ] 实现 utils/asyncmixin.py
+
+### Task 0.4A: 补齐视频帧时间戳工具
+- [x] 实现 tools/video_frame_timestamp.py
 
 ### Task 0.5: 更新 TopAgent 对齐 NVIDIA
 - [ ] 添加 plan-then-execute 模式
@@ -6102,78 +6079,6 @@ Expected: `PASS`
 - [x] Task 7.26 已完成：共享 time_measure 工具已补齐
 - [x] Task 7.27 已完成：video_understanding 已接入轻量计时工具
 - [x] Task 7.28 已完成：Phase 7A6 回归通过，待整理提交
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/superpowers/vsa-agent-implementation-plan.md
-git commit -m "docs: update phase7a6 execution status"
-```
-
-### 当前执行状态（2026-06-18）
-- [x] Task 7.26 已完成：共享 time_measure 工具已补齐
-- [x] Task 7.27 已完成：video_understanding 已接入轻量计时工具
-- [x] Task 7.28 已完成：Phase 7A6 回归通过，待整理提交
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/superpowers/vsa-agent-implementation-plan.md
-git commit -m "docs: update phase7a5 execution status"
-```
-
-### 当前执行状态（2026-06-18）
-- [x] Task 7.22 已完成：URL 翻译工具语义已补强
-- [x] Task 7.23 已完成：共享 video_file 工具已补齐
-- [x] Task 7.24 已完成：video_understanding 已接入共享文件源工具
-- [x] Task 7.25 已完成：Phase 7A5 回归通过，待整理提交
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/superpowers/vsa-agent-implementation-plan.md
-git commit -m "docs: update phase7a4 execution status"
-```
-
-### 当前执行状态（2026-06-18）
-- [x] Task 7.17 已完成：共享 parser 工具已补齐
-- [x] Task 7.18 已完成：共享 markdown parser 已补齐
-- [x] Task 7.19 已完成：critic agent 已接入共享 parser
-- [x] Task 7.20 已完成：报告 markdown 最小消费回归已补齐
-- [x] Task 7.21 已完成：Phase 7A4 回归通过，待整理提交
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/superpowers/vsa-agent-implementation-plan.md
-git commit -m "docs: update phase7a3 execution status"
-```
-
-### 当前执行状态（2026-06-18）
-- [x] Task 7.12 已完成：共享 async retry 契约已补强
-- [x] Task 7.13 已完成：BaseModelAdapter 已补充内部 retry 包装
-- [x] Task 7.14 已完成：OpenAIModelAdapter 已接入统一重试语义
-- [x] Task 7.15 已完成：VLLMModelAdapter 与流式异常传播语义已对齐
-- [x] Task 7.16 已完成：Phase 7A3 回归通过，待整理提交
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/superpowers/vsa-agent-implementation-plan.md
-git commit -m "docs: update phase7a2 execution status"
-```
-
-### 当前执行状态（2026-06-18）
-- [x] Task 7.7 已完成：VSS 数据模型兼容出口已补齐
-- [x] Task 7.8 已完成：时间转换公共接口已补齐
-- [x] Task 7.9 已完成：共享选帧逻辑已对齐
-- [x] Task 7.10 已完成：视频工具层已接回共享时间/选帧工具
-- [x] Task 7.11 已完成：Phase 7A2 回归通过，待整理提交
 
 ---
 
@@ -6597,7 +6502,7 @@ Expected: `PASS`
 - [ ] **Step 2: 更新本计划中的执行状态**
 
 ```markdown
-### 当前执行状态（2026-06-19）
+### 当前执行状态（2026-06-23）
 - [x] Task 8.6 已完成：检索问答闭环验收红灯已补齐
 - [x] Task 8.7 已完成：search_agent 已建立内部主链编排
 - [x] Task 8.8 已完成：critic 可选增强语义与 metadata 已收口
@@ -6612,14 +6517,6 @@ git add docs/superpowers/vsa-agent-implementation-plan.md
 git commit -m "docs: update phase8b1 execution status"
 ```
 
-### ???????2026-06-21?
-- [x] Task 8.6 ?????????????????
-- [x] Task 8.7 ????search_agent ?????????
-- [x] Task 8.8 ????critic ??????? metadata ???
-- [x] Task 8.9 ????incidents ? vss_summarize ?????????
-- [x] Task 8.10 ????Phase 8B1 ??????????
-- [x] ??????????? optional critic?attribute-only?embed-only?fusion ??? `use_critic=True` ???????
-- [x] `search_agent_tool()` ?????? `execute_search_agent_flow()`????????????????? `text_answer`
 ## Phase 8B1 自检
 
 - Spec 覆盖性
@@ -6630,4 +6527,7 @@ git commit -m "docs: update phase8b1 execution status"
 - 类型一致性
   - 计划统一以现有 `execute_search()`、`SearchOutput`、`search_output_to_incidents()` 为基础推进
   - 新增内部返回结构名固定为 `SearchAgentExecutionResult`
+
+
+
 

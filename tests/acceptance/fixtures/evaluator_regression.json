@@ -1,0 +1,100 @@
+[
+  {
+    "name": "understanding-basic",
+    "evaluator_type": "understanding",
+    "actual": {
+      "query": "what happened",
+      "source_type": "video_file",
+      "summary_text": "person enters loading area and stops near forklift",
+      "chunks": [],
+      "events": [
+        {
+          "event_id": "event-1",
+          "label": "loading area",
+          "description": "person stops near forklift",
+          "start_timestamp": "2026-06-19T10:00:00",
+          "end_timestamp": "2026-06-19T10:00:10",
+          "actors": [],
+          "objects": [],
+          "location_hint": null,
+          "severity": null,
+          "evidence": [
+            {
+              "source_type": "video_file",
+              "video_path": "clip.mp4",
+              "sensor_id": null,
+              "frame_indices": [],
+              "frame_timestamps": [],
+              "start_timestamp": null,
+              "end_timestamp": null
+            }
+          ]
+        }
+      ],
+      "metadata": {}
+    },
+    "expected": {
+      "summary_terms": ["person", "forklift"],
+      "events": [
+        {
+          "label": "loading area",
+          "description_terms": ["stops"],
+          "start_timestamp": null,
+          "end_timestamp": null
+        }
+      ]
+    },
+    "min_score": 1.0
+  },
+  {
+    "name": "search-basic",
+    "evaluator_type": "search",
+    "actual": {
+      "data": [
+        {
+          "video_name": "cam-01.mp4",
+          "description": "person enters loading area",
+          "start_time": "2026-06-19T10:00:00",
+          "end_time": "2026-06-19T10:00:10",
+          "sensor_id": "cam-01",
+          "screenshot_url": "",
+          "similarity": 0.91,
+          "object_ids": ["obj-1"]
+        }
+      ]
+    },
+    "expected": {
+      "hits": [
+        {
+          "video_name": "cam-01.mp4",
+          "description_terms": ["person", "loading area"],
+          "sensor_id": "cam-01",
+          "start_time": null,
+          "end_time": null
+        }
+      ]
+    },
+    "min_score": 1.0
+  },
+  {
+    "name": "report-basic",
+    "evaluator_type": "report",
+    "actual": {
+      "markdown": "# Report\n\n## Summary\nperson near forklift\n\n## Timeline\n- event"
+    },
+    "expected": {
+      "sections": [
+        {
+          "title": "Summary",
+          "required_terms": ["person"]
+        },
+        {
+          "title": "Timeline",
+          "required_terms": ["event"]
+        }
+      ],
+      "required_terms": ["forklift"]
+    },
+    "min_score": 1.0
+  }
+]

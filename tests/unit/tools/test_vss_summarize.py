@@ -27,6 +27,42 @@ async def test_summarize_understanding_result_returns_summary_result():
 
 
 @pytest.mark.anyio
+async def test_summarize_uses_model_adapter_when_provided():
+    from vsa_agent.tools.vss_summarize import summarize_understanding_result
+
+    calls = []
+
+    class FakeAdapter:
+        async def invoke(self, messages):
+            calls.append(messages)
+            return type("Response", (), {"content": "LLM summary about forklift activity"})()
+
+    result = UnderstandingResult(
+        query="what happened",
+        source_type="video_file",
+        summary_text="",
+        chunks=[],
+        events=[
+            DetectedEvent(
+                event_id="e1",
+                label="walking",
+                description="person walking near forklift",
+                start_timestamp="00:00:05",
+                end_timestamp="00:00:09",
+            )
+        ],
+    )
+    summary = await summarize_understanding_result(
+        result,
+        "what happened",
+        model_adapter=FakeAdapter(),
+    )
+
+    assert summary.text_output == "LLM summary about forklift activity"
+    assert calls
+
+
+@pytest.mark.anyio
 async def test_summarize_uses_default_text_when_summary_missing():
     from vsa_agent.tools.vss_summarize import summarize_understanding_result
 
