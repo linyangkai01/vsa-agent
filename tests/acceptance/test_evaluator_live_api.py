@@ -9,7 +9,19 @@ from vsa_agent.evaluators import evaluate_understanding_result
 
 
 def should_run_live_api_validation() -> bool:
-    return bool((os.getenv("OPENAI_API_KEY") or "").strip())
+    return bool(resolve_live_api_settings()["api_key"])
+
+
+def resolve_live_api_settings() -> dict[str, str | None]:
+    live_model = (os.getenv("LIVE_API_MODEL") or "").strip() or None
+    live_base_url = (os.getenv("LIVE_API_BASE_URL") or "").strip() or None
+    live_api_key = (os.getenv("LIVE_API_KEY") or "").strip() or None
+    openai_api_key = (os.getenv("OPENAI_API_KEY") or "").strip() or None
+    return {
+        "model_name": live_model,
+        "base_url": live_base_url,
+        "api_key": live_api_key or openai_api_key,
+    }
 
 
 def format_live_search_diagnostics(*, text_answer: str, metadata: dict, eval_score: float) -> str:
@@ -23,9 +35,36 @@ def format_live_search_diagnostics(*, text_answer: str, metadata: dict, eval_sco
 
 
 def test_live_api_validation_skips_without_required_env(monkeypatch):
+    monkeypatch.delenv("LIVE_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     assert should_run_live_api_validation() is False
+
+
+def test_resolve_live_api_settings_prefers_live_overrides(monkeypatch):
+    monkeypatch.setenv("LIVE_API_MODEL", "qwen-plus")
+    monkeypatch.setenv("LIVE_API_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("LIVE_API_KEY", "live-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    settings = resolve_live_api_settings()
+
+    assert settings["model_name"] == "qwen-plus"
+    assert settings["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert settings["api_key"] == "live-key"
+
+
+def test_resolve_live_api_settings_falls_back_to_openai_key(monkeypatch):
+    monkeypatch.delenv("LIVE_API_MODEL", raising=False)
+    monkeypatch.delenv("LIVE_API_BASE_URL", raising=False)
+    monkeypatch.delenv("LIVE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    settings = resolve_live_api_settings()
+
+    assert settings["model_name"] is None
+    assert settings["base_url"] is None
+    assert settings["api_key"] == "openai-key"
 
 
 def test_format_live_search_diagnostics_includes_key_fields():
@@ -47,7 +86,7 @@ def test_format_live_search_diagnostics_includes_key_fields():
 @pytest.mark.anyio
 async def test_live_api_understanding_quality():
     if not should_run_live_api_validation():
-        pytest.skip("OPENAI_API_KEY not configured for live API validation")
+        pytest.skip("LIVE_API_KEY or OPENAI_API_KEY not configured for live API validation")
 
     from vsa_agent.tools.vss_summarize import summarize_understanding_result
     from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
@@ -59,10 +98,11 @@ async def test_live_api_understanding_quality():
         chunks=[],
         events=[],
     )
+    settings = resolve_live_api_settings()
     summary = await summarize_understanding_result(
         actual,
         "what happened",
-        model_adapter=OpenAIModelAdapter(model_name="gpt-4o"),
+        model_adapter=OpenAIModelAdapter(**settings),
     )
     result = evaluate_understanding_result(
         summary.structured_output.model_copy(update={"summary_text": summary.text_output}),
@@ -77,7 +117,7 @@ async def test_live_api_understanding_quality():
 @pytest.mark.anyio
 async def test_live_api_search_agent_query_decomposition_quality():
     if not should_run_live_api_validation():
-        pytest.skip("OPENAI_API_KEY not configured for live API validation")
+        pytest.skip("LIVE_API_KEY or OPENAI_API_KEY not configured for live API validation")
 
     from vsa_agent.agents.search_agent import SearchAgentInput
     from vsa_agent.agents.search_agent import execute_search_agent_flow
@@ -101,9 +141,10 @@ async def test_live_api_search_agent_query_decomposition_quality():
             ]
         )
 
+    settings = resolve_live_api_settings()
     result = await execute_search_agent_flow(
         SearchAgentInput(query="find a person walking near a forklift", use_critic=False),
-        model_adapter=OpenAIModelAdapter(model_name="gpt-4o"),
+        model_adapter=OpenAIModelAdapter(**settings),
         embed_search=fake_embed_search,
     )
     eval_result = evaluate_search_output(

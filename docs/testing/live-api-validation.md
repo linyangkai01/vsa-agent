@@ -11,7 +11,10 @@ This document explains how to run the evaluator regression entry and the opt-in 
 
 ## Required Environment
 
-Set `OPENAI_API_KEY` before running live validation.
+Live API validation can run in two ways:
+
+- Default OpenAI path: set `OPENAI_API_KEY`
+- Provider override path: set `LIVE_API_KEY`, and optionally `LIVE_API_BASE_URL` and `LIVE_API_MODEL`
 
 Optional:
 
@@ -37,6 +40,17 @@ $env:OPENAI_API_KEY='sk-...'
 conda run -n vsa-agent python -m pytest tests/acceptance/test_evaluator_live_api.py -q
 ```
 
+DashScope-compatible live API validation:
+
+```powershell
+$env:CONDA_NO_PLUGINS='true'
+$env:PYTHONIOENCODING='utf-8'
+$env:LIVE_API_KEY='your-dashscope-key'
+$env:LIVE_API_BASE_URL='https://dashscope.aliyuncs.com/compatible-mode/v1'
+$env:LIVE_API_MODEL='qwen-plus'
+conda run -n vsa-agent python -m pytest tests/acceptance/test_evaluator_live_api.py -q
+```
+
 Combined acceptance validation:
 
 ```powershell
@@ -47,8 +61,9 @@ conda run -n vsa-agent python -m pytest tests/acceptance/test_evaluator_regressi
 
 ## Expected Results
 
-- Without `OPENAI_API_KEY`, live API tests should `skip` rather than fail.
-- With `OPENAI_API_KEY`, live API tests should execute real model calls.
+- Without `LIVE_API_KEY` or `OPENAI_API_KEY`, live API tests should `skip` rather than fail.
+- With `OPENAI_API_KEY`, live API tests should execute real model calls against the default OpenAI path.
+- With `LIVE_API_KEY`, live API tests should prefer the `LIVE_API_*` provider override values.
 - Offline regression should remain stable regardless of live API availability.
 
 ## What Live API Tests Validate
