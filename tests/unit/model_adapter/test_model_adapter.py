@@ -37,6 +37,41 @@ class TestOpenAIModelAdapter:
         assert hasattr(adapter, "llm")
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    def test_explicit_runtime_overrides_take_precedence(self, chat_openai_cls, monkeypatch):
+        from vsa_agent.config import AppConfig
+        from vsa_agent.config import ModelConfig
+        from vsa_agent.config import ModelDevConfig
+        from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+        chat_openai_cls.return_value = MagicMock()
+        monkeypatch.setattr(
+            "vsa_agent.model_adapter.openai_adapter.get_config",
+            lambda: AppConfig(
+                model=ModelConfig(
+                    mode="dev",
+                    dev=ModelDevConfig(
+                        provider="openai_compatible",
+                        base_url="https://config.example/v1",
+                        api_key="config-key",
+                        llm_model="config-model",
+                        vlm_model="config-vlm",
+                    ),
+                )
+            ),
+        )
+
+        OpenAIModelAdapter(
+            model_name="override-model",
+            base_url="https://override.example/v1",
+            api_key="override-key",
+        )
+
+        kwargs = chat_openai_cls.call_args.kwargs
+        assert kwargs["model"] == "override-model"
+        assert kwargs["base_url"] == "https://override.example/v1"
+        assert kwargs["api_key"] == "override-key"
+
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_blank_api_key_is_treated_as_unset(self, chat_openai_cls, monkeypatch):
         from vsa_agent.config import AppConfig
         from vsa_agent.config import ModelConfig
@@ -61,6 +96,35 @@ class TestOpenAIModelAdapter:
         )
 
         OpenAIModelAdapter(model_name="qwen-plus")
+
+        kwargs = chat_openai_cls.call_args.kwargs
+        assert kwargs["api_key"] is None
+
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    def test_runtime_blank_api_key_is_treated_as_unset(self, chat_openai_cls, monkeypatch):
+        from vsa_agent.config import AppConfig
+        from vsa_agent.config import ModelConfig
+        from vsa_agent.config import ModelDevConfig
+        from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+        chat_openai_cls.return_value = MagicMock()
+        monkeypatch.setattr(
+            "vsa_agent.model_adapter.openai_adapter.get_config",
+            lambda: AppConfig(
+                model=ModelConfig(
+                    mode="dev",
+                    dev=ModelDevConfig(
+                        provider="openai_compatible",
+                        base_url="https://config.example/v1",
+                        api_key="config-key",
+                        llm_model="config-model",
+                        vlm_model="config-vlm",
+                    ),
+                )
+            ),
+        )
+
+        OpenAIModelAdapter(api_key="")
 
         kwargs = chat_openai_cls.call_args.kwargs
         assert kwargs["api_key"] is None

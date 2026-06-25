@@ -8,13 +8,19 @@ from vsa_agent.model_adapter.base import BaseModelAdapter
 class OpenAIModelAdapter(BaseModelAdapter):
     """Adapter using OpenAI API (dev mode)."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         config = get_config()
         dev = config.model.dev
+        resolved_api_key = api_key if api_key is not None else dev.api_key
         self.llm = ChatOpenAI(
             model=model_name or dev.llm_model,
-            base_url=dev.base_url,
-            api_key=dev.api_key if dev.api_key else None,
+            base_url=base_url or dev.base_url,
+            api_key=resolved_api_key if resolved_api_key else None,
             temperature=0,
             max_retries=0,
             http_client=httpx.Client(trust_env=False),
