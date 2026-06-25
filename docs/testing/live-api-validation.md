@@ -51,6 +51,21 @@ $env:LIVE_API_MODEL='qwen-plus'
 conda run -n vsa-agent python -m pytest tests/acceptance/test_evaluator_live_api.py -q
 ```
 
+Ubuntu DashScope one-command runner:
+
+```bash
+export DASHSCOPE_API_KEY="your-dashscope-key"
+# Optional model overrides:
+export DASHSCOPE_LLM_MODEL="qwen-plus"
+export DASHSCOPE_VLM_MODEL="qwen3-vl-plus"
+bash scripts/run_live_acceptance_dashscope.sh
+```
+
+The runner uses `config_live_dashscope.yaml`, maps `DASHSCOPE_API_KEY` into `LIVE_API_KEY`,
+maps `DASHSCOPE_LLM_MODEL` into `LIVE_API_MODEL`, and runs
+`tests/acceptance/test_evaluator_live_api.py`. Only `DASHSCOPE_API_KEY` is required; the LLM
+and VLM model variables have script defaults.
+
 Combined acceptance validation:
 
 ```powershell

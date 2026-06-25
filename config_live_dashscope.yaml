@@ -1,0 +1,27 @@
+model:
+  mode: dev
+  dev:
+    provider: openai_compatible
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: ""
+    llm_model: qwen-plus
+    vlm_model: qwen3-vl-plus
+  prod:
+    provider: vllm
+    base_url: http://localhost:8000/v1
+    api_key: ""
+    llm_model: Qwen3-VL-8B-Instruct
+    vlm_model: Qwen3-VL-8B-Instruct
+agent:
+  max_iterations: 15
+tools:
+  enabled_modules:
+    - vsa_agent.tools.echo_tool
+server:
+  host: 0.0.0.0
+  port: 8000
+prompts:
+  default_system: "DashScope live acceptance validation."
+  safety_routine_inspection: "Check industrial safety issues."
+  safety_incident_investigation: "Reconstruct the incident timeline."
+  vlm_format_instruction: "Do not invent details that are not present in the input."
