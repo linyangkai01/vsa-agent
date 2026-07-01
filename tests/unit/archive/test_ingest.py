@@ -36,6 +36,30 @@ def _write_run(run_dir: Path) -> None:
     )
 
 
+def _write_run_with_tool_result_only_keyword(run_dir: Path) -> None:
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "tool-result-run",
+                "video_path": "/data/project/lyk/video/tool-result.mp4",
+                "started_at": "2026-07-01T10:26:52",
+                "ended_at": "2026-07-01T10:28:51",
+                "qa": {"status": "success"},
+                "report": {"status": "success"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    tool_results = run_dir / "tool-results"
+    tool_results.mkdir()
+    (tool_results / "video-understanding.json").write_text(
+        json.dumps({"summary_text": "A forklift crosses the loading dock."}),
+        encoding="utf-8",
+    )
+    (tool_results / "ignore.bin").write_bytes(b"not searched")
+
+
 def test_build_record_from_live_run_extracts_searchable_fields(tmp_path: Path):
     run_dir = tmp_path / "20260701-102652"
     _write_run(run_dir)
@@ -51,6 +75,19 @@ def test_build_record_from_live_run_extracts_searchable_fields(tmp_path: Path):
     assert record.metadata["mode"] == "graph"
     assert record.metadata["qa_status"] == "success"
     assert record.metadata["report_status"] == "success"
+
+
+def test_build_record_from_live_run_includes_selected_tool_result_text(tmp_path: Path):
+    run_dir = tmp_path / "tool-result-run"
+    _write_run_with_tool_result_only_keyword(run_dir)
+
+    record = build_record_from_live_run(run_dir)
+
+    assert "forklift crosses" in record.search_text
+    assert "forklift" in record.object_ids
+    assert record.metadata["tool_result_paths"] == [
+        str(run_dir / "tool-results" / "video-understanding.json")
+    ]
 
 
 def test_ingest_live_run_writes_archive_index(tmp_path: Path):

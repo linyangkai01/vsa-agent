@@ -20,11 +20,33 @@ KNOWN_TAGS = (
     "warehouse",
 )
 
+TOOL_RESULT_SUFFIXES = {".json", ".md", ".txt"}
+MAX_TOOL_RESULT_BYTES = 256_000
+
 
 def _read_text(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _read_tool_result_texts(run_dir: Path) -> tuple[list[str], list[str]]:
+    tool_results = run_dir / "tool-results"
+    if not tool_results.exists():
+        return [], []
+
+    texts: list[str] = []
+    paths: list[str] = []
+    for path in sorted(tool_results.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in TOOL_RESULT_SUFFIXES:
+            continue
+        if path.stat().st_size > MAX_TOOL_RESULT_BYTES:
+            continue
+        text = _read_text(path)
+        if text:
+            texts.append(text)
+            paths.append(str(path))
+    return texts, paths
 
 
 def _load_manifest(run_dir: Path) -> dict:
@@ -52,13 +74,16 @@ def build_record_from_live_run(run_dir: str | Path) -> ArchiveRecord:
     manifest = _load_manifest(path)
     qa_text = _read_text(path / "qa-final.txt")
     report_text = _read_text(path / "report-final.txt")
+    tool_result_texts, tool_result_paths = _read_tool_result_texts(path)
 
     video_path = str(manifest.get("video_path", ""))
     video_name = Path(video_path).name or "unknown-video"
     sensor_id = Path(video_name).stem or video_name
     run_id = str(manifest.get("run_id") or path.name)
     search_text = "\n\n".join(
-        part for part in [qa_text, report_text, json.dumps(manifest, ensure_ascii=False)] if part
+        part
+        for part in [qa_text, report_text, *tool_result_texts, json.dumps(manifest, ensure_ascii=False)]
+        if part
     )
 
     return ArchiveRecord(
@@ -82,6 +107,7 @@ def build_record_from_live_run(run_dir: str | Path) -> ArchiveRecord:
             "manifest_path": str(path / "manifest.json"),
             "qa_path": str(path / "qa-final.txt") if (path / "qa-final.txt").exists() else "",
             "report_path": str(path / "report-final.txt") if (path / "report-final.txt").exists() else "",
+            "tool_result_paths": tool_result_paths,
         },
     )
 

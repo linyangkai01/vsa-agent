@@ -48,3 +48,15 @@ def test_archive_search_cli_prints_search_output(tmp_path: Path, capsys):
 
     assert exit_code == 0
     assert output["data"][0]["video_name"] == "warehouse.mp4"
+
+
+def test_archive_ingest_cli_returns_clear_error_for_missing_manifest(tmp_path: Path, capsys):
+    run_dir = tmp_path / "missing-manifest"
+    run_dir.mkdir()
+
+    exit_code = main(["archive", "ingest", str(run_dir), "--index", str(tmp_path / "index.jsonl")])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "ERROR:" in captured.err
+    assert "manifest.json" in captured.err

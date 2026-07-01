@@ -36,7 +36,11 @@ def _config_doctor(path: str) -> int:
 
 
 def _archive_ingest(run_dir: str, index_path: str) -> int:
-    record = ingest_live_run(run_dir, index_path)
+    try:
+        record = ingest_live_run(run_dir, index_path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     print(
         json.dumps(
             {
@@ -55,7 +59,11 @@ def _archive_search(query: str, index_path: str, top_k: int) -> int:
         output = await LocalArchiveSearchStore(index_path).search(query=query, top_k=top_k)
         return output.model_dump()
 
-    print(json.dumps(asyncio.run(_run()), ensure_ascii=False))
+    try:
+        print(json.dumps(asyncio.run(_run()), ensure_ascii=False))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
