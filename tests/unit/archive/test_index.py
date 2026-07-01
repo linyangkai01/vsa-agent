@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from vsa_agent.archive.index import read_archive_index
 from vsa_agent.archive.index import upsert_archive_records
