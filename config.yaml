@@ -1,17 +1,45 @@
-model:
-  mode: dev
-  dev:
+active_profile: dashscope_remote
+backends:
+  dashscope:
     provider: openai_compatible
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    llm_model: qwen-plus
-    vlm_model: qwen3-vl-plus
-    api_key: ""
-  prod:
+    api_key_env: DASHSCOPE_API_KEY
+  local_vllm:
     provider: vllm
     base_url: http://localhost:8000/v1
-    api_key: ''
-    llm_model: Qwen3-VL-8B-Instruct
-    vlm_model: Qwen3-VL-8B-Instruct
+    api_key_env: VLLM_API_KEY
+    api_key_required: false
+  test_openai:
+    provider: openai_compatible
+    base_url: https://api.openai.com/v1
+    api_key_required: false
+profiles:
+  dashscope_remote:
+    llm:
+      backend: dashscope
+      model: qwen3.7-plus
+    vlm:
+      backend: dashscope
+      model: qwen3-vl-flash-2025-10-15
+  hybrid_dashscope_llm_local_vlm:
+    llm:
+      backend: dashscope
+      model: qwen3.7-plus
+    vlm:
+      backend: local_vllm
+      model: Qwen3-VL-8B-Instruct
+  test:
+    llm:
+      backend: test_openai
+      model: gpt-4o
+    vlm:
+      backend: test_openai
+      model: gpt-4o
+runtime:
+  conda_env: vsa-agent
+  video_path: /data/project/lyk/video/1597042367-1-192.mp4
+  trace_dir: artifacts/live-video-runs
+  qa_query: Describe what happened in this video and identify any safety risks.
 agent:
   max_iterations: 15
 tools:
@@ -63,3 +91,20 @@ prompts:
   safety_incident_investigation: You are an industrial safety investigation system.
     Reconstruct incident timeline.
   vlm_format_instruction: DON'T MAKE UP ANYTHING NOT FROM THE VIDEO. DON'T HALLUCINATE.
+video_understanding:
+  max_fps: 2.0
+  min_pixels: 50176
+  max_pixels: 921600
+  reasoning_effort: medium
+  filter_thinking: true
+  max_retries: 3
+  time_format: iso
+  source_mode: local
+  translated_base_dir: C:/mounted-video-store
+  vst_sensor_source_map:
+    camera-1: rtsp://camera-1/stream
+lvs_video_understanding:
+  chunk_duration_sec: 30
+  max_frames_per_chunk: 8
+  max_chunks:
+  merge_adjacent_events: true

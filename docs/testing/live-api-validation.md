@@ -19,7 +19,11 @@ Live API validation can run in two ways:
 Optional:
 
 - `VSA_CONFIG`
-  Override config path if you want to point at a non-default test config.
+  Override config path only for unusual experiments. Normal development and tests use `config.yaml`.
+- `VSA_PROFILE`
+  Select the runtime profile inside `config.yaml`. The DashScope runners default to `dashscope_remote`.
+- `VSA_LIVE_TRACE_PATH`
+  Write opt-in JSONL replay logs for real model calls and search-tool orchestration.
 
 ## Commands
 
@@ -28,8 +32,12 @@ Offline regression only:
 ```powershell
 $env:CONDA_NO_PLUGINS='true'
 $env:PYTHONIOENCODING='utf-8'
+$env:VSA_PROFILE='test'
 conda run -n vsa-agent python -m pytest tests/acceptance/test_evaluator_regression.py -q
 ```
+
+During development close-out, use the `test` profile from `config.yaml` for business-flow
+validation. This keeps development verification config-driven without extra `.env` files.
 
 Live API validation only:
 
@@ -54,17 +62,123 @@ conda run -n vsa-agent python -m pytest tests/acceptance/test_evaluator_live_api
 Ubuntu DashScope one-command runner:
 
 ```bash
-export DASHSCOPE_API_KEY="your-dashscope-key"
-# Optional model overrides:
-export DASHSCOPE_LLM_MODEL="qwen-plus"
-export DASHSCOPE_VLM_MODEL="qwen3-vl-plus"
+# put your key in ignored config.local.yaml, or export DASHSCOPE_API_KEY here
 bash scripts/run_live_acceptance_dashscope.sh
 ```
 
-The runner uses `config_live_dashscope.yaml`, maps `DASHSCOPE_API_KEY` into `LIVE_API_KEY`,
-maps `DASHSCOPE_LLM_MODEL` into `LIVE_API_MODEL`, and runs
-`tests/acceptance/test_evaluator_live_api.py`. Only `DASHSCOPE_API_KEY` is required; the LLM
-and VLM model variables have script defaults.
+During the current experiment stage, live validation uses Bailian/DashScope remote APIs by
+default. The runner uses `config.yaml` as the single source of truth, checks it
+with `python -m vsa_agent config doctor`, prints the redacted resolved config, maps
+the resolved profile key into the live test key, and reads the LLM model/base URL from the active
+`dashscope_remote` profile. Change model names in YAML, not in shell environment variables.
+
+By default, the runner also writes replayable live trace logs to:
+
+```bash
+artifacts/live-traces/dashscope-live-acceptance.jsonl
+```
+
+Override the path when you want separate runs:
+
+```bash
+export VSA_LIVE_TRACE_PATH="artifacts/live-traces/dashscope-qwen-plus.jsonl"
+bash scripts/run_live_acceptance_dashscope.sh
+```
+
+The trace is JSONL: one event per line. It records model request/response events and
+search-agent events such as `search_agent.decompose_query`, `search_agent.embed_search`,
+`search_agent.attribute_search`, and `search_agent.answer`. API keys and other secret-like
+fields are redacted before writing.
+
+## Real Video Validation Commands
+
+Shared mode:
+
+```bash
+cd /data/project/lyk/vsa-agent
+unset VSA_LIVE_VIDEO_MODE
+bash scripts/run_live_top_agent_video_dashscope.sh
+LATEST_RUN="$(ls -td artifacts/live-video-runs/* | head -1)"
+conda run -n vsa-agent python -m vsa_agent validate-run "$LATEST_RUN"
+```
+
+Graph mode:
+
+```bash
+cd /data/project/lyk/vsa-agent
+export VSA_LIVE_VIDEO_MODE=graph
+bash scripts/run_live_top_agent_video_dashscope.sh
+LATEST_RUN="$(ls -td artifacts/live-video-runs/* | head -1)"
+conda run -n vsa-agent python -m vsa_agent validate-run "$LATEST_RUN"
+```
+
+Validator PASS means required files, trace events, model/profile fields, and
+flow statuses are present. It does not automatically mean the run was cheap or
+high quality. Inspect `model_call_count`, `vlm_call_count`, `total_tokens`,
+`lvs_completed_count`, and warnings.
+
+## Real Video Acceptance
+
+Run video QA and report-generation validation against a local video. Store the API
+key in ignored `config.local.yaml` or export it in the shell:
+
+```bash
+# edit config.yaml when you want to change backend/model/video_path/QA query
+# edit config.local.yaml when you want to store a local API key
+bash scripts/run_live_top_agent_video_dashscope.sh
+```
+
+Before running the video flow, inspect the final resolved runtime configuration:
+
+```bash
+python -m vsa_agent config doctor --config config.yaml
+python -m vsa_agent config print --config config.yaml
+```
+
+`config.yaml` is the single source of truth for video acceptance
+backends, profiles, LLM/VLM model names, `runtime.video_path`, trace directory, and default
+QA query. Keep secrets outside the repository by exporting them in the shell, for example
+`DASHSCOPE_API_KEY`, or by storing them in ignored `config.local.yaml`. Optional
+runner-only environment variables such as `VSA_CONDA_ENV` can also be exported in the
+shell when needed.
+
+With a custom QA query:
+
+```bash
+bash scripts/run_live_top_agent_video_dashscope.sh /path/to/video.mp4 \
+  "Describe what happened in this video and identify any safety risks."
+```
+
+Outputs are written under `artifacts/live-video-runs/<run_id>/`, including
+`manifest.json`, `trace.jsonl`, `qa-final.txt`, `report-final.txt`, optional
+`report.md`, `frames/`, and `tool-results/`.
+
+Current boundary: this runner uses one shared `video_understanding` pass and then
+reuses the result for QA and `report_agent`. It validates DashScope connectivity,
+LLM/VLM profile resolution, long-video chunking, artifacts, QA output, and report
+generation.
+
+To exercise the autonomous TopAgent graph path, set `VSA_LIVE_VIDEO_MODE=graph`:
+
+```bash
+export VSA_LIVE_VIDEO_MODE=graph
+bash scripts/run_live_top_agent_video_dashscope.sh
+```
+
+Graph mode runs separate QA and report prompts through the TopAgent graph and writes
+the same run directory shape. Inspect `trace.jsonl` for `top_agent.agent.request`,
+`top_agent.agent.response`, `top_agent.tool.call`, `top_agent.tool.result`, and
+`top_agent.final` events.
+
+Validate a completed run directory:
+
+```bash
+python -m vsa_agent validate-run artifacts/live-video-runs/<run_id>
+```
+
+The validator reads `manifest.json` and `trace.jsonl`, checks required output files,
+model/profile metadata, QA/report statuses, video-understanding evidence, and
+mode-specific business-flow events. It exits `0` on pass and `1` on fail.
 
 Combined acceptance validation:
 

@@ -13,9 +13,9 @@ from vsa_agent.tools.video_report_gen import generate_video_report
 async def test_generate_video_report_returns_markdown_and_download_metadata():
     result = await generate_video_report(
         sensor_id="camera-1",
-        user_query="生成详细报告",
+        user_query="generate detailed report",
         understanding_result={
-            "query": "生成详细报告",
+            "query": "generate detailed report",
             "source_type": "rtsp",
             "summary_text": "person walking near forklift",
             "chunks": [],
@@ -24,7 +24,7 @@ async def test_generate_video_report_returns_markdown_and_download_metadata():
     )
 
     assert isinstance(result, VideoReportGenOutput)
-    assert result.markdown_content.startswith("# ")
+    assert result.markdown_content.startswith("# Video Analysis Report")
     assert result.downloads["markdown"]["filename"].endswith(".md")
 
 
@@ -32,9 +32,9 @@ async def test_generate_video_report_returns_markdown_and_download_metadata():
 async def test_generate_video_report_uses_fixed_sections():
     result = await generate_video_report(
         sensor_id="camera-1",
-        user_query="生成详细报告",
+        user_query="generate detailed report",
         understanding_result={
-            "query": "生成详细报告",
+            "query": "generate detailed report",
             "source_type": "rtsp",
             "summary_text": "person walking near forklift",
             "chunks": [],
@@ -42,21 +42,21 @@ async def test_generate_video_report_uses_fixed_sections():
         },
     )
 
-    assert result.markdown_content.startswith("# 单视频分析报告")
-    assert "## 视频源" in result.markdown_content
-    assert "## 用户问题" in result.markdown_content
-    assert "## 摘要" in result.markdown_content
-    assert "## 事件时间线" in result.markdown_content
-    assert "- 无结构化事件" in result.markdown_content
+    assert result.markdown_content.startswith("# Video Analysis Report")
+    assert "## Video Source" in result.markdown_content
+    assert "## User Question" in result.markdown_content
+    assert "## Summary" in result.markdown_content
+    assert "## Event Timeline" in result.markdown_content
+    assert "- No structured events" in result.markdown_content
 
 
 @pytest.mark.anyio
 async def test_generate_video_report_formats_event_timeline():
     result = await generate_video_report(
         sensor_id="camera-1",
-        user_query="生成详细报告",
+        user_query="generate detailed report",
         understanding_result={
-            "query": "生成详细报告",
+            "query": "generate detailed report",
             "source_type": "rtsp",
             "summary_text": "person walking near forklift",
             "chunks": [],
@@ -79,30 +79,7 @@ def test_generate_video_report_is_registered_as_tool():
 
 @pytest.mark.anyio
 async def test_generate_video_report_accepts_report_section():
-    section = ReportSection(
-        section_id="section-1",
-        section_title="事件 1 - camera-1",
-        source_name="camera-1",
-        source_type="rtsp",
-        user_query="生成详细报告",
-        summary_text="forklift stops near doorway",
-        understanding_result=UnderstandingResult(
-            query="生成详细报告",
-            source_type="rtsp",
-            summary_text="forklift stops near doorway",
-            chunks=[],
-            events=[
-                DetectedEvent(
-                    event_id="event-1",
-                    label="vehicle",
-                    description="forklift stops near doorway",
-                    start_timestamp="00:00:05",
-                    end_timestamp="00:00:09",
-                    evidence=[EvidenceRef(source_type="rtsp", sensor_id="camera-1")],
-                )
-            ],
-        ),
-    )
+    section = _make_report_section()
 
     result = await generate_video_report(report_section=section)
 
@@ -112,34 +89,11 @@ async def test_generate_video_report_accepts_report_section():
 
 @pytest.mark.anyio
 async def test_generate_video_report_accepts_structured_report():
-    section = ReportSection(
-        section_id="section-1",
-        section_title="事件 1 - camera-1",
-        source_name="camera-1",
-        source_type="rtsp",
-        user_query="生成详细报告",
-        summary_text="forklift stops near doorway",
-        understanding_result=UnderstandingResult(
-            query="生成详细报告",
-            source_type="rtsp",
-            summary_text="forklift stops near doorway",
-            chunks=[],
-            events=[
-                DetectedEvent(
-                    event_id="event-1",
-                    label="vehicle",
-                    description="forklift stops near doorway",
-                    start_timestamp="00:00:05",
-                    end_timestamp="00:00:09",
-                    evidence=[EvidenceRef(source_type="rtsp", sensor_id="camera-1")],
-                )
-            ],
-        ),
-    )
+    section = _make_report_section()
     structured_report = StructuredReport(
         report_title="report-title",
         report_type="single_video",
-        user_query="生成详细报告",
+        user_query="generate detailed report",
         sections=[section],
     )
 
@@ -154,17 +108,17 @@ async def test_generate_video_report_renders_validation_feedback_section():
     structured_report = StructuredReport(
         report_title="report-title",
         report_type="single_video",
-        user_query="生成详细报告",
+        user_query="generate detailed report",
         sections=[
             ReportSection(
                 section_id="section-1",
-                section_title="事件 - camera-1",
+                section_title="event - camera-1",
                 source_name="camera-1",
                 source_type="rtsp",
-                user_query="生成详细报告",
+                user_query="generate detailed report",
                 summary_text="",
                 understanding_result=UnderstandingResult(
-                    query="生成详细报告",
+                    query="generate detailed report",
                     source_type="rtsp",
                     summary_text="",
                     chunks=[],
@@ -178,5 +132,32 @@ async def test_generate_video_report_renders_validation_feedback_section():
 
     result = await generate_video_report(structured_report=structured_report)
 
-    assert "## 校验反馈" in result.markdown_content
+    assert "## Validation Feedback" in result.markdown_content
     assert "- [non_empty_response_validator] FAILED: Response is empty" in result.markdown_content
+
+
+def _make_report_section() -> ReportSection:
+    return ReportSection(
+        section_id="section-1",
+        section_title="event 1 - camera-1",
+        source_name="camera-1",
+        source_type="rtsp",
+        user_query="generate detailed report",
+        summary_text="forklift stops near doorway",
+        understanding_result=UnderstandingResult(
+            query="generate detailed report",
+            source_type="rtsp",
+            summary_text="forklift stops near doorway",
+            chunks=[],
+            events=[
+                DetectedEvent(
+                    event_id="event-1",
+                    label="vehicle",
+                    description="forklift stops near doorway",
+                    start_timestamp="00:00:05",
+                    end_timestamp="00:00:09",
+                    evidence=[EvidenceRef(source_type="rtsp", sensor_id="camera-1")],
+                )
+            ],
+        ),
+    )

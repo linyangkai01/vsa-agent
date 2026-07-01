@@ -14,6 +14,8 @@ from langgraph.graph.state import CompiledStateGraph
 
 from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType, AgentState
 from vsa_agent.config import get_config
+from vsa_agent.observability.live_trace import write_live_text_artifact
+from vsa_agent.observability.live_trace import write_live_trace_event
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,11 @@ _INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter",
                      "kwargs", "args", "kwds"}
 
 _MAX_TOOL_RESULT_CHARS = 800
+_HIDDEN_LANGCHAIN_TOOLS = {
+    # report_agent owns this lower-level formatter. Exposing it directly causes
+    # models to pass ReportSection fields as unsupported top-level kwargs.
+    "video_report_gen",
+}
 
 
 def _build_tool_schema(fn) -> type[BaseModel] | None:
@@ -48,6 +55,8 @@ def _build_langchain_tools() -> list[StructuredTool]:
     tools = ToolRegistry.get_all()
     lc_tools = []
     for name, fn in tools.items():
+        if name in _HIDDEN_LANGCHAIN_TOOLS:
+            continue
         schema = _build_tool_schema(fn)
         description = getattr(fn, "_tool_description", "") or fn.__doc__ or ""
 
@@ -109,8 +118,24 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
     if lc_tools:
         adapter.bind_tools(lc_tools)
 
+    write_live_trace_event(
+        "top_agent.agent.request",
+        {
+            "iteration": state.iteration_count + 1,
+            "messages": prompt,
+            "tool_count": len(lc_tools),
+        },
+    )
     response = await adapter.invoke(prompt)
     state.iteration_count += 1
+    write_live_trace_event(
+        "top_agent.agent.response",
+        {
+            "iteration": state.iteration_count,
+            "response": response,
+            "has_tool_calls": bool(isinstance(response, AIMessage) and response.tool_calls),
+        },
+    )
 
     if isinstance(response, AIMessage) and response.tool_calls:
         state.agent_scratchpad.append(response)
@@ -135,6 +160,10 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
     for tc in last_msg.tool_calls:
         name, args, call_id = tc["name"], tc["args"], tc["id"]
         writer(AgentMessageChunk(type=AgentMessageChunkType.TOOL_CALL, content=f"Calling: {name}"))
+        write_live_trace_event(
+            "top_agent.tool.call",
+            {"tool_name": name, "tool_args": args, "tool_call_id": call_id},
+        )
 
         try:
             result = await tools[name](**args) if name in tools else f"Tool not found: {name}"
@@ -143,6 +172,20 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
 
         result_str = str(result)
         truncated = _truncate_result(name, result_str)
+        artifact_path = write_live_text_artifact(
+            f"tool-results/{call_id}-{name}.txt",
+            result_str,
+        )
+        write_live_trace_event(
+            "top_agent.tool.result",
+            {
+                "tool_name": name,
+                "tool_call_id": call_id,
+                "result_length": len(result_str),
+                "result_preview": truncated,
+                "artifact_path": artifact_path,
+            },
+        )
         state.agent_scratchpad.append(ToolMessage(content=truncated, tool_call_id=call_id))
 
     return state
@@ -151,6 +194,10 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
 async def finalize_node(state: AgentState, config: RunnableConfig) -> AgentState:
     writer = get_stream_writer()
     writer(AgentMessageChunk(type=AgentMessageChunkType.FINAL, content=state.final_answer))
+    write_live_trace_event(
+        "top_agent.final",
+        {"final_answer": state.final_answer},
+    )
 
     if state.current_message:
         state.conversation_history.append(HumanMessage(content=state.current_message.content))

@@ -51,14 +51,14 @@ def _format_timeline(
     lines = [_format_event_line(event) for event in _get_events(understanding_result)]
     non_empty_lines = [line for line in lines if line]
     if not non_empty_lines:
-        return "- 无结构化事件"
+        return "- No structured events"
     return "\n".join(non_empty_lines)
 
 
 def _format_validation_feedback(section: ReportSection) -> str:
     if not section.validation_feedback:
         return ""
-    lines = ["## 校验反馈"]
+    lines = ["## Validation Feedback"]
     lines.extend(f"- {item}" for item in section.validation_feedback)
     return "\n".join(lines)
 
@@ -98,7 +98,7 @@ def _coerce_report_section(
         )
     return ReportSection(
         section_id=f"{sensor_id or 'report'}-section",
-        section_title=f"事件 - {sensor_id or 'uploaded-video'}",
+        section_title=f"Event - {sensor_id or 'uploaded-video'}",
         source_name=sensor_id or "uploaded-video",
         source_type=parsed_understanding.source_type,
         user_query=user_query,
@@ -132,14 +132,14 @@ async def generate_video_report(
     timeline_text = _format_timeline(section.understanding_result)
     validation_feedback_text = _format_validation_feedback(section)
     markdown_content = (
-        "# 单视频分析报告\n"
-        "## 视频源\n"
+        "# Video Analysis Report\n"
+        "## Video Source\n"
         f"- sensor_id: {section.source_name}\n\n"
-        "## 用户问题\n"
+        "## User Question\n"
         f"{section.user_query}\n\n"
-        "## 摘要\n"
+        "## Summary\n"
         f"{summary_text}\n\n"
-        "## 事件时间线\n"
+        "## Event Timeline\n"
         f"{timeline_text}\n"
     )
     if validation_feedback_text:

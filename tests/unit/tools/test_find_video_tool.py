@@ -9,3 +9,7 @@ class TestFindVideoTool:
     async def test_list_videos_returns_string(self):
         result = await list_videos_tool()
         assert isinstance(result, str)
+
+    async def test_list_videos_ignores_extra_llm_arguments(self):
+        result = await list_videos_tool(config={})
+        assert isinstance(result, str)

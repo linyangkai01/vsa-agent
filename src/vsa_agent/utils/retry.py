@@ -19,6 +19,7 @@ async def call_with_async_retry(
     delay: float = 1.0,
     backoff: float = 2.0,
     exceptions: tuple[type[Exception], ...] = (Exception,),
+    non_retry_exceptions: tuple[type[Exception], ...] = (),
     **kwargs,
 ) -> Any:
     """Call an async function with exponential-backoff retry."""
@@ -26,6 +27,8 @@ async def call_with_async_retry(
     for attempt in range(max_retries + 1):
         try:
             return await func(*args, **kwargs)
+        except non_retry_exceptions:
+            raise
         except exceptions as exc:
             last_exc = exc
             if attempt < max_retries:

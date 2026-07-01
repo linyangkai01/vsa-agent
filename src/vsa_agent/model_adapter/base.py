@@ -3,6 +3,8 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from langchain_core.messages import BaseMessage
+from openai import AuthenticationError
+from openai import PermissionDeniedError
 
 from vsa_agent.utils.retry import call_with_async_retry
 
@@ -14,6 +16,7 @@ class BaseModelAdapter(ABC):
     retry_delay: float = 0.5
     retry_backoff: float = 2.0
     retry_exceptions: tuple[type[Exception], ...] = (Exception,)
+    non_retry_exceptions: tuple[type[Exception], ...] = (AuthenticationError, PermissionDeniedError)
 
     @abstractmethod
     async def invoke(self, messages: list[BaseMessage]) -> BaseMessage:
@@ -38,4 +41,5 @@ class BaseModelAdapter(ABC):
             delay=self.retry_delay,
             backoff=self.retry_backoff,
             exceptions=self.retry_exceptions,
+            non_retry_exceptions=self.non_retry_exceptions,
         )

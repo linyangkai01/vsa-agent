@@ -13,12 +13,18 @@ _nvidia-original/
 pytest-cache-files-*/
 .pytest_cache_local_*/
 .worktrees/
+.agents/
+.codex/
+.comet/
+.codegraph/
+node_modules/
+artifacts/
+tmp/
 
 
-# Contains API keys
-config.yaml
+# Contains local API keys and machine-specific overrides
+config.local.yaml
 
 logs/
 data/
 .superpowers/
-

@@ -40,8 +40,12 @@ async def find_video_tool(name: str) -> str:
     "list_videos",
     description="List all available videos in the local database. Returns names and file paths.",
 )
-async def list_videos_tool() -> str:
-    """List all available videos."""
+async def list_videos_tool(**_: object) -> str:
+    """List all available videos.
+
+    LangChain tool calls may include runtime-only keys such as ``config``.
+    They are intentionally ignored because listing videos has no inputs.
+    """
     videos = list_videos()
     if not videos:
         return "No videos found in the database."

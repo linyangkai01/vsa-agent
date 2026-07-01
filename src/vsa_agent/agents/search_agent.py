@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from vsa_agent.registry import register_tool
+from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.tools.incidents import incidents_to_tagged_json
 from vsa_agent.tools.incidents import search_output_to_incidents
 from vsa_agent.tools.search import DecomposedQuery
@@ -201,6 +202,10 @@ async def _execute_search_with_metadata(
         decomposed = await decompose_query(search_input.query, model_adapter)
     else:
         decomposed = DecomposedQuery(query=search_input.query)
+    write_live_trace_event(
+        "search_agent.decompose_query",
+        {"input_query": search_input.query, "decomposed": decomposed},
+    )
 
     has_attributes = bool(decomposed.attributes)
     has_action = decomposed.has_action
@@ -216,6 +221,10 @@ async def _execute_search_with_metadata(
         logger.info("Path 1: attribute-only search")
         try:
             results = await attribute_search()
+            write_live_trace_event(
+                "search_agent.attribute_search",
+                {"path": "attribute-only", "attributes": decomposed.attributes, "results": results},
+            )
             if isinstance(results, SearchOutput):
                 result = results
             elif isinstance(results, list):
@@ -224,11 +233,19 @@ async def _execute_search_with_metadata(
                 result = SearchOutput(data=getattr(results, "data", []))
         except Exception as e:
             logger.error("Attribute search failed: %s", e)
+            write_live_trace_event(
+                "search_agent.attribute_search",
+                {"path": "attribute-only", "attributes": decomposed.attributes, "error": str(e)},
+            )
 
     elif not has_attributes and embed_search is not None:
         logger.info("Path 2: embed-only search")
         try:
             results = await embed_search()
+            write_live_trace_event(
+                "search_agent.embed_search",
+                {"path": "embed-only", "query": decomposed.query, "results": results},
+            )
             if isinstance(results, SearchOutput):
                 result = results
             elif hasattr(results, "data"):
@@ -237,6 +254,10 @@ async def _execute_search_with_metadata(
                 result = SearchOutput(data=results if isinstance(results, list) else [])
         except Exception as e:
             logger.error("Embed search failed: %s", e)
+            write_live_trace_event(
+                "search_agent.embed_search",
+                {"path": "embed-only", "query": decomposed.query, "error": str(e)},
+            )
 
     elif has_action and has_attributes:
         logger.info("Path 3: fusion search")
@@ -245,12 +266,24 @@ async def _execute_search_with_metadata(
         if embed_search is not None:
             try:
                 r = await embed_search()
+                write_live_trace_event(
+                    "search_agent.embed_search",
+                    {"path": "fusion", "query": decomposed.query, "results": r},
+                )
                 embed_results = list(r.data) if hasattr(r, "data") else list(r) if isinstance(r, list) else []
             except Exception as e:
                 logger.error("Embed search in fusion failed: %s", e)
+                write_live_trace_event(
+                    "search_agent.embed_search",
+                    {"path": "fusion", "query": decomposed.query, "error": str(e)},
+                )
         if attribute_search is not None:
             try:
                 r = await attribute_search()
+                write_live_trace_event(
+                    "search_agent.attribute_search",
+                    {"path": "fusion", "attributes": decomposed.attributes, "results": r},
+                )
                 if isinstance(r, SearchOutput):
                     attr_results = r.data
                 elif isinstance(r, list):
@@ -259,6 +292,10 @@ async def _execute_search_with_metadata(
                     attr_results = r.data
             except Exception as e:
                 logger.error("Attribute search in fusion failed: %s", e)
+                write_live_trace_event(
+                    "search_agent.attribute_search",
+                    {"path": "fusion", "attributes": decomposed.attributes, "error": str(e)},
+                )
         merged: dict[str, SearchResult] = {}
         for r in embed_results + attr_results:
             if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
@@ -323,6 +360,15 @@ async def execute_search_agent_flow(
     }
     incidents = search_output_to_incidents(search_output)
     text_answer = await summarize_search_incidents(incidents, search_input.query)
+    write_live_trace_event(
+        "search_agent.answer",
+        {
+            "input_query": search_input.query,
+            "text_answer": text_answer,
+            "metadata": metadata,
+            "search_output": search_output,
+        },
+    )
     return SearchAgentExecutionResult(
         search_output=search_output,
         incidents=incidents,

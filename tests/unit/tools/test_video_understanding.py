@@ -1,6 +1,7 @@
 """Tests for tools/video_understanding.py."""
 import pytest
 from contextlib import asynccontextmanager
+from openai import PermissionDeniedError
 
 from vsa_agent.config import AppConfig
 from vsa_agent.data_models.understanding import UnderstandingResult
@@ -31,7 +32,7 @@ class TestVideoUnderstandingConfig:
         assert cfg.vst_sensor_source_map == {}
 
     def test_loads_from_app_config(self):
-        cfg = AppConfig.from_yaml("config_test.yaml")
+        cfg = AppConfig.from_yaml("config.yaml")
         assert cfg.video_understanding.time_format == "iso"
         assert cfg.video_understanding.source_mode == "local"
         assert cfg.video_understanding.translated_base_dir == "C:/mounted-video-store"
@@ -479,6 +480,53 @@ class TestAnalyzeVideoSegment:
 
 class TestAnalyzeFramesRetry:
     @pytest.mark.asyncio
+    async def test_prefers_dashscope_vlm_model_env_when_creating_adapter(self, monkeypatch):
+        from vsa_agent.config import AppConfig
+        from vsa_agent.config import ModelConfig
+        from vsa_agent.config import ModelDevConfig
+        import vsa_agent.model_adapter as model_adapter
+
+        captured = {}
+
+        class FakeAdapter:
+            async def invoke(self, messages):
+                return type("Response", (), {"content": "ok"})()
+
+        def fake_create_model_adapter(model_name=None, role=None):
+            captured["model_name"] = model_name
+            captured["role"] = role
+            return FakeAdapter()
+
+        monkeypatch.setenv("DASHSCOPE_VLM_MODEL", "qwen3-vl-flash-2025-10-15")
+        monkeypatch.delenv("VSA_VLM_MODEL", raising=False)
+        monkeypatch.setattr(model_adapter, "create_model_adapter", fake_create_model_adapter)
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding.get_config",
+            lambda: AppConfig(
+                model=ModelConfig(
+                    mode="dev",
+                    dev=ModelDevConfig(
+                        provider="openai_compatible",
+                        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        api_key="",
+                        llm_model="qwen-plus",
+                        vlm_model="qwen3-vl-plus",
+                    ),
+                )
+            ),
+        )
+
+        result = await _analyze_frames(
+            ["frame-a"],
+            "describe",
+            config=VideoUnderstandingConfig(max_retries=1),
+        )
+
+        assert result == "ok"
+        assert captured["model_name"] == "qwen3-vl-flash-2025-10-15"
+        assert captured["role"] == "vlm"
+
+    @pytest.mark.asyncio
     async def test_uses_async_measure_time(self, monkeypatch):
         called = {"value": False}
 
@@ -523,6 +571,33 @@ class TestAnalyzeFramesRetry:
         )
         assert result == "recovered output"
         assert adapter.calls == 3
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_permission_or_quota_error(self):
+        response = type("Response", (), {"headers": {}, "request": object(), "status_code": 403})()
+
+        class FakeAdapter:
+            def __init__(self):
+                self.calls = 0
+
+            async def invoke(self, messages):
+                self.calls += 1
+                raise PermissionDeniedError(
+                    "free quota exhausted",
+                    response=response,
+                    body={"error": {"code": "AllocationQuota.FreeTierOnly"}},
+                )
+
+        adapter = FakeAdapter()
+        with pytest.raises(PermissionDeniedError):
+            await _analyze_frames(
+                ["frame-a"],
+                "what happened",
+                model_adapter=adapter,
+                config=VideoUnderstandingConfig(max_retries=3),
+            )
+
+        assert adapter.calls == 1
 
 
 class TestUnifiedAnalyzeVideoFlow:

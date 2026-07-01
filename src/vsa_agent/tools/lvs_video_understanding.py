@@ -6,6 +6,7 @@ from vsa_agent.config import LVSVideoUnderstandingConfig
 from vsa_agent.config import get_config
 from vsa_agent.data_models.understanding import DetectedEvent
 from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.video_understanding import _timestamp_to_seconds
 from vsa_agent.tools.video_understanding import analyze_video_segment
@@ -119,7 +120,7 @@ async def _analyze_long_video_window(
     query: str,
     source_type: str = "video_file",
     chunk_duration_sec: int = 30,
-    max_frames_per_chunk: int = 12,
+    max_frames_per_chunk: int = 8,
     model_adapter=None,
     config: LVSVideoUnderstandingConfig | None = None,
     start_timestamp: str | int | float | None = None,
@@ -144,10 +145,38 @@ async def _analyze_long_video_window(
     if config.max_chunks is not None:
         chunks = chunks[: config.max_chunks]
 
+    write_live_trace_event(
+        "lvs_video_understanding.started",
+        {
+            "video_path": video_path,
+            "query": query,
+            "source_type": source_type,
+            "duration_sec": duration_sec,
+            "window_start_sec": start_sec,
+            "window_end_sec": end_sec,
+            "window_duration_sec": window_duration_sec,
+            "chunk_duration_sec": config.chunk_duration_sec,
+            "max_frames_per_chunk": config.max_frames_per_chunk,
+            "chunk_count": len(chunks),
+        },
+    )
+
     chunk_results: list[UnderstandingResult] = []
-    for relative_start_sec, relative_end_sec in chunks:
+    for index, (relative_start_sec, relative_end_sec) in enumerate(chunks, start=1):
         absolute_start_sec = start_sec + relative_start_sec
         absolute_end_sec = start_sec + relative_end_sec
+        write_live_trace_event(
+            "lvs_video_understanding.chunk.started",
+            {
+                "video_path": video_path,
+                "query": query,
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+                "start_timestamp": absolute_start_sec,
+                "end_timestamp": absolute_end_sec,
+                "max_frames": config.max_frames_per_chunk,
+            },
+        )
         chunk_result = await analyze_video_segment(
             video_path=video_path,
             query=query,
@@ -155,15 +184,48 @@ async def _analyze_long_video_window(
             start_timestamp=absolute_start_sec,
             end_timestamp=absolute_end_sec,
             model_adapter=model_adapter,
+            max_frames=config.max_frames_per_chunk,
         )
         chunk_results.append(chunk_result)
+        write_live_trace_event(
+            "lvs_video_understanding.chunk.completed",
+            {
+                "video_path": video_path,
+                "query": query,
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+                "start_timestamp": absolute_start_sec,
+                "end_timestamp": absolute_end_sec,
+                "event_count": len(chunk_result.events),
+                "summary_length": len(chunk_result.summary_text),
+            },
+        )
 
-    return merge_chunk_results(
+    merged_result = merge_chunk_results(
         query,
         source_type,
         chunk_results,
         merge_adjacent_events=config.merge_adjacent_events,
     )
+    merged_result.metadata.update(
+        {
+            "chunk_duration_sec": config.chunk_duration_sec,
+            "max_frames_per_chunk": config.max_frames_per_chunk,
+            "window_start_sec": start_sec,
+            "window_end_sec": end_sec,
+        }
+    )
+    write_live_trace_event(
+        "lvs_video_understanding.completed",
+        {
+            "video_path": video_path,
+            "query": query,
+            "chunk_count": len(chunk_results),
+            "event_count": len(merged_result.events),
+            "summary_length": len(merged_result.summary_text),
+        },
+    )
+    return merged_result
 
 
 @register_tool(
@@ -175,7 +237,7 @@ async def analyze_long_video(
     query: str,
     source_type: str = "video_file",
     chunk_duration_sec: int = 30,
-    max_frames_per_chunk: int = 12,
+    max_frames_per_chunk: int = 8,
     model_adapter=None,
     config: LVSVideoUnderstandingConfig | None = None,
 ) -> UnderstandingResult:

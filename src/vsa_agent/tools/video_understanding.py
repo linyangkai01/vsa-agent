@@ -10,6 +10,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import SystemMessage
+from openai import AuthenticationError
+from openai import PermissionDeniedError
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -22,6 +24,10 @@ from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
 from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
+from vsa_agent.observability.live_trace import write_live_binary_artifact
+from vsa_agent.observability.live_trace import write_live_json_artifact
+from vsa_agent.observability.live_trace import write_live_text_artifact
+from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.utils.frame_select import frames_for_timestamp_range
 from vsa_agent.utils.reasoning_parsing import parse_reasoning_content
 from vsa_agent.utils.time_measure import async_measure_time
@@ -66,6 +72,14 @@ def _get_video_understanding_config(
     if config is not None:
         return config
     return get_config().video_understanding
+
+
+def _get_runtime_vlm_model_name() -> str:
+    """Resolve explicit VLM model override used for frame analysis."""
+    explicit_model = (os.getenv("VSA_VLM_MODEL") or os.getenv("DASHSCOPE_VLM_MODEL") or "").strip()
+    if explicit_model:
+        return explicit_model
+    return ""
 
 
 def _normalize_timestamp(
@@ -284,6 +298,18 @@ def _extract_frames(
         if end_timestamp is None:
             end_timestamp = duration_sec
 
+        write_live_trace_event(
+            "video_understanding.video_metadata",
+            {
+                "video_path": video_path,
+                "fps": fps,
+                "total_frames": total_frames,
+                "duration_sec": duration_sec,
+                "start_timestamp": start_timestamp,
+                "end_timestamp": end_timestamp,
+            },
+        )
+
         start_ts = max(0.0, start_timestamp)
         end_ts = min(duration_sec, end_timestamp)
 
@@ -304,13 +330,31 @@ def _extract_frames(
         import base64
 
         base64_frames = []
+        frame_paths: list[str] = []
         for frame_idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 raise RuntimeError(f"Could not read frame {frame_idx}")
             _, buffer = cv2.imencode(".jpg", frame)
-            base64_frames.append(base64.b64encode(buffer.tobytes()).decode("utf-8"))
+            buffer_bytes = buffer.tobytes()
+            base64_frames.append(base64.b64encode(buffer_bytes).decode("utf-8"))
+            frame_artifact_path = write_live_binary_artifact(
+                f"frames/frame-{frame_idx:06d}.jpg",
+                buffer_bytes,
+            )
+            if frame_artifact_path:
+                frame_paths.append(frame_artifact_path)
+
+        write_live_trace_event(
+            "video_understanding.extract_frames",
+            {
+                "video_path": video_path,
+                "frame_count": len(base64_frames),
+                "frame_indices": frame_indices,
+                "frame_paths": frame_paths,
+            },
+        )
 
         return base64_frames, duration_sec, fps, total_frames
     finally:
@@ -333,13 +377,8 @@ async def _analyze_frames(
     tool_config = _get_video_understanding_config(config)
 
     if model_adapter is None:
-        app_config = get_config()
-        model_name = (
-            app_config.model.dev.vlm_model
-            if app_config.model.mode == "dev"
-            else app_config.model.prod.vlm_model
-        )
-        model_adapter = create_model_adapter(model_name=model_name)
+        model_name = _get_runtime_vlm_model_name() or None
+        model_adapter = create_model_adapter(model_name=model_name, role="vlm")
 
     messages = _build_vlm_messages(frames, prompt_text)
     last_error: Exception | None = None
@@ -350,6 +389,8 @@ async def _analyze_frames(
             result = str(response.content) if response.content is not None else ""
             logger.info("VLM response length: %d chars", len(result))
             return result
+        except (AuthenticationError, PermissionDeniedError):
+            raise
         except Exception as exc:  # pragma: no cover - exercised in integration paths
             last_error = exc
             logger.warning(
@@ -430,16 +471,53 @@ async def _resolve_video_source(
                     "" if end_timestamp is None else str(end_timestamp),
                 )
                 if clip.local_path:
+                    write_live_trace_event(
+                        "video_understanding.resolve_source",
+                        {
+                            "video_path": video_path,
+                            "sensor_id": sensor_id,
+                            "source_type": source_type,
+                            "resolved_source": clip.local_path,
+                        },
+                    )
                     return clip.local_path
                 if clip.clip_url:
+                    write_live_trace_event(
+                        "video_understanding.resolve_source",
+                        {
+                            "video_path": video_path,
+                            "sensor_id": sensor_id,
+                            "source_type": source_type,
+                            "resolved_source": clip.clip_url,
+                        },
+                    )
                     return clip.clip_url
             except VSTClientError:
                 if has_time_window:
                     raise
         if sensor_id and sensor_id in config.vst_sensor_source_map:
-            return config.vst_sensor_source_map[sensor_id]
+            resolved_source = config.vst_sensor_source_map[sensor_id]
+            write_live_trace_event(
+                "video_understanding.resolve_source",
+                {
+                    "video_path": video_path,
+                    "sensor_id": sensor_id,
+                    "source_type": source_type,
+                    "resolved_source": resolved_source,
+                },
+            )
+            return resolved_source
         raise ValueError(f"No VST source mapping for sensor_id '{sensor_id}'")
 
+    write_live_trace_event(
+        "video_understanding.resolve_source",
+        {
+            "video_path": video_path,
+            "sensor_id": sensor_id,
+            "source_type": source_type,
+            "resolved_source": video_path,
+        },
+    )
     return video_path
 
 
@@ -461,6 +539,7 @@ async def analyze_video_segment(
     config: VideoUnderstandingConfig | None = None,
     prompt_used: str | None = None,
     sensor_id: str | None = None,
+    max_frames: int = DEFAULT_MAX_FRAMES,
 ) -> UnderstandingResult:
     """Analyze a single short video or bounded segment and return structured output."""
     tool_config = _get_video_understanding_config(config)
@@ -492,7 +571,7 @@ async def analyze_video_segment(
         end_offset = _timestamp_to_seconds(end_timestamp)
         frames, _, _, _ = _extract_frames(
             resolved_video_path,
-            DEFAULT_MAX_FRAMES,
+            max_frames,
             start_timestamp=start_offset or 0.0,
             end_timestamp=end_offset,
         )
@@ -506,7 +585,13 @@ async def analyze_video_segment(
     thinking, parsed_answer = _parse_thinking_from_content(raw_output)
     normalized_output = parsed_answer if tool_config.filter_thinking else raw_output
 
-    return _normalize_model_response(
+    raw_artifact_path = write_live_text_artifact("tool-results/video-understanding-raw.txt", raw_output)
+    write_live_trace_event(
+        "video_understanding.vlm_result",
+        {"raw_output_length": len(raw_output), "artifact_path": raw_artifact_path},
+    )
+
+    result = _normalize_model_response(
         query=query,
         source_type=source_type,
         raw_output=raw_output,
@@ -519,6 +604,19 @@ async def analyze_video_segment(
         sensor_id=sensor_id,
         filter_thinking=tool_config.filter_thinking,
     )
+    result_artifact_path = write_live_json_artifact(
+        "tool-results/video-understanding-result.json",
+        result.model_dump(),
+    )
+    write_live_trace_event(
+        "video_understanding.result",
+        {
+            "summary_text": result.summary_text,
+            "event_count": len(result.events),
+            "artifact_path": result_artifact_path,
+        },
+    )
+    return result
 
 
 async def analyze_video(

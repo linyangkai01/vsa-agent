@@ -4,27 +4,127 @@ import os
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from openai import AuthenticationError
+from openai import PermissionDeniedError
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.messages import HumanMessage
 
 
 class TestModelAdapterFactory:
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False)
-    def test_factory_returns_adapter(self):
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    def test_factory_returns_adapter(self, chat_openai_cls, monkeypatch):
+        from vsa_agent.config import AppConfig
+        from vsa_agent.config import BackendConfig
+        from vsa_agent.config import ProfileConfig
+        from vsa_agent.config import RoleBindingConfig
         from vsa_agent.model_adapter import BaseModelAdapter
         from vsa_agent.model_adapter import create_model_adapter
+
+        chat_openai_cls.return_value = MagicMock()
+        monkeypatch.setattr(
+            "vsa_agent.config.get_config",
+            lambda: AppConfig(
+                active_profile="test",
+                backends={
+                    "test_openai": BackendConfig(
+                        provider="openai_compatible",
+                        base_url="https://api.openai.com/v1",
+                        api_key_required=False,
+                    )
+                },
+                profiles={
+                    "test": ProfileConfig(
+                        llm=RoleBindingConfig(backend="test_openai", model="gpt-4o"),
+                        vlm=RoleBindingConfig(backend="test_openai", model="gpt-4o"),
+                    )
+                },
+            ),
+        )
 
         adapter = create_model_adapter()
         assert isinstance(adapter, BaseModelAdapter)
+        assert adapter.model_name == "gpt-4o"
 
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False)
-    def test_factory_with_model_name(self):
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    def test_factory_with_model_name(self, chat_openai_cls, monkeypatch):
+        from vsa_agent.config import AppConfig
+        from vsa_agent.config import BackendConfig
+        from vsa_agent.config import ProfileConfig
+        from vsa_agent.config import RoleBindingConfig
         from vsa_agent.model_adapter import BaseModelAdapter
         from vsa_agent.model_adapter import create_model_adapter
 
+        chat_openai_cls.return_value = MagicMock()
+        monkeypatch.setattr(
+            "vsa_agent.config.get_config",
+            lambda: AppConfig(
+                active_profile="test",
+                backends={
+                    "test_openai": BackendConfig(
+                        provider="openai_compatible",
+                        base_url="https://api.openai.com/v1",
+                        api_key_required=False,
+                    )
+                },
+                profiles={
+                    "test": ProfileConfig(
+                        llm=RoleBindingConfig(backend="test_openai", model="gpt-4o"),
+                        vlm=RoleBindingConfig(backend="test_openai", model="gpt-4o"),
+                    )
+                },
+            ),
+        )
+
         adapter = create_model_adapter(model_name="gpt-4o")
         assert isinstance(adapter, BaseModelAdapter)
+
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+    def test_factory_resolves_role_specific_backends(self, vllm_chat_cls, openai_chat_cls, monkeypatch):
+        from vsa_agent.config import AppConfig
+        from vsa_agent.config import BackendConfig
+        from vsa_agent.config import ProfileConfig
+        from vsa_agent.config import RoleBindingConfig
+        import vsa_agent.model_adapter as model_adapter
+
+        openai_chat_cls.return_value = MagicMock()
+        vllm_chat_cls.return_value = MagicMock()
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+        monkeypatch.delenv("VSA_PROFILE", raising=False)
+        monkeypatch.setattr(
+            "vsa_agent.config.get_config",
+            lambda: AppConfig(
+                active_profile="hybrid",
+                backends={
+                    "dashscope": BackendConfig(
+                        provider="openai_compatible",
+                        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        api_key_env="DASHSCOPE_API_KEY",
+                    ),
+                    "local_vllm": BackendConfig(
+                        provider="vllm",
+                        base_url="http://localhost:8000/v1",
+                        api_key_required=False,
+                    ),
+                },
+                profiles={
+                    "hybrid": ProfileConfig(
+                        llm=RoleBindingConfig(backend="dashscope", model="qwen3.7-plus"),
+                        vlm=RoleBindingConfig(backend="local_vllm", model="Qwen3-VL-8B-Instruct"),
+                    )
+                },
+            ),
+        )
+
+        llm_adapter = model_adapter.create_model_adapter(role="llm")
+        vlm_adapter = model_adapter.create_model_adapter(role="vlm")
+
+        assert llm_adapter.model_name == "qwen3.7-plus"
+        assert llm_adapter.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert openai_chat_cls.call_args.kwargs["api_key"] == "dashscope-secret"
+        assert vlm_adapter.model_name == "Qwen3-VL-8B-Instruct"
+        assert vlm_adapter.base_url == "http://localhost:8000/v1"
 
 
 class TestOpenAIModelAdapter:
@@ -152,6 +252,58 @@ class TestOpenAIModelAdapter:
         assert result.content == "ok"
         assert attempts["count"] == 3
         assert chat_openai_cls.call_args.kwargs["max_retries"] == 0
+
+    @pytest.mark.asyncio
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    async def test_invoke_does_not_retry_authentication_error(self, chat_openai_cls):
+        from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+        llm = MagicMock()
+        response = MagicMock()
+        response.request = MagicMock()
+        response.status_code = 401
+        attempts = {"count": 0}
+
+        async def fake_ainvoke(messages):
+            attempts["count"] += 1
+            raise AuthenticationError("bad key", response=response, body={"error": {"code": "invalid_api_key"}})
+
+        llm.ainvoke.side_effect = fake_ainvoke
+        chat_openai_cls.return_value = llm
+
+        adapter = OpenAIModelAdapter(model_name="gpt-4o")
+        with pytest.raises(AuthenticationError):
+            await adapter.invoke([HumanMessage(content="hello")])
+
+        assert attempts["count"] == 1
+
+    @pytest.mark.asyncio
+    @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
+    async def test_invoke_does_not_retry_permission_or_quota_error(self, chat_openai_cls):
+        from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+
+        llm = MagicMock()
+        response = MagicMock()
+        response.request = MagicMock()
+        response.status_code = 403
+        attempts = {"count": 0}
+
+        async def fake_ainvoke(messages):
+            attempts["count"] += 1
+            raise PermissionDeniedError(
+                "free quota exhausted",
+                response=response,
+                body={"error": {"code": "AllocationQuota.FreeTierOnly"}},
+            )
+
+        llm.ainvoke.side_effect = fake_ainvoke
+        chat_openai_cls.return_value = llm
+
+        adapter = OpenAIModelAdapter(model_name="gpt-4o")
+        with pytest.raises(PermissionDeniedError):
+            await adapter.invoke([HumanMessage(content="hello")])
+
+        assert attempts["count"] == 1
 
 
 class TestVLLMModelAdapter:

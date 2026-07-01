@@ -12,6 +12,9 @@ from pydantic import Field
 from vsa_agent.agents.data_models import AgentOutput
 from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
 from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
+from vsa_agent.observability.live_trace import write_live_json_artifact
+from vsa_agent.observability.live_trace import write_live_text_artifact
+from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.report_structuring import build_single_section_report
 from vsa_agent.tools.report_structuring import normalize_understanding_result
@@ -81,6 +84,18 @@ async def execute_report_agent(
         user_query=report_input.query,
         source_type=source_type,
     )
+    understanding_artifact_path = write_live_json_artifact(
+        "tool-results/report-agent-understanding.json",
+        understanding_result.model_dump(),
+    )
+    write_live_trace_event(
+        "report_agent.understanding_result",
+        {
+            "summary_text": understanding_result.summary_text,
+            "event_count": len(understanding_result.events),
+            "artifact_path": understanding_artifact_path,
+        },
+    )
 
     structured_report = build_single_section_report(
         source_name=report_input.sensor_id or report_input.video_path or "uploaded-video",
@@ -98,6 +113,16 @@ async def execute_report_agent(
         structured_report=structured_report,
     )
     markdown_content, downloads, summary = _normalize_report_result(report_result)
+    markdown_artifact_path = write_live_text_artifact("report.md", markdown_content)
+    write_live_trace_event(
+        "report_agent.result",
+        {
+            "summary": summary,
+            "markdown_length": len(markdown_content),
+            "validation_passed": validation_result.passed,
+            "artifact_path": markdown_artifact_path,
+        },
+    )
 
     return AgentOutput(
         messages=[summary] if summary else [],

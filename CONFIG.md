@@ -2,9 +2,19 @@
 
 ## Project Overview
 
-vsa-agent -- Video Safety Analysis Agent for industrial safety inspection.
-Built on LangChain/LangGraph, with ModelAdapter for OpenAI-compatible API
-(dev) and vLLM (prod) switching.
+vsa-agent -- a self-owned Video Search and Analysis Agent derived from the
+business goals of NVIDIA's `video-search-and-summarization` blueprint, but
+without NVIDIA runtime/service lock-in.
+
+The final purpose is to replace NVIDIA-specific dependencies with open,
+configurable building blocks while preserving the important business flow:
+video search, video understanding, long-video processing, safety QA, report
+generation, and replayable observability. The project should run with remote
+OpenAI-compatible providers such as Bailian/DashScope during testing and later
+support mixed deployments such as remote LLM plus local vLLM/VLM.
+
+Built on LangChain/LangGraph, with ModelAdapter configured by named runtime
+profiles for OpenAI-compatible APIs and vLLM endpoints.
 
 **Tech stack:** Python 3.12, LangChain, LangGraph, langchain-openai,
 FastAPI, fastmcp, Pydantic v2, OpenCV, PyYAML.
@@ -33,6 +43,16 @@ $env:PYTHONPATH = "src"
 python -m vsa_agent.main
 ```
 
+Live real-video graph validation on Ubuntu:
+
+```bash
+cd /data/project/lyk/vsa-agent
+export VSA_LIVE_VIDEO_MODE=graph
+bash scripts/run_live_top_agent_video_dashscope.sh
+LATEST_RUN="$(ls -td artifacts/live-video-runs/* | head -1)"
+conda run -n vsa-agent python -m vsa_agent validate-run "$LATEST_RUN"
+```
+
 ## Architecture
 
 ```
@@ -42,8 +62,8 @@ config.yaml --> config.py --> model_adapter/ --> agents/ (LangGraph DAG)
                     |                   |             |
                     |              tools/        FastAPI server
                     |
-              prompts (YAML)
-              tools.enabled_modules (YAML)
+              backends/profiles/runtime
+              prompts/tools.enabled_modules
 ```
 
 ## Development Conventions
@@ -64,11 +84,33 @@ config.yaml --> config.py --> model_adapter/ --> agents/ (LangGraph DAG)
 
 | Section | Purpose |
 |---|---|
-| model | LLM provider, base_url, model names for dev/prod |
+| active_profile | Default runtime profile name |
+| backends | Reusable provider endpoints, API-key env names, and provider type |
+| profiles | Role bindings for `llm`, `vlm`, and optional `embedding` |
+| runtime | Runner defaults such as conda env, video path, trace dir, QA query |
 | agent | max_iterations, planning, postprocessing, log_level, max_history |
 | tools | enabled_modules -- Python module paths to import at startup |
 | server | host and port for FastAPI |
 | prompts | All prompt strings (system, safety, VLM format, etc.) |
+| video_understanding | Short-video and source-translation settings |
+| lvs_video_understanding | Long-video chunking settings |
+
+`config.yaml` is the single committed business configuration file. Use `VSA_PROFILE`
+to switch between profiles such as `dashscope_remote`, `hybrid_dashscope_llm_local_vlm`,
+and `test`.
+
+Sensitive local values live in `config.local.yaml`, which is ignored by git. It is
+loaded automatically when present and deep-merged over `config.yaml`. Put keys there
+for local experiments, for example:
+
+```yaml
+backends:
+  dashscope:
+    api_key: "your-dashscope-key"
+```
+
+Set `VSA_LOCAL_CONFIG` to another file path when a machine needs a different secret
+file, or set `VSA_LOCAL_CONFIG=""` to disable local override loading.
 
 ## BOM Warning
 
