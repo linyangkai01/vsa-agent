@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 import sys
 
 from vsa_agent.archive.ingest import ingest_live_run
@@ -55,6 +56,10 @@ def _archive_ingest(run_dir: str, index_path: str) -> int:
 
 
 def _archive_search(query: str, index_path: str, top_k: int) -> int:
+    if not Path(index_path).exists():
+        print(f"ERROR: Archive index not found: {index_path}", file=sys.stderr)
+        return 1
+
     async def _run() -> dict:
         output = await LocalArchiveSearchStore(index_path).search(query=query, top_k=top_k)
         return output.model_dump()

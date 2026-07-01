@@ -60,3 +60,14 @@ def test_archive_ingest_cli_returns_clear_error_for_missing_manifest(tmp_path: P
     assert exit_code == 1
     assert "ERROR:" in captured.err
     assert "manifest.json" in captured.err
+
+
+def test_archive_search_cli_returns_clear_error_for_missing_index(tmp_path: Path, capsys):
+    missing_index = tmp_path / "missing" / "index.jsonl"
+
+    exit_code = main(["archive", "search", "forklift", "--index", str(missing_index)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "ERROR:" in captured.err
+    assert "Archive index not found" in captured.err
