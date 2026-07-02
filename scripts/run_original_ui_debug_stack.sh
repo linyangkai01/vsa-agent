@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-vsa-agent}"
+CONFIG_PATH="${VSA_CONFIG:-${ROOT_DIR}/config.yaml}"
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "conda is required to start the vsa-agent backend." >&2
@@ -26,6 +27,24 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cd "${ROOT_DIR}"
+
+export VSA_CONFIG="${CONFIG_PATH}"
+
+echo "Validating vsa-agent runtime config"
+conda run -n "${CONDA_ENV_NAME}" python -m vsa_agent config doctor --config "${VSA_CONFIG}"
+
+MODEL_API_KEY="$(
+  conda run -n "${CONDA_ENV_NAME}" python -c "from vsa_agent.config import AppConfig, resolve_runtime_config; print(resolve_runtime_config(AppConfig.from_yaml('${VSA_CONFIG}')).llm.api_key or '')"
+)"
+if [[ -n "${MODEL_API_KEY}" ]]; then
+  export OPENAI_API_KEY="${OPENAI_API_KEY:-${MODEL_API_KEY}}"
+fi
+
+if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "Model API key is missing. Set DASHSCOPE_API_KEY or add it to ignored config.local.yaml before starting the debug stack." >&2
+  exit 2
+fi
+
 if curl -fsS "http://${BACKEND_HOST}:${BACKEND_PORT}/health" >/dev/null; then
   echo "Using existing backend at http://${BACKEND_HOST}:${BACKEND_PORT}"
 else

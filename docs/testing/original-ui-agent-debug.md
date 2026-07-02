@@ -61,6 +61,24 @@ If a package genuinely needs its install script, rerun with:
 NPM_INSTALL_IGNORE_SCRIPTS=false npm run ui:install
 ```
 
+Configure the model key before starting the debug stack. Use either an environment variable:
+
+```bash
+export DASHSCOPE_API_KEY="your-dashscope-key"
+```
+
+Or an ignored local override file:
+
+```bash
+cat > config.local.yaml <<'YAML'
+backends:
+  dashscope:
+    api_key: "your-dashscope-key"
+YAML
+```
+
+The stack script resolves this key from `config.yaml`/`config.local.yaml` and exports it as `OPENAI_API_KEY` for the OpenAI-compatible LangChain client.
+
 Run only the UI from the `vsa-agent` root:
 
 ```bash
@@ -101,6 +119,7 @@ The smoke test checks:
 - `GET /health` responds.
 - `POST /chat/stream` rejects empty messages with HTTP 400.
 - `POST /chat/stream` emits `data:` frames and `data: [DONE]`.
+- The backend stream does not contain model/setup errors such as missing API keys.
 - `POST /api/chat` on the UI dev server can proxy to the backend.
 
 If only the backend is running and the UI is not, skip the UI proxy check:
