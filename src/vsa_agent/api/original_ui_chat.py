@@ -94,6 +94,12 @@ def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[s
     return []
 
 
+async def build_default_graph_for_original_ui() -> Any:
+    from vsa_agent.agents.top_agent import build_graph
+
+    return await build_graph()
+
+
 async def stream_original_ui_chat(
     request: OriginalUIChatRequest,
     conversation_id: str = "",
@@ -101,9 +107,7 @@ async def stream_original_ui_chat(
     graph_builder: Callable[[], Awaitable[Any]] | None = None,
 ) -> AsyncIterator[str]:
     if graph_builder is None:
-        from vsa_agent.agents.top_agent import build_graph
-
-        graph_builder = build_graph
+        graph_builder = build_default_graph_for_original_ui
 
     user_text = extract_latest_user_text(request)
     thread_id = conversation_id or "original-ui-chat"
