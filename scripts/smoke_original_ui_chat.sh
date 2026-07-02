@@ -52,6 +52,12 @@ if ! grep -q "data: \[DONE\]" "${tmp_dir}/backend-stream.txt"; then
   cat "${tmp_dir}/backend-stream.txt" >&2
   exit 1
 fi
+if grep -Eq 'OpenAIError|AuthenticationError|"status": "error"' "${tmp_dir}/backend-stream.txt"; then
+  echo "Backend stream contained a model/setup error." >&2
+  echo "If this mentions a missing API key, stop the old backend on port 8000, set DASHSCOPE_API_KEY or config.local.yaml, then restart ui:stack:vss." >&2
+  cat "${tmp_dir}/backend-stream.txt" >&2
+  exit 1
+fi
 
 echo "Backend stream smoke passed."
 
@@ -67,6 +73,12 @@ if [[ "${RUN_UI_PROXY_SMOKE}" == "true" ]]; then
 
   if [[ ! -s "${tmp_dir}/ui-proxy.txt" ]]; then
     echo "UI proxy returned an empty response." >&2
+    exit 1
+  fi
+  if grep -Eq 'OpenAIError|AuthenticationError|<intermediatestep>.*"status":"error"' "${tmp_dir}/ui-proxy.txt"; then
+    echo "UI proxy response contained a model/setup error." >&2
+    echo "If this mentions a missing API key, stop the old backend on port 8000, set DASHSCOPE_API_KEY or config.local.yaml, then restart ui:stack:vss." >&2
+    cat "${tmp_dir}/ui-proxy.txt" >&2
     exit 1
   fi
 
