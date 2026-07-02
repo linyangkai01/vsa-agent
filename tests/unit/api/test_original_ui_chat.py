@@ -11,6 +11,7 @@ from vsa_agent.api.original_ui_chat import format_chunk_for_original_ui
 from vsa_agent.api.original_ui_chat import format_done
 from vsa_agent.api.original_ui_chat import format_intermediate_data
 from vsa_agent.api.original_ui_chat import format_openai_delta
+from vsa_agent.api.original_ui_chat import inject_configured_video_context
 from vsa_agent.api.original_ui_chat import stream_original_ui_chat
 
 
@@ -65,6 +66,25 @@ def test_extract_latest_user_text_rejects_user_message_without_text_content():
 
     with pytest.raises(ValueError, match="No user message"):
         extract_latest_user_text(request)
+
+
+def test_inject_configured_video_context_for_configured_video_request():
+    prompt = inject_configured_video_context(
+        "Analyze the configured video and identify safety risks.",
+        "/data/project/lyk/video/1597042367-1-192.mp4",
+    )
+
+    assert "Configured video_path: /data/project/lyk/video/1597042367-1-192.mp4" in prompt
+    assert "Do not call list_videos" in prompt
+
+
+def test_inject_configured_video_context_ignores_unrelated_text():
+    prompt = inject_configured_video_context(
+        "Say hello from vsa-agent.",
+        "/data/project/lyk/video/1597042367-1-192.mp4",
+    )
+
+    assert prompt == "Say hello from vsa-agent."
 
 
 def test_format_openai_delta_frame_matches_original_ui_proxy():
@@ -157,6 +177,28 @@ async def test_stream_original_ui_chat_runs_graph_and_emits_compatible_frames():
     assert frames[-1] == "data: [DONE]\n\n"
     assert fake_graph.received_state.current_message.content == "inspect video"
     assert fake_graph.received_config["configurable"]["thread_id"] == "conversation-1"
+
+
+@pytest.mark.asyncio
+async def test_stream_original_ui_chat_injects_configured_video_path():
+    fake_graph = FakeGraph()
+    request = OriginalUIChatRequest(
+        messages=[{"role": "user", "content": "Analyze the configured video and identify safety risks."}]
+    )
+
+    frames = [
+        frame
+        async for frame in stream_original_ui_chat(
+            request,
+            graph_builder=lambda: build_fake_graph(fake_graph),
+            configured_video_path="/data/project/lyk/video/1597042367-1-192.mp4",
+        )
+    ]
+
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert "Configured video_path: /data/project/lyk/video/1597042367-1-192.mp4" in (
+        fake_graph.received_state.current_message.content
+    )
 
 
 @pytest.mark.asyncio

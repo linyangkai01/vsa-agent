@@ -8,6 +8,7 @@ CONDA_ENV_NAME="${CONDA_ENV_NAME:-vsa-agent}"
 CONFIG_PATH="${VSA_CONFIG:-${ROOT_DIR}/config.yaml}"
 BACKEND_PROBE_TIMEOUT_SECONDS="${BACKEND_PROBE_TIMEOUT_SECONDS:-45}"
 RESTART_EXISTING_BACKEND_ON_PROBE_FAIL="${RESTART_EXISTING_BACKEND_ON_PROBE_FAIL:-true}"
+FORCE_RESTART_BACKEND="${FORCE_RESTART_BACKEND:-false}"
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "conda is required to start the vsa-agent backend." >&2
@@ -131,8 +132,16 @@ if [[ -z "${OPENAI_API_KEY:-}" ]]; then
 fi
 
 if curl -fsS "http://${BACKEND_HOST}:${BACKEND_PORT}/health" >/dev/null; then
-  echo "Existing backend found at http://${BACKEND_HOST}:${BACKEND_PORT}; probing /chat/stream before reuse"
-  if probe_existing_backend; then
+  echo "Existing backend found at http://${BACKEND_HOST}:${BACKEND_PORT}"
+  if [[ "${FORCE_RESTART_BACKEND}" == "true" ]]; then
+    echo "FORCE_RESTART_BACKEND=true; restarting backend before launching UI."
+    if ! stop_existing_backend; then
+      echo "Stop the process currently using port ${BACKEND_PORT}, then restart this script." >&2
+      exit 2
+    fi
+    conda run -n "${CONDA_ENV_NAME}" uvicorn vsa_agent.api.routes:app --host 0.0.0.0 --port "${BACKEND_PORT}" &
+    BACKEND_PID=$!
+  elif probe_existing_backend; then
     echo "Using existing backend at http://${BACKEND_HOST}:${BACKEND_PORT}"
   else
     echo "The existing backend is healthy but not usable for original UI chat." >&2
