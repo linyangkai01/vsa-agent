@@ -104,6 +104,38 @@ def test_live_trace_event_is_noop_when_path_is_not_configured(trace_dir, monkeyp
     assert list(trace_dir.iterdir()) == []
 
 
+def test_live_trace_context_writes_jsonl_without_environment(trace_dir, monkeypatch):
+    from vsa_agent.observability.live_trace import live_trace_context
+    from vsa_agent.observability.live_trace import write_live_trace_event
+
+    monkeypatch.delenv("VSA_LIVE_TRACE_PATH", raising=False)
+    trace_path = trace_dir / "context" / "trace.jsonl"
+
+    with live_trace_context(trace_path=trace_path):
+        write_live_trace_event("unit.context", {"value": "ok"})
+
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert events[0]["event_type"] == "unit.context"
+    assert events[0]["payload"] == {"value": "ok"}
+
+
+def test_live_trace_context_restores_previous_environment(trace_dir, monkeypatch):
+    from vsa_agent.observability.live_trace import live_trace_context
+    from vsa_agent.observability.live_trace import write_live_trace_event
+
+    env_trace_path = trace_dir / "env.jsonl"
+    context_trace_path = trace_dir / "context.jsonl"
+    monkeypatch.setenv("VSA_LIVE_TRACE_PATH", str(env_trace_path))
+
+    with live_trace_context(trace_path=context_trace_path):
+        write_live_trace_event("unit.context", {"value": "context"})
+
+    write_live_trace_event("unit.env", {"value": "env"})
+
+    assert json.loads(context_trace_path.read_text(encoding="utf-8").splitlines()[0])["event_type"] == "unit.context"
+    assert json.loads(env_trace_path.read_text(encoding="utf-8").splitlines()[0])["event_type"] == "unit.env"
+
+
 def test_live_trace_writes_text_and_json_artifacts(trace_dir, monkeypatch):
     from vsa_agent.observability.live_trace import write_live_json_artifact
     from vsa_agent.observability.live_trace import write_live_text_artifact

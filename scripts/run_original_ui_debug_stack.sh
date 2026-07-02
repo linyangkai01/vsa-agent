@@ -115,6 +115,7 @@ stop_existing_backend() {
 cd "${ROOT_DIR}"
 
 export VSA_CONFIG="${CONFIG_PATH}"
+export VSA_ORIGINAL_UI_TRACE_ROOT="${VSA_ORIGINAL_UI_TRACE_ROOT:-${ROOT_DIR}/artifacts/original-ui-chat-runs}"
 
 echo "Validating vsa-agent runtime config"
 conda run -n "${CONDA_ENV_NAME}" python -m vsa_agent config doctor --config "${VSA_CONFIG}"

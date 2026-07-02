@@ -128,6 +128,33 @@ If only the backend is running and the UI is not, skip the UI proxy check:
 RUN_UI_PROXY_SMOKE=false bash scripts/smoke_original_ui_chat.sh
 ```
 
+## Conversation Trace Logs
+
+The debug stack enables one trace directory per browser chat turn:
+
+```bash
+artifacts/original-ui-chat-runs/<timestamp>-<conversation-id>-<message-id>/
+```
+
+Quickly inspect the latest turn:
+
+```bash
+cd /data/project/lyk/vsa-agent
+LATEST_CHAT_TRACE="$(cat artifacts/original-ui-chat-runs/latest.txt)"
+cat "$LATEST_CHAT_TRACE/request.json"
+tail -n 100 "$LATEST_CHAT_TRACE/trace.jsonl"
+find "$LATEST_CHAT_TRACE/tool-results" -maxdepth 1 -type f -print
+```
+
+Useful event types in `trace.jsonl`:
+
+- `original_ui.chat.request`: incoming browser message and resolved prompt.
+- `top_agent.agent.request`: each LLM round, including prompt messages and available tool count.
+- `top_agent.agent.response`: model response and whether tool calls were requested.
+- `top_agent.tool.call`: exact tool name and arguments.
+- `top_agent.tool.result`: result length, preview, and full artifact path.
+- `top_agent.final`: final answer returned to the UI.
+
 ## Browser Acceptance
 
 Open the original UI and send:
