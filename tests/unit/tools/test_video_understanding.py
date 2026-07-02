@@ -768,6 +768,31 @@ class TestVideoUnderstandingToolCompatibility:
         assert captured["end_timestamp"] == "PT10S"
 
     @pytest.mark.asyncio
+    async def test_accepts_model_generated_type_alias_for_source_type(self, monkeypatch):
+        captured = {}
+
+        async def fake_analyze_video_segment(**kwargs):
+            captured.update(kwargs)
+            return UnderstandingResult(
+                query=kwargs["query"],
+                source_type=kwargs["source_type"],
+                summary_text="legacy text output",
+                chunks=[],
+                events=[],
+            )
+
+        monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_video_segment", fake_analyze_video_segment)
+
+        result = await video_understanding_tool(
+            frames=["frame-a"],
+            query="what happened",
+            type="rtsp",
+        )
+
+        assert result == "legacy text output"
+        assert captured["source_type"] == "rtsp"
+
+    @pytest.mark.asyncio
     async def test_long_video_path_uses_phase2_pipeline(self, monkeypatch):
         async def fake_analyze_long_video(**kwargs):
             return UnderstandingResult(
