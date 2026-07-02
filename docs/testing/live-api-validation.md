@@ -222,3 +222,21 @@ The live search acceptance test emits diagnostics in assertion failures. Look fo
 - `eval_score`
 
 If the live test fails, compare those fields against the intended query semantics before changing thresholds or fixtures.
+
+## Local Video Archive Search Smoke Test
+
+After a live video run succeeds, ingest the latest run into the local archive:
+
+```bash
+cd /data/project/lyk/vsa-agent
+LATEST_RUN="$(ls -td artifacts/live-video-runs/* | head -1)"
+conda run -n vsa-agent python -m vsa_agent archive ingest "$LATEST_RUN" --index artifacts/video-archive/index.jsonl
+```
+
+Search the local archive without calling a live model:
+
+```bash
+conda run -n vsa-agent python -m vsa_agent archive search "forklift safety risk" --index artifacts/video-archive/index.jsonl --top-k 5
+```
+
+This validates that real live-video artifacts can be persisted as searchable local evidence for later `search_agent` workflows.
