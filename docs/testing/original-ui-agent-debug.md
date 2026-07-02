@@ -37,10 +37,16 @@ source .deps/node-env.sh
 npm run ui:install
 ```
 
-`ui:install` uses `npm ci`, defaults to the `https://registry.npmmirror.com` registry, and writes a full install log to `artifacts/original-ui-npm-install.log`. Override the registry when needed:
+`ui:install` uses `npm ci`, defaults to the `https://registry.npmmirror.com` registry, skips install scripts by default, and writes a full install log to `artifacts/original-ui-npm-install.log`. Override the registry when needed:
 
 ```bash
 NPM_CONFIG_REGISTRY=https://registry.npmjs.org npm run ui:install
+```
+
+If a package genuinely needs its install script, rerun with:
+
+```bash
+NPM_INSTALL_IGNORE_SCRIPTS=false npm run ui:install
 ```
 
 Run only the UI from the `vsa-agent` root:
