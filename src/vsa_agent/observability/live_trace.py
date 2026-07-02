@@ -1,23 +1,43 @@
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 SENSITIVE_KEY_PARTS = {"authorization", "secret", "password", "token"}
+_TRACE_PATH_CONTEXT: ContextVar[str | None] = ContextVar("vsa_live_trace_path", default=None)
+_ARTIFACT_DIR_CONTEXT: ContextVar[str | None] = ContextVar("vsa_live_artifact_dir", default=None)
+
+
+@contextmanager
+def live_trace_context(
+    trace_path: str | Path | None = None,
+    artifact_dir: str | Path | None = None,
+) -> Iterator[None]:
+    """Temporarily route live trace writes to request-local paths."""
+    trace_token = _TRACE_PATH_CONTEXT.set(str(trace_path) if trace_path else None)
+    artifact_token = _ARTIFACT_DIR_CONTEXT.set(str(artifact_dir) if artifact_dir else None)
+    try:
+        yield
+    finally:
+        _ARTIFACT_DIR_CONTEXT.reset(artifact_token)
+        _TRACE_PATH_CONTEXT.reset(trace_token)
 
 
 def live_trace_enabled() -> bool:
     """Return whether opt-in live trace logging is configured."""
-    return bool((os.getenv("VSA_LIVE_TRACE_PATH") or "").strip())
+    return bool((_TRACE_PATH_CONTEXT.get() or os.getenv("VSA_LIVE_TRACE_PATH") or "").strip())
 
 
 def get_live_artifact_dir() -> Path | None:
-    raw = (os.getenv("VSA_LIVE_ARTIFACT_DIR") or "").strip()
+    raw = (_ARTIFACT_DIR_CONTEXT.get() or os.getenv("VSA_LIVE_ARTIFACT_DIR") or "").strip()
     if raw:
         return Path(raw)
-    trace_path = (os.getenv("VSA_LIVE_TRACE_PATH") or "").strip()
+    trace_path = (_TRACE_PATH_CONTEXT.get() or os.getenv("VSA_LIVE_TRACE_PATH") or "").strip()
     if trace_path:
         return Path(trace_path).parent
     return None
@@ -91,7 +111,7 @@ def serialize_live_trace_value(value: Any) -> Any:
 
 def write_live_trace_event(event_type: str, payload: dict[str, Any]) -> None:
     """Append one JSONL live trace event when VSA_LIVE_TRACE_PATH is set."""
-    trace_path = (os.getenv("VSA_LIVE_TRACE_PATH") or "").strip()
+    trace_path = (_TRACE_PATH_CONTEXT.get() or os.getenv("VSA_LIVE_TRACE_PATH") or "").strip()
     if not trace_path:
         return
 

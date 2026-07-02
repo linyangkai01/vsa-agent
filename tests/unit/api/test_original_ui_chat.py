@@ -1,5 +1,7 @@
 import json
+import shutil
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
@@ -199,6 +201,40 @@ async def test_stream_original_ui_chat_injects_configured_video_path():
     assert "Configured video_path: /data/project/lyk/video/1597042367-1-192.mp4" in (
         fake_graph.received_state.current_message.content
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_original_ui_chat_writes_conversation_trace():
+    fake_graph = FakeGraph()
+    request = OriginalUIChatRequest(messages=[{"role": "user", "content": "inspect video"}])
+    trace_root = Path("artifacts/test-original-ui-chat-trace")
+    shutil.rmtree(trace_root, ignore_errors=True)
+
+    try:
+        frames = [
+            frame
+            async for frame in stream_original_ui_chat(
+                request,
+                conversation_id="conversation/1",
+                user_message_id="message:1",
+                graph_builder=lambda: build_fake_graph(fake_graph),
+                trace_root=trace_root,
+            )
+        ]
+
+        assert frames[-1] == "data: [DONE]\n\n"
+        run_dirs = [path for path in trace_root.iterdir() if path.is_dir()]
+        assert len(run_dirs) == 1
+        trace_path = run_dirs[0] / "trace.jsonl"
+        request_path = run_dirs[0] / "request.json"
+        assert trace_path.exists()
+        assert request_path.exists()
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        assert "original_ui.chat.request" in [event["event_type"] for event in events]
+        assert json.loads(request_path.read_text(encoding="utf-8"))["conversation_id"] == "conversation/1"
+        assert (trace_root / "latest.txt").read_text(encoding="utf-8").strip() == str(run_dirs[0])
+    finally:
+        shutil.rmtree(trace_root, ignore_errors=True)
 
 
 @pytest.mark.asyncio
