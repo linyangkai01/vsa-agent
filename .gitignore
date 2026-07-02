@@ -18,6 +18,8 @@ pytest-cache-files-*/
 .comet/
 .codegraph/
 node_modules/
+.next/
+.turbo/
 artifacts/
 tmp/
 

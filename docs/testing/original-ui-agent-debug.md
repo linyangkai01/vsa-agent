@@ -26,17 +26,39 @@ Expected:
 
 ## Original UI
 
-From the original UI repository:
+The original UI workspace is now vendored into this repository at `frontend/original-ui`.
+
+Install frontend dependencies from the `vsa-agent` root:
 
 ```bash
-cd /data/project/lyk/video-search-and-summarization-main/services/ui
-export NEXT_PUBLIC_WEB_SOCKET_DEFAULT_ON=false
-export NEXT_PUBLIC_ENABLE_INTERMEDIATE_STEPS=true
-export NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL=http://127.0.0.1:8000/chat/stream
-npx turbo dev --filter=./apps/nv-metropolis-bp-vss-ui
+cd /data/project/lyk/vsa-agent
+npm run ui:install
 ```
 
-If the UI runs in a browser outside the server, replace `127.0.0.1` with the server host that can reach `vsa-agent`.
+Run only the UI from the `vsa-agent` root:
+
+```bash
+cd /data/project/lyk/vsa-agent
+npm run ui:dev:vss
+```
+
+This script sets:
+
+- `NEXT_PUBLIC_WEB_SOCKET_DEFAULT_ON=false`
+- `NEXT_PUBLIC_ENABLE_INTERMEDIATE_STEPS=true`
+- `NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL=http://127.0.0.1:8000/chat/stream`
+- `NEXT_PUBLIC_AGENT_API_URL_BASE=http://127.0.0.1:8000/api/v1`
+
+If the UI runs in a browser outside the server, override `NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL` and `NEXT_PUBLIC_AGENT_API_URL_BASE` before running the script.
+
+Run backend and UI together from the `vsa-agent` root:
+
+```bash
+cd /data/project/lyk/vsa-agent
+npm run ui:stack:vss
+```
+
+`ui:stack:vss` starts the FastAPI backend through `conda run -n vsa-agent`, waits for `/health`, and then launches the original VSS UI.
 
 ## Browser Acceptance
 
