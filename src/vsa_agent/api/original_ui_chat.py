@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from typing import Any
 
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables.config import RunnableConfig
 from pydantic import BaseModel
 from pydantic import Field
 
 from vsa_agent.agents.data_models import AgentMessageChunk
 from vsa_agent.agents.data_models import AgentMessageChunkType
+from vsa_agent.agents.data_models import AgentState
+from vsa_agent.observability.live_trace import write_live_trace_event
 
 
 class OriginalUIChatMessage(BaseModel):
@@ -85,3 +92,56 @@ def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[s
     if chunk.type == AgentMessageChunkType.ERROR:
         return [format_intermediate_data("Error", chunk.content, status="error", index=index, error=chunk.content)]
     return []
+
+
+async def stream_original_ui_chat(
+    request: OriginalUIChatRequest,
+    conversation_id: str = "",
+    user_message_id: str = "",
+    graph_builder: Callable[[], Awaitable[Any]] | None = None,
+) -> AsyncIterator[str]:
+    if graph_builder is None:
+        from vsa_agent.agents.top_agent import build_graph
+
+        graph_builder = build_graph
+
+    user_text = extract_latest_user_text(request)
+    thread_id = conversation_id or "original-ui-chat"
+    graph = await graph_builder()
+    state = AgentState(current_message=HumanMessage(content=user_text))
+    config = RunnableConfig(
+        configurable={
+            "thread_id": thread_id,
+            "checkpoint_ns": "original-ui-chat",
+        }
+    )
+
+    write_live_trace_event(
+        "original_ui.chat.request",
+        {
+            "conversation_id": conversation_id,
+            "user_message_id": user_message_id,
+            "message": user_text,
+        },
+    )
+
+    index = 0
+    try:
+        async for chunk in graph.astream(state, config=config, stream_mode="custom"):
+            for frame in format_chunk_for_original_ui(chunk, index=index):
+                yield frame
+            index += 1
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        write_live_trace_event(
+            "original_ui.chat.error",
+            {
+                "conversation_id": conversation_id,
+                "user_message_id": user_message_id,
+                "error": message,
+            },
+        )
+        yield format_intermediate_data("Error", message, status="error", index=index, error=message)
+        yield format_openai_delta(f"Error: {message}")
+    finally:
+        yield format_done()
