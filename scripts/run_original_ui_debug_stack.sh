@@ -33,7 +33,7 @@ for _ in $(seq 1 30); do
   if curl -fsS "http://${BACKEND_HOST}:${BACKEND_PORT}/health" >/dev/null; then
     export NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL="${NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL:-http://${BACKEND_HOST}:${BACKEND_PORT}/chat/stream}"
     export NEXT_PUBLIC_AGENT_API_URL_BASE="${NEXT_PUBLIC_AGENT_API_URL_BASE:-http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1}"
-    exec "${ROOT_DIR}/scripts/run_original_ui_vss.sh"
+    exec bash "${ROOT_DIR}/scripts/run_original_ui_vss.sh"
   fi
   sleep 1
 done
