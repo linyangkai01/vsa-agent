@@ -174,3 +174,25 @@ async def test_stream_original_ui_chat_uses_default_thread_id_when_header_missin
 
     assert frames[-1] == "data: [DONE]\n\n"
     assert fake_graph.received_config["configurable"]["thread_id"] == "original-ui-chat"
+
+
+@pytest.mark.asyncio
+async def test_stream_original_ui_chat_emits_error_and_done_when_graph_setup_fails():
+    request = OriginalUIChatRequest(messages=[{"role": "user", "content": "inspect video"}])
+
+    async def broken_graph_builder():
+        raise RuntimeError("graph unavailable")
+
+    frames = [
+        frame
+        async for frame in stream_original_ui_chat(
+            request,
+            graph_builder=broken_graph_builder,
+        )
+    ]
+
+    assert frames[0].startswith("intermediate_data: ")
+    assert '"status": "error"' in frames[0]
+    assert "RuntimeError: graph unavailable" in frames[0]
+    assert "RuntimeError: graph unavailable" in frames[1]
+    assert frames[-1] == "data: [DONE]\n\n"
