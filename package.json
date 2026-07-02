@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "ui:install": "npm --prefix frontend/original-ui install",
+    "ui:install": "bash scripts/install_original_ui_deps.sh",
     "ui:dev:vss": "bash scripts/run_original_ui_vss.sh",
     "ui:stack:vss": "bash scripts/run_original_ui_debug_stack.sh"
   },
