@@ -86,6 +86,29 @@ bash scripts/run_original_ui_debug_stack.sh
 
 `ui:stack:vss` starts the FastAPI backend through `conda run -n vsa-agent`, waits for `/health`, and then launches the original VSS UI.
 
+## Smoke Test
+
+In a second terminal on the server, verify the backend stream and original UI proxy:
+
+```bash
+cd /data/project/lyk/vsa-agent
+source .deps/node-env.sh
+npm run ui:smoke:vss
+```
+
+The smoke test checks:
+
+- `GET /health` responds.
+- `POST /chat/stream` rejects empty messages with HTTP 400.
+- `POST /chat/stream` emits `data:` frames and `data: [DONE]`.
+- `POST /api/chat` on the UI dev server can proxy to the backend.
+
+If only the backend is running and the UI is not, skip the UI proxy check:
+
+```bash
+RUN_UI_PROXY_SMOKE=false bash scripts/smoke_original_ui_chat.sh
+```
+
 ## Browser Acceptance
 
 Open the original UI and send:
