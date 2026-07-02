@@ -39,6 +39,7 @@ NPM_ARGS=(
   "${INSTALL_MODE}"
   "--registry=${REGISTRY}"
   "--prefer-offline=false"
+  "--include=dev"
   "--audit=false"
   "--fund=false"
   "--progress=false"

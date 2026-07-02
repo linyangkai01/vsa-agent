@@ -37,7 +37,7 @@ source .deps/node-env.sh
 npm run ui:install
 ```
 
-`ui:install` uses `npm install` by default so interrupted installs can resume, installs only the VSS UI related workspaces, defaults to the `https://registry.npmmirror.com` registry, skips install scripts by default, and writes a full install log to `artifacts/original-ui-npm-install.log`. Override the registry when needed:
+`ui:install` uses `npm install` by default so interrupted installs can resume, installs only the VSS UI related workspaces, includes dev dependencies required by workspace build tools such as `turbo` and `swc`, defaults to the `https://registry.npmmirror.com` registry, skips install scripts by default, and writes a full install log to `artifacts/original-ui-npm-install.log`. Override the registry when needed:
 
 ```bash
 NPM_CONFIG_REGISTRY=https://registry.npmjs.org npm run ui:install
