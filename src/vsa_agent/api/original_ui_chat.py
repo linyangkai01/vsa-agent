@@ -111,26 +111,26 @@ async def stream_original_ui_chat(
 
     user_text = extract_latest_user_text(request)
     thread_id = conversation_id or "original-ui-chat"
-    graph = await graph_builder()
-    state = AgentState(current_message=HumanMessage(content=user_text))
-    config = RunnableConfig(
-        configurable={
-            "thread_id": thread_id,
-            "checkpoint_ns": "original-ui-chat",
-        }
-    )
-
-    write_live_trace_event(
-        "original_ui.chat.request",
-        {
-            "conversation_id": conversation_id,
-            "user_message_id": user_message_id,
-            "message": user_text,
-        },
-    )
-
     index = 0
     try:
+        graph = await graph_builder()
+        state = AgentState(current_message=HumanMessage(content=user_text))
+        config = RunnableConfig(
+            configurable={
+                "thread_id": thread_id,
+                "checkpoint_ns": "original-ui-chat",
+            }
+        )
+
+        write_live_trace_event(
+            "original_ui.chat.request",
+            {
+                "conversation_id": conversation_id,
+                "user_message_id": user_message_id,
+                "message": user_text,
+            },
+        )
+
         async for chunk in graph.astream(state, config=config, stream_mode="custom"):
             for frame in format_chunk_for_original_ui(chunk, index=index):
                 yield frame
