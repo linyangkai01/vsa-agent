@@ -29,5 +29,7 @@ export NEXT_PUBLIC_ENABLE_INTERMEDIATE_STEPS="${NEXT_PUBLIC_ENABLE_INTERMEDIATE_
 export NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL="${NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL:-http://127.0.0.1:8000/chat/stream}"
 export NEXT_PUBLIC_AGENT_API_URL_BASE="${NEXT_PUBLIC_AGENT_API_URL_BASE:-http://127.0.0.1:8000/api/v1}"
 
+export PATH="${UI_DIR}/node_modules/.bin:${UI_DIR}/packages/common/node_modules/.bin:${UI_DIR}/packages/nemo-agent-toolkit-ui/node_modules/.bin:${UI_DIR}/packages/nv-metropolis-bp-vss-ui/all/node_modules/.bin:${UI_DIR}/packages/nv-metropolis-bp-vss-ui/alerts/node_modules/.bin:${UI_DIR}/packages/nv-metropolis-bp-vss-ui/dashboard/node_modules/.bin:${UI_DIR}/packages/nv-metropolis-bp-vss-ui/map/node_modules/.bin:${UI_DIR}/packages/nv-metropolis-bp-vss-ui/search/node_modules/.bin:${UI_DIR}/packages/nv-metropolis-bp-vss-ui/video-management/node_modules/.bin:${PATH}"
+
 cd "${UI_DIR}"
 exec "${UI_DIR}/node_modules/.bin/turbo" dev --filter=./apps/nv-metropolis-bp-vss-ui
