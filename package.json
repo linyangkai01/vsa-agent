@@ -1,4 +1,9 @@
 {
+  "scripts": {
+    "ui:install": "npm --prefix frontend/original-ui install",
+    "ui:dev:vss": "bash scripts/run_original_ui_vss.sh",
+    "ui:stack:vss": "bash scripts/run_original_ui_debug_stack.sh"
+  },
   "dependencies": {
     "@fission-ai/openspec": "^1.5.0"
   }
