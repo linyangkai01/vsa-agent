@@ -7,6 +7,7 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-vsa-agent}"
 CONFIG_PATH="${VSA_CONFIG:-${ROOT_DIR}/config.yaml}"
 BACKEND_PROBE_TIMEOUT_SECONDS="${BACKEND_PROBE_TIMEOUT_SECONDS:-45}"
+RESTART_EXISTING_BACKEND_ON_PROBE_FAIL="${RESTART_EXISTING_BACKEND_ON_PROBE_FAIL:-true}"
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "conda is required to start the vsa-agent backend." >&2
@@ -61,6 +62,55 @@ probe_existing_backend() {
   return 0
 }
 
+backend_listener_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:${BACKEND_PORT}" -sTCP:LISTEN 2>/dev/null || true
+    return 0
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "${BACKEND_PORT}" 2>/dev/null | tr ' ' '\n' || true
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :${BACKEND_PORT}" 2>/dev/null \
+      | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
+      | sort -u
+    return 0
+  fi
+}
+
+stop_existing_backend() {
+  local pid args stopped=0
+  while read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    if ! args="$(ps -p "${pid}" -o args= 2>/dev/null)"; then
+      continue
+    fi
+    if [[ "${args}" != *"uvicorn"* && "${args}" != *"vsa_agent.api.routes"* ]]; then
+      echo "Refusing to stop PID ${pid}; it does not look like the vsa-agent uvicorn backend: ${args}" >&2
+      continue
+    fi
+    echo "Stopping stale backend PID ${pid}: ${args}"
+    kill "${pid}" >/dev/null 2>&1 || true
+    stopped=1
+  done < <(backend_listener_pids)
+
+  if [[ "${stopped}" != "1" ]]; then
+    echo "Could not find a safe vsa-agent backend process to stop on port ${BACKEND_PORT}." >&2
+    return 1
+  fi
+
+  for _ in $(seq 1 15); do
+    if ! curl -fsS "http://${BACKEND_HOST}:${BACKEND_PORT}/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Timed out waiting for stale backend on port ${BACKEND_PORT} to stop." >&2
+  return 1
+}
+
 cd "${ROOT_DIR}"
 
 export VSA_CONFIG="${CONFIG_PATH}"
@@ -86,8 +136,18 @@ if curl -fsS "http://${BACKEND_HOST}:${BACKEND_PORT}/health" >/dev/null; then
     echo "Using existing backend at http://${BACKEND_HOST}:${BACKEND_PORT}"
   else
     echo "The existing backend is healthy but not usable for original UI chat." >&2
-    echo "Stop the process currently using port ${BACKEND_PORT}, then restart this script so it can launch a backend with the config.local.yaml key." >&2
-    exit 2
+    if [[ "${RESTART_EXISTING_BACKEND_ON_PROBE_FAIL}" == "true" ]]; then
+      echo "Attempting to stop the stale backend on port ${BACKEND_PORT} and start a fresh one."
+      if ! stop_existing_backend; then
+        echo "Stop the process currently using port ${BACKEND_PORT}, then restart this script so it can launch a backend with the config.local.yaml key." >&2
+        exit 2
+      fi
+      conda run -n "${CONDA_ENV_NAME}" uvicorn vsa_agent.api.routes:app --host 0.0.0.0 --port "${BACKEND_PORT}" &
+      BACKEND_PID=$!
+    else
+      echo "Stop the process currently using port ${BACKEND_PORT}, then restart this script so it can launch a backend with the config.local.yaml key." >&2
+      exit 2
+    fi
   fi
 else
   conda run -n "${CONDA_ENV_NAME}" uvicorn vsa_agent.api.routes:app --host 0.0.0.0 --port "${BACKEND_PORT}" &
