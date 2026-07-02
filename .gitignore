@@ -8,6 +8,7 @@ dist/
 _nvidia-original/
 .conda-env/
 .conda-pkgs/
+.deps/
 .pytest_cache/
 .local_pytest_cache/
 pytest-cache-files-*/
