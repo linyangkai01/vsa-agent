@@ -1,4 +1,5 @@
 import json
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -10,6 +11,7 @@ from vsa_agent.api.original_ui_chat import format_chunk_for_original_ui
 from vsa_agent.api.original_ui_chat import format_done
 from vsa_agent.api.original_ui_chat import format_intermediate_data
 from vsa_agent.api.original_ui_chat import format_openai_delta
+from vsa_agent.api.original_ui_chat import stream_original_ui_chat
 
 
 def test_extract_latest_user_text_uses_last_user_message():
@@ -43,6 +45,23 @@ def test_extract_latest_user_text_supports_multimodal_text_parts():
 
 def test_extract_latest_user_text_rejects_empty_payload():
     request = OriginalUIChatRequest(messages=[{"role": "assistant", "content": "no user"}])
+
+    with pytest.raises(ValueError, match="No user message"):
+        extract_latest_user_text(request)
+
+
+def test_extract_latest_user_text_rejects_user_message_without_text_content():
+    request = OriginalUIChatRequest(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image_url": "ignored"},
+                    {"type": "text", "text": "   "},
+                ],
+            }
+        ]
+    )
 
     with pytest.raises(ValueError, match="No user message"):
         extract_latest_user_text(request)
@@ -98,3 +117,60 @@ def test_format_chunk_for_original_ui_maps_tool_call_to_intermediate_data():
     payload = json.loads(frames[0].removeprefix("intermediate_data: ").strip())
     assert payload["name"] == "Tool Call"
     assert payload["payload"] == "Calling: video_understanding"
+
+
+class FakeGraph:
+    def __init__(self):
+        self.received_state = None
+        self.received_config = None
+
+    async def astream(self, state, config=None, stream_mode=None) -> AsyncIterator[AgentMessageChunk]:
+        self.received_state = state
+        self.received_config = config
+        assert stream_mode == "custom"
+        yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content="Analyzing...")
+        yield AgentMessageChunk(type=AgentMessageChunkType.TOOL_CALL, content="Calling: video_understanding")
+        yield AgentMessageChunk(type=AgentMessageChunkType.FINAL, content="The worker is on a platform.")
+
+
+async def build_fake_graph(fake_graph: FakeGraph):
+    return fake_graph
+
+
+@pytest.mark.asyncio
+async def test_stream_original_ui_chat_runs_graph_and_emits_compatible_frames():
+    fake_graph = FakeGraph()
+    request = OriginalUIChatRequest(messages=[{"role": "user", "content": "inspect video"}])
+
+    frames = [
+        frame
+        async for frame in stream_original_ui_chat(
+            request,
+            conversation_id="conversation-1",
+            user_message_id="message-1",
+            graph_builder=lambda: build_fake_graph(fake_graph),
+        )
+    ]
+
+    assert any(frame.startswith("intermediate_data: ") for frame in frames)
+    assert any('"The worker is on a platform."' in frame for frame in frames)
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert fake_graph.received_state.current_message.content == "inspect video"
+    assert fake_graph.received_config["configurable"]["thread_id"] == "conversation-1"
+
+
+@pytest.mark.asyncio
+async def test_stream_original_ui_chat_uses_default_thread_id_when_header_missing():
+    fake_graph = FakeGraph()
+    request = OriginalUIChatRequest(messages=[{"role": "user", "content": "inspect video"}])
+
+    frames = [
+        frame
+        async for frame in stream_original_ui_chat(
+            request,
+            graph_builder=lambda: build_fake_graph(fake_graph),
+        )
+    ]
+
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert fake_graph.received_config["configurable"]["thread_id"] == "original-ui-chat"
