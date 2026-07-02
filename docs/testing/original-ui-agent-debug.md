@@ -32,6 +32,8 @@ Install frontend dependencies from the `vsa-agent` root:
 
 ```bash
 cd /data/project/lyk/vsa-agent
+bash scripts/bootstrap_node.sh
+source .deps/node-env.sh
 npm run ui:install
 ```
 
@@ -39,7 +41,7 @@ Run only the UI from the `vsa-agent` root:
 
 ```bash
 cd /data/project/lyk/vsa-agent
-npm run ui:dev:vss
+bash scripts/run_original_ui_vss.sh
 ```
 
 This script sets:
@@ -55,7 +57,7 @@ Run backend and UI together from the `vsa-agent` root:
 
 ```bash
 cd /data/project/lyk/vsa-agent
-npm run ui:stack:vss
+bash scripts/run_original_ui_debug_stack.sh
 ```
 
 `ui:stack:vss` starts the FastAPI backend through `conda run -n vsa-agent`, waits for `/health`, and then launches the original VSS UI.

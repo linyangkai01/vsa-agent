@@ -4,13 +4,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UI_DIR="${ROOT_DIR}/frontend/original-ui"
 
+if [[ -f "${ROOT_DIR}/.deps/node-env.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.deps/node-env.sh"
+fi
+
 if ! command -v npm >/dev/null 2>&1; then
-  echo "npm is required. Install Node.js and npm first." >&2
+  echo "npm is required. Run: bash scripts/bootstrap_node.sh" >&2
   exit 1
 fi
 
 if ! command -v npx >/dev/null 2>&1; then
-  echo "npx is required. Install npm with npx support first." >&2
+  echo "npx is required. Run: bash scripts/bootstrap_node.sh" >&2
   exit 1
 fi
 
