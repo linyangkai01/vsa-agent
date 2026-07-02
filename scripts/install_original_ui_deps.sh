@@ -22,17 +22,19 @@ REGISTRY="${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}"
 INSTALL_TIMEOUT_SECONDS="${NPM_INSTALL_TIMEOUT_SECONDS:-900}"
 IGNORE_SCRIPTS="${NPM_INSTALL_IGNORE_SCRIPTS:-true}"
 HEARTBEAT_SECONDS="${NPM_INSTALL_HEARTBEAT_SECONDS:-15}"
+INSTALL_MODE="${NPM_INSTALL_MODE:-install}"
 
 echo "Installing original UI dependencies in ${UI_DIR}"
 echo "Registry: ${REGISTRY}"
 echo "Ignore install scripts: ${IGNORE_SCRIPTS}"
+echo "Install mode: ${INSTALL_MODE}"
 echo "Log: ${LOG_FILE}"
 echo
 
 cd "${UI_DIR}"
 
 NPM_ARGS=(
-  ci
+  "${INSTALL_MODE}"
   "--registry=${REGISTRY}"
   "--prefer-offline=false"
   "--audit=false"
