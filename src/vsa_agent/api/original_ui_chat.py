@@ -14,6 +14,7 @@ from pydantic import Field
 from vsa_agent.agents.data_models import AgentMessageChunk
 from vsa_agent.agents.data_models import AgentMessageChunkType
 from vsa_agent.agents.data_models import AgentState
+from vsa_agent.config import resolve_runtime_config
 from vsa_agent.observability.live_trace import write_live_trace_event
 
 
@@ -50,6 +51,29 @@ def extract_latest_user_text(request: OriginalUIChatRequest) -> str:
             if text:
                 return text
     raise ValueError("No user message with text content found.")
+
+
+def inject_configured_video_context(user_text: str, configured_video_path: str = "") -> str:
+    video_path = configured_video_path.strip()
+    if not video_path:
+        return user_text
+
+    normalized = user_text.lower()
+    if "configured video" not in normalized and "default video" not in normalized:
+        return user_text
+    if video_path in user_text:
+        return user_text
+
+    return (
+        f"{user_text}\n\n"
+        f"Configured video_path: {video_path}\n"
+        "Use this video_path directly with video_understanding for the user's request. "
+        "Do not call list_videos or ask the user to upload a video."
+    )
+
+
+def _get_configured_video_path() -> str:
+    return resolve_runtime_config().runtime.video_path
 
 
 def format_openai_delta(content: str) -> str:
@@ -105,11 +129,15 @@ async def stream_original_ui_chat(
     conversation_id: str = "",
     user_message_id: str = "",
     graph_builder: Callable[[], Awaitable[Any]] | None = None,
+    configured_video_path: str | None = None,
 ) -> AsyncIterator[str]:
     if graph_builder is None:
         graph_builder = build_default_graph_for_original_ui
 
-    user_text = extract_latest_user_text(request)
+    raw_user_text = extract_latest_user_text(request)
+    if configured_video_path is None:
+        configured_video_path = _get_configured_video_path()
+    user_text = inject_configured_video_context(raw_user_text, configured_video_path)
     thread_id = conversation_id or "original-ui-chat"
     index = 0
     try:
@@ -127,7 +155,9 @@ async def stream_original_ui_chat(
             {
                 "conversation_id": conversation_id,
                 "user_message_id": user_message_id,
-                "message": user_text,
+                "message": raw_user_text,
+                "resolved_message": user_text,
+                "configured_video_path": configured_video_path,
             },
         )
 
