@@ -806,11 +806,14 @@ async def video_understanding_tool(
     model_adapter=None,
     frames: list[str] | None = None,
     source_type: str = "video_file",
+    type: str | None = None,
     sensor_id: str | None = None,
     start_timestamp: str | int | float | None = None,
     end_timestamp: str | int | float | None = None,
 ) -> str:
     """Analyze a video file in one step and keep the legacy text return path."""
+    if type and source_type == "video_file":
+        source_type = type
     result = await analyze_video(
         video_path=video_path,
         query=query,
