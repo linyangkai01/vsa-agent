@@ -148,6 +148,9 @@ def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[s
         return [format_intermediate_data("Thought", chunk.content, index=index)]
     if chunk.type == AgentMessageChunkType.TOOL_CALL:
         return [format_intermediate_data("Tool Call", chunk.content, index=index)]
+    if chunk.type == AgentMessageChunkType.TOOL_PROGRESS:
+        status = "completed" if chunk.metadata.get("status") == "completed" else "in_progress"
+        return [format_intermediate_data("Tool Progress", chunk.content, status=status, index=index)]
     if chunk.type == AgentMessageChunkType.TOOL_RESULT:
         return [format_intermediate_data("Tool Result", chunk.content, status="completed", index=index)]
     if chunk.type == AgentMessageChunkType.ERROR:

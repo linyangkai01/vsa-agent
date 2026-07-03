@@ -23,7 +23,7 @@ _INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter",
                      "kwargs", "args", "kwds"}
 
 _MAX_TOOL_RESULT_CHARS = 800
-_MAX_VIDEO_TOOL_RESULT_CHARS = 2000
+_MAX_VIDEO_TOOL_RESULT_CHARS = 3200
 _VIDEO_RESULT_TOOL_NAMES = {"video_understanding", "lvs_video_understanding"}
 _PRIMARY_VIDEO_RESULT_KEYWORDS = (
     "risk",
@@ -48,6 +48,52 @@ _SECONDARY_VIDEO_RESULT_KEYWORDS = (
     "vehicle",
     "electrical",
     "fire",
+)
+_VIDEO_RISK_CATEGORIES = (
+    (
+        "Eye / face protection",
+        ("eye protection", "safety goggles", "face shield", "flying sparks", "flying debris"),
+    ),
+    (
+        "PPE / visibility",
+        (
+            "ppe",
+            "hard hat",
+            "safety vest",
+            "high-visibility",
+            "eye protection",
+            "goggles",
+            "face shield",
+            "glove",
+            "ear protection",
+            "respiratory",
+            "mask",
+        ),
+    ),
+    (
+        "Fire / hot work",
+        ("fire", "spark", "welding", "grinding", "angle grinder", "hot work", "flammable"),
+    ),
+    (
+        "Slip / trip / housekeeping",
+        ("slip", "trip", "wet", "muddy", "debris", "clutter", "uneven", "gravel", "dust"),
+    ),
+    (
+        "Fall / work at height",
+        ("fall", "height", "scaffold", "rebar framework", "guardrail", "toe board", "harness", "lanyard"),
+    ),
+    (
+        "Heavy equipment / struck-by",
+        ("crane", "vehicle", "excavator", "hydraulic breaker", "heavy machinery", "struck", "barrier"),
+    ),
+    (
+        "Machine guarding / pinch points",
+        ("machine", "bending", "moving parts", "guard", "entanglement", "pinch"),
+    ),
+    (
+        "Chemical / respiratory exposure",
+        ("chemical", "fume", "smoke", "respiratory", "dust", "ventilation", "inhalation"),
+    ),
 )
 _SENSITIVE_ARG_MARKERS = ("key", "token", "secret", "password", "credential")
 _UNRECOVERABLE_TOOL_ERROR_MARKERS = (
@@ -135,9 +181,6 @@ def _truncate_result(name: str, result: str) -> str:
 
 def _truncate_video_result(result: str) -> str:
     """Keep enough long-video evidence for the LLM to answer without rerunning it."""
-    lines = [line.strip() for line in result.splitlines() if line.strip()]
-    keyword_lines = _select_video_keyword_lines(lines)
-
     head = _truncate_text(result, 420)
     tail = _truncate_text(result[-420:], 420)
     parts = [
@@ -145,20 +188,73 @@ def _truncate_video_result(result: str) -> str:
         "[BEGINNING]",
         head,
     ]
-    if keyword_lines:
-        parts.extend(["[KEY SAFETY/RISK EVIDENCE]", *_fit_lines(keyword_lines, 900)])
+    digest_lines = _build_video_risk_digest(result)
+    if digest_lines:
+        parts.extend(["[RISK DIGEST BY CATEGORY]", *_fit_lines(digest_lines, 1850)])
     parts.extend(["[ENDING]", tail])
 
     summary = "\n".join(parts)
     return _truncate_text(summary, _MAX_VIDEO_TOOL_RESULT_CHARS)
 
 
-def _select_video_keyword_lines(lines: list[str]) -> list[str]:
+def _build_video_risk_digest(result: str) -> list[str]:
+    sections = _split_video_result_sections(result)
+    if not sections:
+        return []
+
+    digest = []
+    used_sections: set[int] = set()
+    for category, keywords in _VIDEO_RISK_CATEGORIES:
+        matches = _select_category_evidence(sections, keywords, used_sections)
+        for index, evidence in matches:
+            used_sections.add(index)
+            digest.append(f"- {category}: {evidence}")
+            break
+
+    if len(digest) < 6:
+        fallback_lines = _select_video_keyword_lines([section for _, section in sections], used_sections)
+        digest.extend(f"- Additional evidence: {line}" for line in fallback_lines[: 6 - len(digest)])
+
+    if digest:
+        digest.insert(0, f"Coverage: selected {len(digest)} risk snippets from {len(sections)} observed sections.")
+    return digest
+
+
+def _split_video_result_sections(result: str) -> list[tuple[int, str]]:
+    raw_sections = [section.strip() for section in result.split("\n\n") if section.strip()]
+    if len(raw_sections) <= 1:
+        raw_sections = [line.strip() for line in result.splitlines() if line.strip()]
+    return [(index, section) for index, section in enumerate(raw_sections)]
+
+
+def _select_category_evidence(
+    sections: list[tuple[int, str]],
+    keywords: tuple[str, ...],
+    used_sections: set[int],
+) -> list[tuple[int, str]]:
+    preferred = []
+    fallback = []
+    for index, section in sections:
+        lowered = section.lower()
+        if not any(keyword in lowered for keyword in keywords):
+            continue
+        evidence = _truncate_text(" ".join(section.split()), 260)
+        if index in used_sections:
+            fallback.append((index, evidence))
+        else:
+            preferred.append((index, evidence))
+    return preferred or fallback
+
+
+def _select_video_keyword_lines(lines: list[str], used_indexes: set[int] | None = None) -> list[str]:
+    used_indexes = used_indexes or set()
     selected = []
     seen = set()
 
     def add_matches(keywords: tuple[str, ...]) -> None:
-        for line in lines:
+        for index, line in enumerate(lines):
+            if index in used_indexes:
+                continue
             lowered = line.lower()
             if not any(keyword in lowered for keyword in keywords):
                 continue
@@ -250,8 +346,8 @@ def _format_tool_result_step(
     cached: bool = False,
 ) -> str:
     preview = _truncate_result(name, result)
-    if len(preview) > 1200:
-        preview = _truncate_text(preview, 1200)
+    if len(preview) > 1800:
+        preview = _truncate_text(preview, 1800)
     status = "Reused cached result" if cached else "Completed"
     lines = [
         f"{status}: {name}",

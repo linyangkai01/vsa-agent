@@ -60,6 +60,8 @@ async def test_summarize_uses_model_adapter_when_provided():
 
     assert summary.text_output == "LLM summary about forklift activity"
     assert calls
+    prompt_text = calls[0][1].content
+    assert "Structured summary" in prompt_text
 
 
 @pytest.mark.anyio
@@ -75,6 +77,80 @@ async def test_summarize_uses_default_text_when_summary_missing():
     )
     summary = await summarize_understanding_result(result, "what happened")
     assert summary.text_output == "No notable events detected."
+
+
+@pytest.mark.anyio
+async def test_summarize_prefers_risk_digest_for_long_video_result():
+    from vsa_agent.tools.vss_summarize import summarize_understanding_result
+
+    result = UnderstandingResult(
+        query="identify safety risks",
+        source_type="video_file",
+        summary_text="raw long video text",
+        chunks=[],
+        events=[],
+        metadata={
+            "chunk_count": 3,
+            "risk_digest": [
+                {
+                    "category": "Fire / hot work",
+                    "chunk_index": 2,
+                    "start_timestamp": "00:00:30",
+                    "end_timestamp": "00:01:00",
+                    "evidence": "Welding operation produces smoke and sparks.",
+                },
+                {
+                    "category": "Slip / trip / housekeeping",
+                    "chunk_index": 3,
+                    "start_timestamp": "00:01:00",
+                    "end_timestamp": "00:01:30",
+                    "evidence": "Wet debris-covered ground near hydraulic breaker.",
+                },
+            ],
+        },
+    )
+
+    summary = await summarize_understanding_result(result, "identify safety risks")
+
+    assert summary.text_output.startswith("Risk digest by chunk:")
+    assert "Chunk 2 [00:00:30 - 00:01:00] Fire / hot work" in summary.text_output
+    assert "Welding operation produces smoke and sparks" in summary.text_output
+    assert "raw long video text" not in summary.text_output
+
+
+@pytest.mark.anyio
+async def test_summarize_model_adapter_receives_risk_digest_when_available():
+    from vsa_agent.tools.vss_summarize import summarize_understanding_result
+
+    calls = []
+
+    class FakeAdapter:
+        async def invoke(self, messages):
+            calls.append(messages)
+            return type("Response", (), {"content": "digest summary"})()
+
+    result = UnderstandingResult(
+        query="identify safety risks",
+        source_type="video_file",
+        summary_text="raw long video text",
+        chunks=[],
+        events=[],
+        metadata={
+            "risk_digest": [
+                {
+                    "category": "PPE / visibility",
+                    "chunk_index": 1,
+                    "evidence": "Safety vests are not clearly visible.",
+                }
+            ],
+        },
+    )
+
+    summary = await summarize_understanding_result(result, "identify safety risks", model_adapter=FakeAdapter())
+
+    assert summary.text_output == "digest summary"
+    assert "Risk digest by chunk" in calls[0][1].content
+    assert "Safety vests are not clearly visible" in calls[0][1].content
 
 
 @pytest.mark.anyio

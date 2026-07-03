@@ -14,6 +14,7 @@ class TestAgentMessageChunkType:
     def test_values(self):
         assert AgentMessageChunkType.THOUGHT.value == "thought"
         assert AgentMessageChunkType.TOOL_CALL.value == "tool_call"
+        assert AgentMessageChunkType.TOOL_PROGRESS.value == "tool_progress"
         assert AgentMessageChunkType.TOOL_RESULT.value == "tool_result"
         assert AgentMessageChunkType.FINAL.value == "final"
 

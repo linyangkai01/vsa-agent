@@ -161,6 +161,23 @@ def test_format_chunk_for_original_ui_maps_tool_result_to_completed_intermediate
     assert "Result length: 123 chars" in payload["payload"]
 
 
+def test_format_chunk_for_original_ui_maps_tool_progress_to_intermediate_data():
+    frames = format_chunk_for_original_ui(
+        AgentMessageChunk(
+            type=AgentMessageChunkType.TOOL_PROGRESS,
+            content="Completed video chunk 2/7\nElapsed: 9.3s",
+            metadata={"status": "completed"},
+        ),
+        index=4,
+    )
+
+    assert len(frames) == 1
+    payload = json.loads(frames[0].removeprefix("intermediate_data: ").strip())
+    assert payload["name"] == "Tool Progress"
+    assert payload["status"] == "completed"
+    assert "Completed video chunk 2/7" in payload["payload"]
+
+
 class FakeGraph:
     def __init__(self):
         self.received_state = None
