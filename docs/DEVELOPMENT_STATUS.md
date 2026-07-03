@@ -19,6 +19,12 @@ Last updated: 2026-07-03
 - Push `master` to origin.
 - Keep remote branches cleaned up; this project does not normally use PR branches.
 
+## Parallel Development Policy
+
+- Comet decides whether work should be parallelized.
+- Parallel work must use the relevant Comet/Superpowers skills, such as `dispatching-parallel-agents` or `subagent-driven-development`.
+- The main session remains responsible for integration, verification, cleanup, and the final local merge to `master`.
+
 ## Latest Verified Change
 
 `wire-es-ingest`
