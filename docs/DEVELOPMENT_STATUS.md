@@ -12,6 +12,9 @@ Last updated: 2026-07-03
 ## Git Policy
 
 - Develop on local temporary branches or worktrees.
+- Prefer branches for ordinary single-threaded work.
+- Use worktrees only when parallel local runtimes, side-by-side comparison, or a long-running isolated experiment is genuinely useful.
+- For small safe documentation/configuration tweaks on a clean `master`, avoid unnecessary branch/worktree churn.
 - Merge completed work into local `master`.
 - Push `master` to origin.
 - Keep remote branches cleaned up; this project does not normally use PR branches.
