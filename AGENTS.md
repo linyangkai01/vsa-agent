@@ -12,6 +12,11 @@
   - Push `master` to the remote repository.
   - Do not use remote feature branches or Pull Requests as the normal completion path.
   - Remote repository state should normally contain only `master`.
+- Parallel development MUST be coordinated by `comet`:
+  - Use Comet to decide whether work is truly parallelizable before dispatching concurrent implementation work.
+  - When parallel development is appropriate, Comet MUST invoke the relevant skills, such as `dispatching-parallel-agents` for independent investigation domains or `subagent-driven-development` for independent implementation tasks from a plan.
+  - Keep the main session responsible for coordination, integration, verification, Git cleanup, and final merge back to local `master`.
+  - Do not manually create unrelated parallel branches, worktrees, or agent sessions outside the Comet workflow.
 - If local code changes are intended to run on a project server, and the project documentation or current task explicitly identifies that server as the validation environment, sync the updated code to the server and run the required server-side validation before marking the work complete.
 
 ## End-Of-Turn Reporting
