@@ -178,6 +178,37 @@ def test_format_chunk_for_original_ui_maps_tool_progress_to_intermediate_data():
     assert "Completed video chunk 2/7" in payload["payload"]
 
 
+def test_format_chunk_for_original_ui_enriches_tool_progress_from_metadata():
+    frames = format_chunk_for_original_ui(
+        AgentMessageChunk(
+            type=AgentMessageChunkType.TOOL_PROGRESS,
+            content="Completed video chunk 2/7",
+            metadata={
+                "status": "completed",
+                "chunk_index": 2,
+                "chunk_count": 7,
+                "start_timestamp": 30.0,
+                "end_timestamp": 60.0,
+                "elapsed_sec": 12.345,
+                "frame_count": 8,
+                "risk_category": "Fire / hot work",
+                "risk_evidence": "Welding sparks without a visible face shield.",
+                "evidence_type": "observed",
+                "raw_artifact_path": "/tmp/raw.txt",
+                "result_artifact_path": "/tmp/result.json",
+            },
+        ),
+        index=4,
+    )
+
+    payload = json.loads(frames[0].removeprefix("intermediate_data: ").strip())
+    assert payload["name"] == "Tool Progress"
+    assert "Risk: Fire / hot work" in payload["payload"]
+    assert "Evidence type: observed" in payload["payload"]
+    assert "Raw VLM output: /tmp/raw.txt" in payload["payload"]
+    assert "Result JSON: /tmp/result.json" in payload["payload"]
+
+
 class FakeGraph:
     def __init__(self):
         self.received_state = None

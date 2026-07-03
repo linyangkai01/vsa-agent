@@ -141,6 +141,27 @@ def format_intermediate_data(
     return f"intermediate_data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _format_tool_progress_payload(chunk: AgentMessageChunk) -> str:
+    lines = [line for line in chunk.content.splitlines() if line.strip()]
+    metadata = chunk.metadata or {}
+
+    additions = []
+    if metadata.get("risk_category") and not any(line.startswith("Risk:") for line in lines):
+        additions.append(f"Risk: {metadata['risk_category']}")
+    if metadata.get("evidence_type") and not any(line.startswith("Evidence type:") for line in lines):
+        additions.append(f"Evidence type: {metadata['evidence_type']}")
+    if metadata.get("risk_evidence") and not any(line.startswith("Key evidence:") for line in lines):
+        additions.append(f"Key evidence: {metadata['risk_evidence']}")
+    if metadata.get("frame_count") is not None and not any(line.startswith("Frames:") for line in lines):
+        additions.append(f"Frames: {metadata['frame_count']} sampled")
+    if metadata.get("raw_artifact_path") and not any(line.startswith("Raw VLM output:") for line in lines):
+        additions.append(f"Raw VLM output: {metadata['raw_artifact_path']}")
+    if metadata.get("result_artifact_path") and not any(line.startswith("Result JSON:") for line in lines):
+        additions.append(f"Result JSON: {metadata['result_artifact_path']}")
+
+    return "\n".join([*lines, *additions])
+
+
 def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[str]:
     if chunk.type == AgentMessageChunkType.FINAL:
         return [format_openai_delta(chunk.content)]
@@ -150,7 +171,7 @@ def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[s
         return [format_intermediate_data("Tool Call", chunk.content, index=index)]
     if chunk.type == AgentMessageChunkType.TOOL_PROGRESS:
         status = "completed" if chunk.metadata.get("status") == "completed" else "in_progress"
-        return [format_intermediate_data("Tool Progress", chunk.content, status=status, index=index)]
+        return [format_intermediate_data("Tool Progress", _format_tool_progress_payload(chunk), status=status, index=index)]
     if chunk.type == AgentMessageChunkType.TOOL_RESULT:
         return [format_intermediate_data("Tool Result", chunk.content, status="completed", index=index)]
     if chunk.type == AgentMessageChunkType.ERROR:

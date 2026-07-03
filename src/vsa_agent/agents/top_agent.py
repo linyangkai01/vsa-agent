@@ -181,6 +181,9 @@ def _truncate_result(name: str, result: str) -> str:
 
 def _truncate_video_result(result: str) -> str:
     """Keep enough long-video evidence for the LLM to answer without rerunning it."""
+    if result.startswith("Risk digest by chunk:") and "Only state direct observations as facts." in result:
+        return _truncate_text(result, _MAX_VIDEO_TOOL_RESULT_CHARS)
+
     head = _truncate_text(result, 420)
     tail = _truncate_text(result[-420:], 420)
     parts = [

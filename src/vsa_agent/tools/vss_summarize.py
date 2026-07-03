@@ -81,19 +81,27 @@ def _risk_digest_to_text(result: UnderstandingResult) -> str:
     if not isinstance(digest, list) or not digest:
         return ""
 
-    lines = ["Risk digest by chunk:"]
+    lines = [
+        "Risk digest by chunk:",
+        "Use the evidence type carefully: state observed evidence as fact, "
+        "and label inferred_or_recommended items as checks or recommendations. "
+        "Only state direct observations as facts.",
+    ]
     for item in digest:
         if not isinstance(item, dict):
             continue
         category = str(item.get("category", "") or "Additional evidence")
         chunk_index = item.get("chunk_index")
-        start = str(item.get("start_timestamp", "") or "")
-        end = str(item.get("end_timestamp", "") or "")
+        time_range = item.get("time_range") if isinstance(item.get("time_range"), dict) else {}
+        start = str(time_range.get("start") or item.get("start_timestamp", "") or "")
+        end = str(time_range.get("end") or item.get("end_timestamp", "") or "")
         evidence = str(item.get("evidence", "") or "").strip()
+        evidence_type = str(item.get("evidence_type", "") or "").strip()
         prefix = f"Chunk {chunk_index}" if chunk_index is not None else "Chunk"
         window = f" [{start} - {end}]" if start or end else ""
+        evidence_marker = f" [{evidence_type}]" if evidence_type else ""
         if evidence:
-            lines.append(f"- {prefix}{window} {category}: {evidence}")
+            lines.append(f"- {prefix}{window} {category}{evidence_marker}: {evidence}")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 

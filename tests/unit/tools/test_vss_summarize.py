@@ -119,6 +119,46 @@ async def test_summarize_prefers_risk_digest_for_long_video_result():
 
 
 @pytest.mark.anyio
+async def test_summarize_renders_structured_risk_digest_grounding_fields():
+    from vsa_agent.tools.vss_summarize import summarize_understanding_result
+
+    result = UnderstandingResult(
+        query="identify safety risks",
+        source_type="video_file",
+        summary_text="raw long video text",
+        chunks=[],
+        events=[],
+        metadata={
+            "risk_digest": [
+                {
+                    "category": "Fire / hot work",
+                    "chunk_index": 2,
+                    "time_range": {"start": "00:00:30", "end": "00:01:00"},
+                    "evidence": "Welding sparks are visible and one worker lacks a face shield.",
+                    "evidence_type": "observed",
+                    "inference": False,
+                },
+                {
+                    "category": "Machine guarding / pinch points",
+                    "chunk_index": 5,
+                    "time_range": {"start": "00:02:00", "end": "00:02:30"},
+                    "evidence": "Check guarding around the rebar bending machine pinch points.",
+                    "evidence_type": "inferred_or_recommended",
+                    "inference": True,
+                },
+            ],
+        },
+    )
+
+    summary = await summarize_understanding_result(result, "identify safety risks")
+
+    assert "[observed]" in summary.text_output
+    assert "[inferred_or_recommended]" in summary.text_output
+    assert "Only state direct observations as facts" in summary.text_output
+    assert "Chunk 2 [00:00:30 - 00:01:00] Fire / hot work" in summary.text_output
+
+
+@pytest.mark.anyio
 async def test_summarize_model_adapter_receives_risk_digest_when_available():
     from vsa_agent.tools.vss_summarize import summarize_understanding_result
 

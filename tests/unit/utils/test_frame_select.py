@@ -45,3 +45,21 @@ class TestFramesForTimestampRange:
             end_ts=10.0,
         )
         assert indices == [0, 24, 49]
+
+    def test_adjacent_windows_do_not_repeat_boundary_frame(self):
+        first = frames_for_timestamp_range(
+            fps=30.0,
+            duration_sec=60.0,
+            max_frames=4,
+            start_ts=0.0,
+            end_ts=30.0,
+        )
+        second = frames_for_timestamp_range(
+            fps=30.0,
+            duration_sec=60.0,
+            max_frames=4,
+            start_ts=30.0,
+            end_ts=60.0,
+        )
+
+        assert first[-1] < second[0]

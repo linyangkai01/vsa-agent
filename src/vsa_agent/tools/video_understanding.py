@@ -604,10 +604,17 @@ async def analyze_video_segment(
         sensor_id=sensor_id,
         filter_thinking=tool_config.filter_thinking,
     )
+    result.metadata.update(
+        {
+            "frame_count": len(frames or []),
+            "raw_artifact_path": raw_artifact_path,
+        }
+    )
     result_artifact_path = write_live_json_artifact(
         "tool-results/video-understanding-result.json",
         result.model_dump(),
     )
+    result.metadata["result_artifact_path"] = result_artifact_path
     write_live_trace_event(
         "video_understanding.result",
         {
