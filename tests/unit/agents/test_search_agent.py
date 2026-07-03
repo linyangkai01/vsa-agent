@@ -192,6 +192,40 @@ def test_execute_search_public_signature_stays_stable():
 
 
 @pytest.mark.asyncio
+async def test_execute_search_agent_resolves_embed_search_with_requested_top_k(monkeypatch):
+    from vsa_agent.agents.search_agent import execute_search
+
+    calls = []
+
+    async def fake_embed_search(query, top_k):
+        calls.append((query, top_k))
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="topk.mp4",
+                    description="worker enters area",
+                    start_time="2026-07-03T08:00:00Z",
+                    end_time="2026-07-03T08:00:05Z",
+                    sensor_id="cam-1",
+                    similarity=0.8,
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get",
+        lambda name: fake_embed_search if name == "embed_search" else None,
+    )
+
+    result = await execute_search(
+        SearchAgentInput(query="worker enters area", agent_mode=False, max_results=2, top_k=2)
+    )
+
+    assert result.data[0].video_name == "topk.mp4"
+    assert calls == [("worker enters area", 2)]
+
+
+@pytest.mark.asyncio
 async def test_execute_search_fusion_does_not_call_critic_when_use_critic_is_false(monkeypatch):
     from vsa_agent.agents.search_agent import execute_search
     from vsa_agent.tools.search import DecomposedQuery
@@ -698,4 +732,3 @@ async def test_search_agent_tool_returns_text_answer_from_agent_flow(monkeypatch
     assert flow_calls[0][0].query == "worker closes gate"
     assert flow_calls[0][0].agent_mode is False
     assert flow_calls[0][0].max_results == 3
-

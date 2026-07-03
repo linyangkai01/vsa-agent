@@ -239,8 +239,10 @@ async def search_single_attribute(
     if es_client is None:
         from vsa_agent.config import get_config
 
-        cfg = get_config()
-        es_client = AsyncElasticsearch(cfg.search.es_endpoint)
+        search_config = get_config().search
+        if not search_config.enabled or not search_config.es_endpoint:
+            return await _mock_attribute_search(query_text, search_input)
+        es_client = AsyncElasticsearch(search_config.es_endpoint)
         close_client = True
 
     try:
@@ -301,17 +303,21 @@ async def search_by_attributes(
     try:
         from vsa_agent.config import get_config
 
-        cfg = get_config()
-        es_client = AsyncElasticsearch(cfg.search.es_endpoint)
-        index_exists = await es_client.indices.exists(index=cfg.search.behavior_index)
+        search_config = get_config().search
+        if not search_config.enabled or not search_config.es_endpoint:
+            if allow_mock_fallback:
+                return await _mock_attribute_search(query_text, search_input)
+            return []
+        es_client = AsyncElasticsearch(search_config.es_endpoint)
+        index_exists = await es_client.indices.exists(index=search_config.behavior_index)
         if index_exists:
             return await search_single_attribute(
                 query_text,
                 search_input,
                 es_client,
-                cfg.search.behavior_index,
+                search_config.behavior_index,
                 search_input.top_k,
-                cfg.search.frames_index,
+                search_config.frames_index,
             )
     except Exception as exc:
         logger.warning("ES search_by_attributes failed: %s", exc)

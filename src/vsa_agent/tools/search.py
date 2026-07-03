@@ -558,6 +558,36 @@ def _resolve_search_callable(tool_name: str, **kwargs):
     return _callable
 
 
+async def _run_embed_search(query: str, top_k: int, embed_store=None) -> SearchOutput:
+    if embed_store is not None:
+        return await embed_store.search(query=query, top_k=top_k)
+
+    from vsa_agent.registry import ToolRegistry
+
+    fn = ToolRegistry.get("embed_search")
+    if fn is not None:
+        return await fn(query=query, top_k=top_k)
+
+    from vsa_agent.tools.vector_store import get_default_embed_store
+
+    return await get_default_embed_store().search(query=query, top_k=top_k)
+
+
+async def _run_attribute_search(attributes: list[str], top_k: int, attr_store=None) -> SearchOutput:
+    if attr_store is not None:
+        return await attr_store.search_by_attributes(attributes=attributes, top_k=top_k)
+
+    from vsa_agent.registry import ToolRegistry
+
+    fn = ToolRegistry.get("attribute_search")
+    if fn is not None:
+        return await fn(attributes=attributes, top_k=top_k)
+
+    from vsa_agent.tools.vector_store import get_default_attr_store
+
+    return await get_default_attr_store().search_by_attributes(attributes=attributes, top_k=top_k)
+
+
 # ===== Registered Tool =====
 
 
@@ -579,20 +609,13 @@ async def search_tool(
     if not query or not query.strip():
         raise ValueError("Search query must be a non-empty string")
 
-    if embed_store is None:
-        from vsa_agent.tools.vector_store import get_default_embed_store
-        embed_store = get_default_embed_store()
-    if attr_store is None:
-        from vsa_agent.tools.vector_store import get_default_attr_store
-        attr_store = get_default_attr_store()
-
     attributes = decomposed_attributes or []
     has_action = decomposed_has_action
 
     if has_action is False and attributes:
         logger.info("Path 1: attribute-only search")
         try:
-            return await attr_store.search_by_attributes(attributes=attributes, top_k=top_k)
+            return await _run_attribute_search(attributes, top_k, attr_store)
         except Exception as e:
             logger.error("Attribute-only search failed: %s", e)
             return SearchOutput(data=[])
@@ -600,7 +623,7 @@ async def search_tool(
     if not attributes:
         logger.info("Path 2: embed-only search")
         try:
-            return await embed_store.search(query=query, top_k=top_k)
+            return await _run_embed_search(query, top_k, embed_store)
         except Exception as e:
             logger.error("Embed-only search failed: %s", e)
             return SearchOutput(data=[])
@@ -610,13 +633,13 @@ async def search_tool(
     attr_results: list[SearchResult] = []
 
     try:
-        embed_output = await embed_store.search(query=query, top_k=top_k)
+        embed_output = await _run_embed_search(query, top_k, embed_store)
         embed_results = list(embed_output.data) if hasattr(embed_output, "data") else []
     except Exception as e:
         logger.error("Embed search in fusion failed: %s", e)
 
     try:
-        attr_output = await attr_store.search_by_attributes(attributes=attributes, top_k=top_k)
+        attr_output = await _run_attribute_search(attributes, top_k, attr_store)
         attr_results = list(attr_output.data) if hasattr(attr_output, "data") else []
     except Exception as e:
         logger.error("Attribute search in fusion failed: %s", e)

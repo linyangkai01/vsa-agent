@@ -16,6 +16,7 @@ from elasticsearch import AsyncElasticsearch
 from pydantic import BaseModel
 from pydantic import Field
 
+from vsa_agent.config import SearchBackendConfig
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.search import SearchOutput
 
@@ -98,6 +99,7 @@ def _build_es_query(
     es_index: str,
     top_k: int = 10,
     min_cosine_similarity: float = 0.0,
+    vector_field: str = "vector",
 ) -> dict[str, Any]:
     """Build Elasticsearch KNN search query.
 
@@ -152,7 +154,7 @@ def _build_es_query(
             "script_score": {
                 "query": {"match_all": {}} if not filters else {"bool": {"filter": filters}},
                 "script": {
-                    "source": "cosineSimilarity(params.query_vector, 'vector') + 1.0",
+                    "source": f"cosineSimilarity(params.query_vector, '{vector_field}') + 1.0",
                     "params": {"query_vector": query_embedding},
                 },
             }
@@ -198,7 +200,15 @@ async def _process_search_hit(
 
     source = hit.get("_source", {})
     sensor = source.get("sensor", {})
-    sensor_id = sensor.get("id", "")
+    if not isinstance(sensor, dict):
+        sensor = {}
+    sensor_id = (
+        source.get("sensor_id")
+        or source.get("sensorId")
+        or sensor.get("id")
+        or source.get("camera_id")
+        or ""
+    )
 
     # Extract video_name
     video_name = ""
@@ -211,6 +221,16 @@ async def _process_search_hit(
                 video_name = ih_source.get("video_name", ih_source.get("filename", ""))
 
     if not video_name:
+        video_name = (
+            source.get("video_name")
+            or source.get("filename")
+            or source.get("file_name")
+            or source.get("videoPath")
+            or source.get("video_path")
+            or ""
+        )
+
+    if not video_name:
         video_name = sensor_id or "unknown"
 
     # Check exclude list
@@ -220,13 +240,107 @@ async def _process_search_hit(
 
     return EmbedSearchResultItem(
         video_name=video_name,
-        description=sensor.get("description", ""),
-        start_time=source.get("timestamp", ""),
-        end_time=source.get("end", ""),
+        description=(
+            source.get("description")
+            or source.get("caption")
+            or source.get("summary")
+            or source.get("text")
+            or sensor.get("description", "")
+        ),
+        start_time=source.get("start_time") or source.get("timestamp") or source.get("start") or "",
+        end_time=source.get("end_time") or source.get("timestamp_end") or source.get("end") or "",
         sensor_id=sensor_id,
-        screenshot_url="",
+        screenshot_url=source.get("screenshot_url") or source.get("thumbnail_url") or "",
         similarity_score=similarity,
     )
+
+
+def _create_es_client(search_config: SearchBackendConfig) -> AsyncElasticsearch:
+    return AsyncElasticsearch(
+        search_config.es_endpoint,
+        request_timeout=search_config.request_timeout_sec,
+        verify_certs=search_config.verify_certs,
+    )
+
+
+def _create_default_embed_client():
+    from vsa_agent.config import resolve_runtime_config
+    from vsa_agent.embed.rtvi_cv_embed import RTVICVEmbedClient
+
+    runtime = resolve_runtime_config()
+    embedding = runtime.embedding
+    if embedding is None:
+        return None
+    return RTVICVEmbedClient(
+        model=embedding.model,
+        base_url=embedding.base_url,
+        api_key=embedding.api_key,
+    )
+
+
+async def _search_real_es(
+    query: str,
+    top_k: int,
+    search_config: SearchBackendConfig,
+) -> SearchOutput | None:
+    if not search_config.enabled or not search_config.es_endpoint:
+        return None
+
+    es_client = _create_es_client(search_config)
+    try:
+        index_exists = await es_client.indices.exists(index=search_config.embed_index)
+        if not index_exists:
+            logger.warning("ES embed index does not exist: %s", search_config.embed_index)
+            return None
+
+        query_input = QueryInput(
+            params={"query": query, "top_k": str(top_k)},
+            source_type="video_file",
+        )
+        query_embedding = await _generate_query_embedding(query_input, _create_default_embed_client())
+        if not query_embedding:
+            logger.warning("Could not generate query embedding for ES search")
+            return None
+
+        es_query = _build_es_query(
+            query_input,
+            query_embedding,
+            search_config.embed_index,
+            top_k,
+            search_config.embed_confidence_threshold,
+            vector_field=search_config.vector_field,
+        )
+        response = await es_client.search(index=search_config.embed_index, body=es_query)
+        hits = response.get("hits", {}).get("hits", [])
+
+        import asyncio
+
+        processed = await asyncio.gather(
+            *[
+                _process_search_hit(hit, search_config.embed_confidence_threshold)
+                for hit in hits
+            ]
+        )
+
+        from vsa_agent.tools.search import SearchResult
+
+        search_results = [
+            SearchResult(
+                video_name=item.video_name,
+                description=item.description,
+                start_time=item.start_time,
+                end_time=item.end_time,
+                sensor_id=item.sensor_id,
+                screenshot_url=item.screenshot_url,
+                similarity=item.similarity_score,
+            )
+            for item in processed
+            if item is not None
+        ]
+        search_results.sort(key=lambda item: item.similarity, reverse=True)
+        return SearchOutput(data=search_results[:top_k])
+    finally:
+        await es_client.close()
 
 
 # ===== Registered Tool =====
@@ -258,61 +372,13 @@ async def embed_search_tool(
     if not query or not query.strip():
         raise ValueError("Search query must be a non-empty string")
 
-    # Try ES first if configured
+    # Try real ES first if configured.
     try:
         from vsa_agent.config import get_config
-        cfg = get_config()
-        es_config = cfg.search
 
-        if es_config.es_endpoint:
-            es_client = AsyncElasticsearch(es_config.es_endpoint)
-
-            # Check if index exists
-            index_exists = await es_client.indices.exists(index=es_config.embed_index)
-            if index_exists:
-                # Build query input
-                query_input = QueryInput(
-                    params={"query": query, "top_k": str(top_k)},
-                    source_type="video_file",
-                )
-
-                # Generate embedding
-                query_embedding = await _generate_query_embedding(query_input)
-
-                if query_embedding:
-                    # Build and execute ES query
-                    es_query = _build_es_query(
-                        query_input, query_embedding,
-                        es_config.embed_index, top_k,
-                        es_config.embed_confidence_threshold,
-                    )
-                    response = await es_client.search(index=es_config.embed_index, body=es_query)
-
-                    # Process hits
-                    hits = response["hits"]["hits"]
-                    tasks = [_process_search_hit(hit, es_config.embed_confidence_threshold) for hit in hits]
-                    import asyncio
-                    processed = await asyncio.gather(*tasks)
-                    results = [r for r in processed if r is not None]
-
-                    # Convert to SearchOutput
-                    search_results = []
-                    for r in results[:top_k]:
-                        from vsa_agent.tools.search import SearchResult
-                        search_results.append(SearchResult(
-                            video_name=r.video_name,
-                            description=r.description,
-                            start_time=r.start_time,
-                            end_time=r.end_time,
-                            sensor_id=r.sensor_id,
-                            screenshot_url=r.screenshot_url,
-                            similarity=r.similarity_score,
-                        ))
-
-                    await es_client.close()
-                    return SearchOutput(data=search_results)
-
-            await es_client.close()
+        es_output = await _search_real_es(query, top_k, get_config().search)
+        if es_output is not None:
+            return es_output
     except Exception as e:
         logger.warning("ES search failed, falling back to in-memory store: %s", e)
 

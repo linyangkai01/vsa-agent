@@ -211,9 +211,14 @@ async def _execute_search_with_metadata(
     has_action = decomposed.has_action
 
     if embed_search is None:
-        embed_search = _resolve_search_callable("embed_search", query=decomposed.query)
+        embed_top_k = search_input.top_k or search_input.max_results
+        embed_search = _resolve_search_callable("embed_search", query=decomposed.query, top_k=embed_top_k)
     if attribute_search is None and has_attributes:
-        attribute_search = _resolve_search_callable("attribute_search", attributes=decomposed.attributes)
+        attribute_search = _resolve_search_callable(
+            "attribute_search",
+            attributes=decomposed.attributes,
+            top_k=search_input.max_results,
+        )
 
     result = SearchOutput(data=[])
 

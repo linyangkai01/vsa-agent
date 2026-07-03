@@ -108,3 +108,14 @@ lvs_video_understanding:
   max_frames_per_chunk: 8
   max_chunks:
   merge_adjacent_events: true
+search:
+  enabled: false
+  es_endpoint: ""
+  embed_index: vsa-video-embeddings
+  behavior_index: vsa-video-behavior
+  frames_index:
+  vector_field: vector
+  embed_confidence_threshold: 0.0
+  request_timeout_sec: 30.0
+  verify_certs: true
+  allow_mock_fallback: true

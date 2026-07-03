@@ -167,3 +167,58 @@ class TestFallbackBehavior:
         output = await attribute_search_tool(["person"], store=FakeStore(), top_k=5)
         assert len(output.data) == 1
         assert output.data[0].video_name == "store-v1"
+
+    async def test_search_by_attributes_uses_shared_search_config(self, monkeypatch):
+        from vsa_agent.config import AppConfig, SearchBackendConfig
+
+        class FakeIndices:
+            async def exists(self, index):
+                assert index == "real-behavior"
+                return True
+
+        class FakeES:
+            def __init__(self, endpoint):
+                assert endpoint == "http://es:9200"
+                self.indices = FakeIndices()
+                self.closed = False
+
+            async def search(self, index, body):
+                assert index == "real-behavior"
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.86,
+                                "_source": {
+                                    "sensor_id": "cam-1",
+                                    "object_id": "person-1",
+                                    "object_type": "person",
+                                    "timestamp": "2026-07-03T08:00:00Z",
+                                    "end": "2026-07-03T08:00:05Z",
+                                    "video_name": "site-a.mp4",
+                                },
+                            }
+                        ]
+                    }
+                }
+
+            async def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(
+            "vsa_agent.config.get_config",
+            lambda: AppConfig(
+                search=SearchBackendConfig(
+                    enabled=True,
+                    es_endpoint="http://es:9200",
+                    behavior_index="real-behavior",
+                    frames_index="real-frames",
+                )
+            ),
+        )
+        monkeypatch.setattr("vsa_agent.tools.attribute_search.AsyncElasticsearch", FakeES)
+
+        results = await search_by_attributes("person", allow_mock_fallback=False)
+
+        assert len(results) == 1
+        assert results[0].metadata.video_name == "site-a.mp4"

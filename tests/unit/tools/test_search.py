@@ -149,3 +149,33 @@ async def test_execute_core_search_continues_when_critic_raises():
 
     assert isinstance(updates[-1], SearchOutput)
     assert updates[-1].data[0].video_name == "cam-51.mp4"
+
+
+@pytest.mark.asyncio
+async def test_search_tool_uses_registered_embed_search_when_store_not_injected(monkeypatch):
+    from vsa_agent.tools.search import search_tool
+
+    async def fake_embed_search(query, top_k):
+        assert query == "forklift near worker"
+        assert top_k == 3
+        return SearchOutput(
+            data=[
+                SearchResult(
+                    video_name="es-hit.mp4",
+                    description="forklift near worker",
+                    start_time="2026-07-03T08:00:00Z",
+                    end_time="2026-07-03T08:00:06Z",
+                    sensor_id="cam-1",
+                    similarity=0.91,
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get",
+        lambda name: fake_embed_search if name == "embed_search" else None,
+    )
+
+    output = await search_tool("forklift near worker", top_k=3)
+
+    assert output.data[0].video_name == "es-hit.mp4"

@@ -94,6 +94,7 @@ config.yaml --> config.py --> model_adapter/ --> agents/ (LangGraph DAG)
 | prompts | All prompt strings (system, safety, VLM format, etc.) |
 | video_understanding | Short-video and source-translation settings |
 | lvs_video_understanding | Long-video chunking settings |
+| search | Elasticsearch-backed video search settings |
 
 `config.yaml` is the single committed business configuration file. Use `VSA_PROFILE`
 to switch between profiles such as `dashscope_remote`, `hybrid_dashscope_llm_local_vlm`,
@@ -107,6 +108,27 @@ for local experiments, for example:
 backends:
   dashscope:
     api_key: "your-dashscope-key"
+```
+
+Real Elasticsearch video search is disabled by default. Enable it in
+`config.local.yaml` and bind an embedding role whose model matches the vectors
+stored in the ES index:
+
+```yaml
+profiles:
+  dashscope_remote:
+    embedding:
+      backend: dashscope
+      model: text-embedding-v4
+
+search:
+  enabled: true
+  es_endpoint: "http://127.0.0.1:9200"
+  embed_index: "your-video-embedding-index"
+  behavior_index: "your-object-behavior-index"
+  frames_index: "your-frame-index"
+  vector_field: "vector"
+  embed_confidence_threshold: 0.2
 ```
 
 Set `VSA_LOCAL_CONFIG` to another file path when a machine needs a different secret
