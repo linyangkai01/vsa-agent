@@ -13,6 +13,8 @@ class TestAgentDecision:
 class TestAgentMessageChunkType:
     def test_values(self):
         assert AgentMessageChunkType.THOUGHT.value == "thought"
+        assert AgentMessageChunkType.TOOL_CALL.value == "tool_call"
+        assert AgentMessageChunkType.TOOL_RESULT.value == "tool_result"
         assert AgentMessageChunkType.FINAL.value == "final"
 
 class TestAgentMessageChunk:
@@ -20,6 +22,7 @@ class TestAgentMessageChunk:
         chunk = AgentMessageChunk()
         assert chunk.type == AgentMessageChunkType.THOUGHT
         assert chunk.content == ""
+        assert chunk.metadata == {}
 
 class TestAgentState:
     def test_defaults(self):

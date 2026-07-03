@@ -131,14 +131,34 @@ def test_format_chunk_for_original_ui_maps_final_to_delta():
 
 def test_format_chunk_for_original_ui_maps_tool_call_to_intermediate_data():
     frames = format_chunk_for_original_ui(
-        AgentMessageChunk(type=AgentMessageChunkType.TOOL_CALL, content="Calling: video_understanding"),
+        AgentMessageChunk(
+            type=AgentMessageChunkType.TOOL_CALL,
+            content="Calling: video_understanding\nInputs:\n- video_path: video.mp4",
+        ),
         index=2,
     )
 
     assert len(frames) == 1
     payload = json.loads(frames[0].removeprefix("intermediate_data: ").strip())
     assert payload["name"] == "Tool Call"
-    assert payload["payload"] == "Calling: video_understanding"
+    assert "Calling: video_understanding" in payload["payload"]
+    assert "video_path: video.mp4" in payload["payload"]
+
+
+def test_format_chunk_for_original_ui_maps_tool_result_to_completed_intermediate_data():
+    frames = format_chunk_for_original_ui(
+        AgentMessageChunk(
+            type=AgentMessageChunkType.TOOL_RESULT,
+            content="Completed: video_understanding\nResult length: 123 chars",
+        ),
+        index=3,
+    )
+
+    assert len(frames) == 1
+    payload = json.loads(frames[0].removeprefix("intermediate_data: ").strip())
+    assert payload["name"] == "Tool Result"
+    assert payload["status"] == "completed"
+    assert "Result length: 123 chars" in payload["payload"]
 
 
 class FakeGraph:

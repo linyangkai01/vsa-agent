@@ -18,6 +18,7 @@ class AgentMessageChunkType(enum.StrEnum):
     """Type of the streaming message chunk emitted by DAG nodes."""
     THOUGHT = 'thought'
     TOOL_CALL = 'tool_call'
+    TOOL_RESULT = 'tool_result'
     FINAL = 'final'
     ERROR = 'error'
 
@@ -26,6 +27,7 @@ class AgentMessageChunk(BaseModel):
     """Streaming chunk emitted by agent nodes during graph traversal."""
     type: AgentMessageChunkType = Field(default=AgentMessageChunkType.THOUGHT)
     content: str = Field(default='')
+    metadata: dict = Field(default_factory=dict)
 
 
 class AgentState(BaseModel):
