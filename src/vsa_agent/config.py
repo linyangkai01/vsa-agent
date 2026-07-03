@@ -174,6 +174,21 @@ class LVSVideoUnderstandingConfig(BaseModel):
     merge_adjacent_events: bool = True
 
 
+class SearchBackendConfig(BaseModel):
+    """Elasticsearch-backed video search configuration."""
+
+    enabled: bool = False
+    es_endpoint: str = ""
+    embed_index: str = "vsa-video-embeddings"
+    behavior_index: str = "vsa-video-behavior"
+    frames_index: str | None = None
+    vector_field: str = "vector"
+    embed_confidence_threshold: float = 0.0
+    request_timeout_sec: float = 30.0
+    verify_certs: bool = True
+    allow_mock_fallback: bool = True
+
+
 class AppConfig(BaseModel):
     active_profile: str = ""
     backends: dict[str, BackendConfig] = Field(default_factory=dict)
@@ -186,6 +201,7 @@ class AppConfig(BaseModel):
     prompts: PromptsConfig = PromptsConfig()
     video_understanding: VideoUnderstandingConfig = VideoUnderstandingConfig()
     lvs_video_understanding: LVSVideoUnderstandingConfig = LVSVideoUnderstandingConfig()
+    search: SearchBackendConfig = SearchBackendConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path = "config.yaml") -> "AppConfig":
