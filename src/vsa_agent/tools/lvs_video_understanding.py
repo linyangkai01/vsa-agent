@@ -34,6 +34,12 @@ def _emit_chunk_progress(
     summary_length: int | None = None,
     event_count: int | None = None,
     elapsed_sec: float | None = None,
+    frame_count: int | None = None,
+    risk_category: str | None = None,
+    risk_evidence: str | None = None,
+    evidence_type: str | None = None,
+    raw_artifact_path: str | None = None,
+    result_artifact_path: str | None = None,
 ) -> None:
     try:
         writer = get_stream_writer()
@@ -51,6 +57,18 @@ def _emit_chunk_progress(
         lines.append(f"Summary length: {summary_length} chars")
     if event_count is not None:
         lines.append(f"Detected events: {event_count}")
+    if frame_count is not None:
+        lines.append(f"Frames: {frame_count} sampled")
+    if risk_category:
+        lines.append(f"Risk: {risk_category}")
+    if evidence_type:
+        lines.append(f"Evidence type: {evidence_type}")
+    if risk_evidence:
+        lines.append(f"Key evidence: {risk_evidence}")
+    if raw_artifact_path:
+        lines.append(f"Raw VLM output: {raw_artifact_path}")
+    if result_artifact_path:
+        lines.append(f"Result JSON: {result_artifact_path}")
 
     writer(
         AgentMessageChunk(
@@ -68,6 +86,12 @@ def _emit_chunk_progress(
                 "summary_length": summary_length,
                 "event_count": event_count,
                 "elapsed_sec": elapsed_sec,
+                "frame_count": frame_count,
+                "risk_category": risk_category,
+                "risk_evidence": risk_evidence,
+                "evidence_type": evidence_type,
+                "raw_artifact_path": raw_artifact_path,
+                "result_artifact_path": result_artifact_path,
             },
         )
     )
@@ -106,16 +130,84 @@ def _truncate_digest_text(value: str, max_chars: int = 240) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _classify_evidence_type(text: str) -> tuple[str, bool]:
+    lowered = text.lower()
+    inference_markers = (
+        "could ",
+        "may ",
+        "might ",
+        "should ",
+        "suggest",
+        "potential",
+        "concern",
+        "unclear",
+        "verify",
+        "check ",
+        "recommend",
+        "need for",
+        "need to",
+    )
+    is_inference = any(marker in lowered for marker in inference_markers)
+    return ("inferred_or_recommended" if is_inference else "observed", is_inference)
+
+
+def _select_risk_category(summary_text: str) -> str:
+    lowered = summary_text.lower()
+    for category, keywords in _RISK_DIGEST_CATEGORIES:
+        if any(keyword in lowered for keyword in keywords):
+            return category
+    return "Additional evidence"
+
+
+def _get_chunk_window(result: UnderstandingResult) -> tuple[str, str]:
+    chunk = result.chunks[0] if result.chunks else None
+    if not chunk:
+        return "", ""
+    return chunk.start_timestamp, chunk.end_timestamp
+
+
+def _build_risk_digest_item(result: UnderstandingResult, chunk_index: int) -> dict:
+    start, end = _get_chunk_window(result)
+    evidence = _truncate_digest_text(result.summary_text)
+    evidence_type, is_inference = _classify_evidence_type(evidence)
+    return {
+        "category": _select_risk_category(result.summary_text),
+        "chunk_index": chunk_index,
+        "start_timestamp": start,
+        "end_timestamp": end,
+        "time_range": {"start": start, "end": end},
+        "evidence": evidence,
+        "evidence_type": evidence_type,
+        "inference": is_inference,
+    }
+
+
 def build_chunk_diverse_risk_digest(
     chunk_results: list[UnderstandingResult],
     *,
-    max_items: int = 6,
+    max_items: int | None = None,
     max_per_chunk: int = 1,
 ) -> list[dict]:
     """Select a balanced set of risk snippets across chunks for long-video summarization."""
+    if max_items is None:
+        max_items = len(chunk_results)
+    if max_items <= 0:
+        return []
+
     digest: list[dict] = []
     per_chunk_counts: dict[int, int] = {}
     used_pairs: set[tuple[int, str]] = set()
+
+    # First pass: guarantee broad temporal coverage, one compact evidence item per chunk.
+    for chunk_index, result in enumerate(chunk_results, start=1):
+        if len(digest) >= max_items:
+            return digest[:max_items]
+        if per_chunk_counts.get(chunk_index, 0) >= max_per_chunk:
+            continue
+        item = _build_risk_digest_item(result, chunk_index)
+        digest.append(item)
+        per_chunk_counts[chunk_index] = per_chunk_counts.get(chunk_index, 0) + 1
+        used_pairs.add((chunk_index, item["category"]))
 
     for category, keywords in _RISK_DIGEST_CATEGORIES:
         for chunk_index, result in enumerate(chunk_results, start=1):
@@ -127,16 +219,9 @@ def build_chunk_diverse_risk_digest(
             pair = (chunk_index, category)
             if pair in used_pairs:
                 continue
-            chunk = result.chunks[0] if result.chunks else None
-            digest.append(
-                {
-                    "category": category,
-                    "chunk_index": chunk_index,
-                    "start_timestamp": chunk.start_timestamp if chunk else "",
-                    "end_timestamp": chunk.end_timestamp if chunk else "",
-                    "evidence": _truncate_digest_text(result.summary_text),
-                }
-            )
+            item = _build_risk_digest_item(result, chunk_index)
+            item["category"] = category
+            digest.append(item)
             per_chunk_counts[chunk_index] = per_chunk_counts.get(chunk_index, 0) + 1
             used_pairs.add(pair)
             break
@@ -149,16 +234,7 @@ def build_chunk_diverse_risk_digest(
     for chunk_index, result in enumerate(chunk_results, start=1):
         if per_chunk_counts.get(chunk_index, 0) >= max_per_chunk:
             continue
-        chunk = result.chunks[0] if result.chunks else None
-        digest.append(
-            {
-                "category": "Additional evidence",
-                "chunk_index": chunk_index,
-                "start_timestamp": chunk.start_timestamp if chunk else "",
-                "end_timestamp": chunk.end_timestamp if chunk else "",
-                "evidence": _truncate_digest_text(result.summary_text),
-            }
-        )
+        digest.append(_build_risk_digest_item(result, chunk_index))
         if len(digest) >= max_items:
             break
 
@@ -191,7 +267,7 @@ def merge_chunk_results(
         events=merged_events,
         metadata={
             "chunk_count": len(chunk_results),
-            "risk_digest": build_chunk_diverse_risk_digest(chunk_results),
+            "risk_digest": build_chunk_diverse_risk_digest(chunk_results, max_items=len(chunk_results)),
         },
     )
 
@@ -338,6 +414,7 @@ async def _analyze_long_video_window(
         )
         chunk_results.append(chunk_result)
         chunk_elapsed_sec = perf_counter() - chunk_started_at
+        progress_item = _build_risk_digest_item(chunk_result, index)
         _emit_chunk_progress(
             status="completed",
             chunk_index=index,
@@ -347,6 +424,12 @@ async def _analyze_long_video_window(
             summary_length=len(chunk_result.summary_text),
             event_count=len(chunk_result.events),
             elapsed_sec=chunk_elapsed_sec,
+            frame_count=chunk_result.metadata.get("frame_count"),
+            risk_category=progress_item.get("category"),
+            risk_evidence=progress_item.get("evidence"),
+            evidence_type=progress_item.get("evidence_type"),
+            raw_artifact_path=chunk_result.metadata.get("raw_artifact_path"),
+            result_artifact_path=chunk_result.metadata.get("result_artifact_path"),
         )
         write_live_trace_event(
             "lvs_video_understanding.chunk.completed",

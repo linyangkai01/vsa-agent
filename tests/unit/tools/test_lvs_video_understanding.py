@@ -223,6 +223,38 @@ def test_merge_chunk_results_digest_keeps_eye_protection_hot_work_evidence():
     assert "welding operation" in digest_text
 
 
+def test_merge_chunk_results_digest_covers_each_chunk_with_structured_evidence():
+    from vsa_agent.tools.lvs_video_understanding import merge_chunk_results
+
+    chunk_texts = [
+        "Workers on scaffolding lack visible harnesses and safety vests.",
+        "A welding task creates sparks and one worker lacks a face shield.",
+        "A worker shovels gravel without gloves on uneven ground.",
+        "Metal shavings and debris are scattered around a bending machine.",
+        "A rebar bending machine has potential pinch points near moving parts.",
+        "An excavator with a hydraulic breaker operates near wet debris.",
+        "Barricades are displaced around the wet demolition work area.",
+    ]
+    chunks = [
+        UnderstandingResult(
+            query="identify safety risks",
+            source_type="video_file",
+            summary_text=text,
+            chunks=[],
+            events=[],
+        )
+        for text in chunk_texts
+    ]
+
+    merged = merge_chunk_results("identify safety risks", "video_file", chunks)
+
+    digest = merged.metadata["risk_digest"]
+    assert {item["chunk_index"] for item in digest} == set(range(1, 8))
+    assert all(item["evidence_type"] in {"observed", "inferred_or_recommended"} for item in digest)
+    assert all("time_range" in item for item in digest)
+    assert all(item["evidence"] for item in digest)
+
+
 def test_lvs_config_loads_from_app_config():
     cfg = AppConfig.from_yaml("config.yaml")
     assert cfg.lvs_video_understanding.chunk_duration_sec == 30
@@ -394,3 +426,46 @@ async def test_analyze_long_video_streams_chunk_progress(monkeypatch):
     assert "Summary length:" in chunks[1].content
     assert chunks[1].metadata["tool_name"] == "video_understanding"
     assert "elapsed_sec" in chunks[1].metadata
+
+
+@pytest.mark.anyio
+async def test_analyze_long_video_streams_completed_progress_with_evidence_and_artifacts(monkeypatch):
+    from vsa_agent.tools import lvs_video_understanding
+
+    streamed = []
+
+    def fake_probe(video_path):
+        return 20.0
+
+    async def fake_analyze_video_segment(**kwargs):
+        return UnderstandingResult(
+            query=kwargs["query"],
+            source_type=kwargs["source_type"],
+            summary_text="A worker grinds metal with sparks and no visible face shield.",
+            chunks=[],
+            events=[],
+            metadata={
+                "frame_count": 8,
+                "frame_indices": [0, 10],
+                "raw_artifact_path": "/tmp/raw.txt",
+                "result_artifact_path": "/tmp/result.json",
+            },
+        )
+
+    monkeypatch.setattr(lvs_video_understanding, "_probe_video_duration", fake_probe)
+    monkeypatch.setattr(lvs_video_understanding, "analyze_video_segment", fake_analyze_video_segment)
+    monkeypatch.setattr(lvs_video_understanding, "get_stream_writer", lambda: streamed.append)
+
+    await lvs_video_understanding.analyze_long_video(
+        video_path="video.mp4",
+        query="identify safety risks",
+        source_type="video_file",
+    )
+
+    completed = streamed[1]
+    assert completed.type == AgentMessageChunkType.TOOL_PROGRESS
+    assert "Key evidence:" in completed.content
+    assert "Raw VLM output: /tmp/raw.txt" in completed.content
+    assert "Frames: 8 sampled" in completed.content
+    assert completed.metadata["risk_category"] == "Eye / face protection"
+    assert completed.metadata["raw_artifact_path"] == "/tmp/raw.txt"

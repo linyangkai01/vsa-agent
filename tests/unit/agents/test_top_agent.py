@@ -95,6 +95,24 @@ def test_truncate_video_result_keeps_late_safety_evidence():
     assert len(truncated) <= 3200
 
 
+def test_truncate_video_result_preserves_structured_risk_digest():
+    result = (
+        "Risk digest by chunk:\n"
+        "Use the evidence type carefully: state observed evidence as fact, "
+        "and label inferred_or_recommended items as checks or recommendations. "
+        "Only state direct observations as facts.\n"
+        "- Chunk 1 [00:00:00 - 00:00:30] Fall / work at height [observed]: "
+        "Workers are on scaffolding without visible harnesses.\n"
+        "- Chunk 2 [00:00:30 - 00:01:00] Fire / hot work [observed]: "
+        "Welding sparks are visible and one worker lacks a face shield.\n"
+    )
+
+    truncated = _truncate_result("video_understanding", result)
+
+    assert truncated == result
+    assert "[RISK DIGEST BY CATEGORY]" not in truncated
+
+
 @pytest.mark.asyncio
 async def test_tool_node_stops_after_unrecoverable_tool_error(monkeypatch):
     import vsa_agent.agents.top_agent as top_agent

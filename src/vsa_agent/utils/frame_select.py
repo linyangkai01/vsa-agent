@@ -59,6 +59,10 @@ def frames_for_timestamp_range(
 
     total_frames = seconds_to_frames(duration_sec, fps)
     start_frame = seconds_to_frames(start_ts, fps)
+    if start_ts > 0:
+        # Treat non-zero segment starts as exclusive so adjacent long-video
+        # chunks do not re-save the same boundary frame.
+        start_frame += 1
     end_frame = min(total_frames, max(start_frame + 1, math.ceil(end_ts * fps)))
 
     return select_frame_indices(total_frames, max_frames, start_frame, end_frame)
