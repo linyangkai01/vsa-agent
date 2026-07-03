@@ -23,6 +23,41 @@ _INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter",
                      "kwargs", "args", "kwds"}
 
 _MAX_TOOL_RESULT_CHARS = 800
+_MAX_VIDEO_TOOL_RESULT_CHARS = 2000
+_VIDEO_RESULT_TOOL_NAMES = {"video_understanding", "lvs_video_understanding"}
+_PRIMARY_VIDEO_RESULT_KEYWORDS = (
+    "risk",
+    "hazard",
+    "unsafe",
+    "safety",
+    "ppe",
+    "fall",
+    "harness",
+    "severity",
+    "violation",
+    "dangerous",
+    "missing",
+    "lack",
+    "absence",
+)
+_SECONDARY_VIDEO_RESULT_KEYWORDS = (
+    "scaffold",
+    "guardrail",
+    "toe board",
+    "glove",
+    "vehicle",
+    "electrical",
+    "fire",
+)
+_UNRECOVERABLE_TOOL_ERROR_MARKERS = (
+    "AllocationQuota.FreeTierOnly",
+    "free quota has been exhausted",
+    "AuthenticationError",
+    "PermissionDeniedError",
+    "invalid_api_key",
+    "Incorrect API key",
+    "api_key client option must be set",
+)
 _HIDDEN_LANGCHAIN_TOOLS = {
     # report_agent owns this lower-level formatter. Exposing it directly causes
     # models to pass ReportSection fields as unsupported top-level kwargs.
@@ -92,7 +127,114 @@ def _truncate_result(name: str, result: str) -> str:
     result = _sanitize_tool_result(name, result)
     if len(result) <= _MAX_TOOL_RESULT_CHARS:
         return result
+    if name in _VIDEO_RESULT_TOOL_NAMES:
+        return _truncate_video_result(result)
     return result[:_MAX_TOOL_RESULT_CHARS] + "..."
+
+
+def _truncate_video_result(result: str) -> str:
+    """Keep enough long-video evidence for the LLM to answer without rerunning it."""
+    lines = [line.strip() for line in result.splitlines() if line.strip()]
+    keyword_lines = _select_video_keyword_lines(lines)
+
+    head = _truncate_text(result, 420)
+    tail = _truncate_text(result[-420:], 420)
+    parts = [
+        f"[video tool result abridged from {len(result)} chars; full result is saved in the live trace artifact]",
+        "[BEGINNING]",
+        head,
+    ]
+    if keyword_lines:
+        parts.extend(["[KEY SAFETY/RISK EVIDENCE]", *_fit_lines(keyword_lines, 900)])
+    parts.extend(["[ENDING]", tail])
+
+    summary = "\n".join(parts)
+    return _truncate_text(summary, _MAX_VIDEO_TOOL_RESULT_CHARS)
+
+
+def _select_video_keyword_lines(lines: list[str]) -> list[str]:
+    selected = []
+    seen = set()
+
+    def add_matches(keywords: tuple[str, ...]) -> None:
+        for line in lines:
+            lowered = line.lower()
+            if not any(keyword in lowered for keyword in keywords):
+                continue
+            if line in seen:
+                continue
+            seen.add(line)
+            selected.append(_truncate_text(line, 220))
+            if len(selected) >= 8:
+                return
+
+    add_matches(_PRIMARY_VIDEO_RESULT_KEYWORDS)
+    if len(selected) < 8:
+        add_matches(_SECONDARY_VIDEO_RESULT_KEYWORDS)
+    return selected
+
+
+def _fit_lines(lines: list[str], max_chars: int) -> list[str]:
+    fitted = []
+    used = 0
+    for line in lines:
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        clipped = _truncate_text(line, min(len(line), remaining))
+        fitted.append(clipped)
+        used += len(clipped) + 1
+    return fitted
+
+
+def _truncate_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 3:
+        return "." * max_chars
+    return value[: max_chars - 3].rstrip() + "..."
+
+
+def _is_unrecoverable_tool_error(result: str) -> bool:
+    if not result.lower().lstrip().startswith("error:"):
+        return False
+    return any(marker in result for marker in _UNRECOVERABLE_TOOL_ERROR_MARKERS)
+
+
+def _format_unrecoverable_tool_error_answer(tool_name: str, result: str) -> str:
+    return (
+        f"{tool_name} failed with an unrecoverable model-service error.\n\n"
+        f"{_truncate_result(tool_name, result)}\n\n"
+        "The agent stopped instead of trying fallback tools, because this class of error "
+        "usually requires changing model-service quota, credentials, or runtime profile."
+    )
+
+
+def _tool_cache_key(name: str, args: dict) -> str:
+    try:
+        args_text = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        args_text = str(sorted(args.items()))
+    return f"{name}:{args_text}"
+
+
+def _find_cached_tool_result(state: AgentState, name: str, args: dict) -> str | None:
+    target_key = _tool_cache_key(name, args)
+    result_by_call_id = {
+        getattr(message, "tool_call_id", ""): str(message.content)
+        for message in state.agent_scratchpad[:-1]
+        if isinstance(message, ToolMessage)
+    }
+    for message in state.agent_scratchpad[:-1]:
+        if not isinstance(message, AIMessage):
+            continue
+        for tool_call in message.tool_calls:
+            if _tool_cache_key(tool_call["name"], tool_call["args"]) != target_key:
+                continue
+            cached = result_by_call_id.get(tool_call["id"])
+            if cached:
+                return cached
+    return None
 
 
 async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
@@ -165,6 +307,20 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
             {"tool_name": name, "tool_args": args, "tool_call_id": call_id},
         )
 
+        cached_result = _find_cached_tool_result(state, name, args)
+        if cached_result is not None:
+            state.agent_scratchpad.append(ToolMessage(content=cached_result, tool_call_id=call_id))
+            write_live_trace_event(
+                "top_agent.tool.cached_result",
+                {
+                    "tool_name": name,
+                    "tool_call_id": call_id,
+                    "cached_result_length": len(cached_result),
+                    "cached_result_preview": _truncate_text(cached_result, _MAX_TOOL_RESULT_CHARS),
+                },
+            )
+            continue
+
         try:
             result = await tools[name](**args) if name in tools else f"Tool not found: {name}"
         except Exception as e:
@@ -186,6 +342,19 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
                 "artifact_path": artifact_path,
             },
         )
+        if _is_unrecoverable_tool_error(result_str):
+            state.final_answer = _format_unrecoverable_tool_error_answer(name, result_str)
+            writer(AgentMessageChunk(type=AgentMessageChunkType.ERROR, content=state.final_answer))
+            write_live_trace_event(
+                "top_agent.tool.unrecoverable_error",
+                {
+                    "tool_name": name,
+                    "tool_call_id": call_id,
+                    "result_preview": truncated,
+                    "final_answer": state.final_answer,
+                },
+            )
+            return state
         state.agent_scratchpad.append(ToolMessage(content=truncated, tool_call_id=call_id))
 
     return state
@@ -216,6 +385,12 @@ def decide_next(state: AgentState) -> str:
     return AgentDecision.RESPOND.value
 
 
+def decide_after_tool(state: AgentState) -> str:
+    if state.final_answer:
+        return AgentDecision.RESPOND.value
+    return AgentDecision.CALL_TOOL.value
+
+
 async def build_graph() -> CompiledStateGraph:
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
@@ -227,7 +402,10 @@ async def build_graph() -> CompiledStateGraph:
         AgentDecision.CALL_TOOL.value: "tool",
         AgentDecision.RESPOND.value: "finalize",
     })
-    graph.add_edge("tool", "agent")
+    graph.add_conditional_edges("tool", decide_after_tool, {
+        AgentDecision.CALL_TOOL.value: "agent",
+        AgentDecision.RESPOND.value: "finalize",
+    })
     graph.add_edge("finalize", END)
 
     compiled = graph.compile(checkpointer=InMemorySaver())
