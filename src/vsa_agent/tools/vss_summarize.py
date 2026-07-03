@@ -76,6 +76,27 @@ def _incident_time_window(incident: Incident) -> tuple[str, str]:
     return start_time, end_time
 
 
+def _risk_digest_to_text(result: UnderstandingResult) -> str:
+    digest = result.metadata.get("risk_digest")
+    if not isinstance(digest, list) or not digest:
+        return ""
+
+    lines = ["Risk digest by chunk:"]
+    for item in digest:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get("category", "") or "Additional evidence")
+        chunk_index = item.get("chunk_index")
+        start = str(item.get("start_timestamp", "") or "")
+        end = str(item.get("end_timestamp", "") or "")
+        evidence = str(item.get("evidence", "") or "").strip()
+        prefix = f"Chunk {chunk_index}" if chunk_index is not None else "Chunk"
+        window = f" [{start} - {end}]" if start or end else ""
+        if evidence:
+            lines.append(f"- {prefix}{window} {category}: {evidence}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 async def summarize_search_incidents(incidents: list[Incident], query: str) -> str:
     del query
     if not incidents:
@@ -102,7 +123,12 @@ async def summarize_understanding_result(
 ) -> SummaryResult:
     """Generate dual-track output from a structured understanding result."""
     if model_adapter is not None:
-        prompt_body = result.summary_text or _events_to_text(result.events) or "No notable events detected."
+        prompt_body = (
+            _risk_digest_to_text(result)
+            or result.summary_text
+            or _events_to_text(result.events)
+            or "No notable events detected."
+        )
         response = await model_adapter.invoke(
             [
                 SystemMessage(content="You summarize structured video understanding results into concise plain text."),
@@ -118,14 +144,18 @@ async def summarize_understanding_result(
         text_output = str(response.content).strip() if response.content is not None else ""
         if not text_output:
             text_output = prompt_body
-    elif result.summary_text:
-        text_output = result.summary_text
-    elif result.events:
-        text_output = _events_to_text(result.events)
-        if not text_output:
-            text_output = "No notable events detected."
     else:
-        text_output = "No notable events detected."
+        risk_digest_text = _risk_digest_to_text(result)
+        if risk_digest_text:
+            text_output = risk_digest_text
+        elif result.summary_text:
+            text_output = result.summary_text
+        elif result.events:
+            text_output = _events_to_text(result.events)
+            if not text_output:
+                text_output = "No notable events detected."
+        else:
+            text_output = "No notable events detected."
     return SummaryResult(
         query=query,
         text_output=text_output,

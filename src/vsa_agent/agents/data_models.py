@@ -18,6 +18,7 @@ class AgentMessageChunkType(enum.StrEnum):
     """Type of the streaming message chunk emitted by DAG nodes."""
     THOUGHT = 'thought'
     TOOL_CALL = 'tool_call'
+    TOOL_PROGRESS = 'tool_progress'
     TOOL_RESULT = 'tool_result'
     FINAL = 'final'
     ERROR = 'error'

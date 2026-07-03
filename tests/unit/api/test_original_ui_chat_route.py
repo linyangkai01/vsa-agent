@@ -50,3 +50,29 @@ def test_existing_api_chat_route_still_exists():
 
     assert "/api/chat" in route_paths
     assert "/chat/stream" in route_paths
+
+
+def test_existing_api_chat_route_streams_tool_progress_chunk(monkeypatch: pytest.MonkeyPatch):
+    import vsa_agent.agents.top_agent as top_agent
+
+    class ApiChatFakeGraph:
+        async def astream(self, state, config=None, stream_mode=None) -> AsyncIterator[AgentMessageChunk]:
+            yield AgentMessageChunk(
+                type=AgentMessageChunkType.TOOL_PROGRESS,
+                content="Completed video chunk 1/2",
+                metadata={"status": "completed", "chunk_index": 1, "chunk_count": 2},
+            )
+            yield AgentMessageChunk(type=AgentMessageChunkType.FINAL, content="done")
+
+    async def fake_build_graph_for_api_chat():
+        return ApiChatFakeGraph()
+
+    monkeypatch.setattr(top_agent, "build_graph", fake_build_graph_for_api_chat)
+    client = TestClient(app)
+
+    response = client.post("/api/chat", json={"message": "inspect video"})
+
+    assert response.status_code == 200
+    assert '"type": "tool_progress"' in response.text
+    assert "Completed video chunk 1/2" in response.text
+    assert "data: [DONE]" in response.text

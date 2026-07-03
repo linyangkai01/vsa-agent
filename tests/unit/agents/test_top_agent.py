@@ -78,21 +78,21 @@ def test_does_not_treat_generic_tool_errors_as_unrecoverable():
 
 def test_truncate_video_result_keeps_late_safety_evidence():
     result = (
-        "Opening construction-site observations without conclusions.\n"
-        + ("general activity around workers and materials\n" * 35)
-        + "Throughout the video, the following safety risks and hazards are observable:\n"
-        + "Workers on scaffolding are at height without visible harnesses, creating a fall hazard.\n"
-        + ("additional middle detail\n" * 50)
+        "Risk digest by chunk:\n"
+        "- Chunk 1 [00:00:00 - 00:00:30] PPE / visibility: workers lack visible safety vests.\n"
+        "- Chunk 3 [00:01:00 - 00:01:30] Fire / hot work: angle grinder throws sparks without eye protection.\n"
+        "- Chunk 6 [00:02:30 - 00:03:00] Slip / trip / housekeeping: wet debris-covered ground around hydraulic breaker.\n"
+        + ("additional middle detail\n" * 80)
         + "Overall assessment: immediate corrective action is required for PPE and fall protection."
     )
 
     truncated = _truncate_result("video_understanding", result)
 
     assert "abridged from" in truncated
-    assert "KEY SAFETY/RISK EVIDENCE" in truncated
-    assert "without visible harnesses" in truncated
+    assert "Risk digest by chunk" in truncated
+    assert "angle grinder" in truncated
     assert "Overall assessment" in truncated
-    assert len(truncated) <= 2000
+    assert len(truncated) <= 3200
 
 
 @pytest.mark.asyncio
