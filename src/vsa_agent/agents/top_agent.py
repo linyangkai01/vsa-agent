@@ -49,6 +49,7 @@ _SECONDARY_VIDEO_RESULT_KEYWORDS = (
     "electrical",
     "fire",
 )
+_SENSITIVE_ARG_MARKERS = ("key", "token", "secret", "password", "credential")
 _UNRECOVERABLE_TOOL_ERROR_MARKERS = (
     "AllocationQuota.FreeTierOnly",
     "free quota has been exhausted",
@@ -210,6 +211,59 @@ def _format_unrecoverable_tool_error_answer(tool_name: str, result: str) -> str:
     )
 
 
+def _redact_tool_arg(name: str, value) -> str:
+    lowered = name.lower()
+    if any(marker in lowered for marker in _SENSITIVE_ARG_MARKERS):
+        return "<redacted>"
+    if isinstance(value, str):
+        return _truncate_text(value, 300)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return str(value)
+    try:
+        return _truncate_text(json.dumps(value, ensure_ascii=False, default=str), 300)
+    except TypeError:
+        return _truncate_text(str(value), 300)
+
+
+def _summarize_tool_args(args: dict) -> dict[str, str]:
+    summarized = {}
+    for key in sorted(args):
+        summarized[key] = _redact_tool_arg(key, args[key])
+    return summarized
+
+
+def _format_tool_call_step(name: str, args: dict) -> str:
+    lines = [f"Calling: {name}"]
+    summarized_args = _summarize_tool_args(args)
+    if summarized_args:
+        lines.append("Inputs:")
+        for key, value in summarized_args.items():
+            lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
+def _format_tool_result_step(
+    name: str,
+    result: str,
+    artifact_path: str,
+    *,
+    cached: bool = False,
+) -> str:
+    preview = _truncate_result(name, result)
+    if len(preview) > 1200:
+        preview = _truncate_text(preview, 1200)
+    status = "Reused cached result" if cached else "Completed"
+    lines = [
+        f"{status}: {name}",
+        f"Result length: {len(result)} chars",
+    ]
+    if artifact_path:
+        lines.append(f"Full result: {artifact_path}")
+    if preview:
+        lines.extend(["Selected preview:", preview])
+    return "\n".join(lines)
+
+
 def _tool_cache_key(name: str, args: dict) -> str:
     try:
         args_text = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
@@ -253,12 +307,21 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
     if state.agent_scratchpad:
         prompt.extend(state.agent_scratchpad)
 
-    writer(AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content="Analyzing..."))
-
     adapter = create_model_adapter()
     lc_tools = _build_langchain_tools()
     if lc_tools:
         adapter.bind_tools(lc_tools)
+
+    writer(
+        AgentMessageChunk(
+            type=AgentMessageChunkType.THOUGHT,
+            content=(
+                f"Analyzing user request (LLM iteration {state.iteration_count + 1}; "
+                f"{len(lc_tools)} tools available)."
+            ),
+            metadata={"iteration": state.iteration_count + 1, "tool_count": len(lc_tools)},
+        )
+    )
 
     write_live_trace_event(
         "top_agent.agent.request",
@@ -301,7 +364,17 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
 
     for tc in last_msg.tool_calls:
         name, args, call_id = tc["name"], tc["args"], tc["id"]
-        writer(AgentMessageChunk(type=AgentMessageChunkType.TOOL_CALL, content=f"Calling: {name}"))
+        writer(
+            AgentMessageChunk(
+                type=AgentMessageChunkType.TOOL_CALL,
+                content=_format_tool_call_step(name, args),
+                metadata={
+                    "tool_name": name,
+                    "tool_args": _summarize_tool_args(args),
+                    "tool_call_id": call_id,
+                },
+            )
+        )
         write_live_trace_event(
             "top_agent.tool.call",
             {"tool_name": name, "tool_args": args, "tool_call_id": call_id},
@@ -310,6 +383,18 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
         cached_result = _find_cached_tool_result(state, name, args)
         if cached_result is not None:
             state.agent_scratchpad.append(ToolMessage(content=cached_result, tool_call_id=call_id))
+            writer(
+                AgentMessageChunk(
+                    type=AgentMessageChunkType.TOOL_RESULT,
+                    content=_format_tool_result_step(name, cached_result, "", cached=True),
+                    metadata={
+                        "tool_name": name,
+                        "tool_call_id": call_id,
+                        "cached": True,
+                        "result_length": len(cached_result),
+                    },
+                )
+            )
             write_live_trace_event(
                 "top_agent.tool.cached_result",
                 {
@@ -355,6 +440,19 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
                 },
             )
             return state
+        writer(
+            AgentMessageChunk(
+                type=AgentMessageChunkType.TOOL_RESULT,
+                content=_format_tool_result_step(name, result_str, artifact_path),
+                metadata={
+                    "tool_name": name,
+                    "tool_call_id": call_id,
+                    "cached": False,
+                    "result_length": len(result_str),
+                    "artifact_path": artifact_path,
+                },
+            )
+        )
         state.agent_scratchpad.append(ToolMessage(content=truncated, tool_call_id=call_id))
 
     return state

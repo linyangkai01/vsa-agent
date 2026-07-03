@@ -1,7 +1,7 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import pytest
 
-from vsa_agent.agents.data_models import AgentDecision, AgentState
+from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunkType, AgentState
 from vsa_agent.agents.top_agent import _build_langchain_tools
 from vsa_agent.agents.top_agent import _is_unrecoverable_tool_error
 from vsa_agent.agents.top_agent import _truncate_result
@@ -167,3 +167,58 @@ async def test_tool_node_reuses_cached_result_for_duplicate_tool_call(monkeypatc
     assert isinstance(state.agent_scratchpad[-1], ToolMessage)
     assert state.agent_scratchpad[-1].tool_call_id == "call-2"
     assert state.agent_scratchpad[-1].content == "cached safety analysis"
+
+
+@pytest.mark.asyncio
+async def test_tool_node_streams_rich_tool_call_and_result_steps(monkeypatch):
+    import vsa_agent.agents.top_agent as top_agent
+
+    chunks = []
+
+    async def fake_tool(video_path: str, query: str, api_key: str = ""):
+        assert api_key == "secret-value"
+        return (
+            "Opening observations.\n"
+            "Safety risk: workers on scaffolding lack visible fall harnesses.\n"
+            "Overall assessment: corrective action is required."
+        )
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get_all",
+        lambda: {"video_understanding": fake_tool},
+    )
+    monkeypatch.setattr(top_agent, "get_stream_writer", lambda: chunks.append)
+
+    state = AgentState(
+        agent_scratchpad=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "video_understanding",
+                        "args": {
+                            "video_path": "/data/project/lyk/video/1597042367-1-192.mp4",
+                            "query": "identify safety risks",
+                            "api_key": "secret-value",
+                        },
+                        "id": "call-1",
+                    }
+                ],
+            )
+        ]
+    )
+
+    await top_agent.tool_node(state, {})
+
+    tool_call = chunks[0]
+    tool_result = chunks[1]
+    assert tool_call.type == AgentMessageChunkType.TOOL_CALL
+    assert "Calling: video_understanding" in tool_call.content
+    assert "video_path: /data/project/lyk/video/1597042367-1-192.mp4" in tool_call.content
+    assert "query: identify safety risks" in tool_call.content
+    assert "secret-value" not in tool_call.content
+    assert "api_key: <redacted>" in tool_call.content
+    assert tool_result.type == AgentMessageChunkType.TOOL_RESULT
+    assert "Completed: video_understanding" in tool_result.content
+    assert "Result length:" in tool_result.content
+    assert "Safety risk: workers on scaffolding" in tool_result.content

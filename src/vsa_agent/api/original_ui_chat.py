@@ -148,6 +148,8 @@ def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[s
         return [format_intermediate_data("Thought", chunk.content, index=index)]
     if chunk.type == AgentMessageChunkType.TOOL_CALL:
         return [format_intermediate_data("Tool Call", chunk.content, index=index)]
+    if chunk.type == AgentMessageChunkType.TOOL_RESULT:
+        return [format_intermediate_data("Tool Result", chunk.content, status="completed", index=index)]
     if chunk.type == AgentMessageChunkType.ERROR:
         return [format_intermediate_data("Error", chunk.content, status="error", index=index, error=chunk.content)]
     return []
