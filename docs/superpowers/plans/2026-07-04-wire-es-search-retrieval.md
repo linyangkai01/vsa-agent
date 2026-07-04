@@ -2,6 +2,7 @@
 change: wire-es-search-retrieval
 design-doc: docs/superpowers/specs/2026-07-04-wire-es-search-retrieval-design.md
 base-ref: 681c81767bcc5134031c406f4d7a903fc165d0c1
+archived-with: 2026-07-04-wire-es-search-retrieval
 ---
 
 # ES Video Segment Retrieval Implementation Plan
@@ -24,8 +25,6 @@ base-ref: 681c81767bcc5134031c406f4d7a903fc165d0c1
 - Do not enable Elasticsearch by default in committed `config.yaml`.
 - After local implementation is complete, sync changed code/scripts/docs to `Z:\vsa-agent` and attempt server-side validation when the mapped environment can execute it.
 - Git policy for this solo project: finish locally on the development branch, merge locally to `master`, then push only remote `master`.
-
----
 
 ## File Structure
 

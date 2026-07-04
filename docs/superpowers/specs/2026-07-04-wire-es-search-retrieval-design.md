@@ -2,6 +2,8 @@
 comet_change: wire-es-search-retrieval
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-04-wire-es-search-retrieval
+status: final
 ---
 
 # Wire ES Search Retrieval Design
