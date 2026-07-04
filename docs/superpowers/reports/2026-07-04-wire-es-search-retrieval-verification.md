@@ -92,3 +92,14 @@ failure.
 The broad-suite failures include pre-existing report-language expectation
 failures and missing `bash` process execution from the mapped working
 directory. They are outside this ES retrieval change.
+
+## Review Gate
+
+`review_mode` was set to `standard`. The `requesting-code-review` workflow was
+loaded, but the available multi-agent tool policy requires an explicit user
+request before spawning a subagent. No background reviewer was spawned.
+
+A local review was still performed over the implementation diff. It found one
+style issue in `src/vsa_agent/tools/embed_search.py`: newly added metadata
+fallback expressions exceeded the project line-length convention. That was
+fixed in commit `78dab32`.
