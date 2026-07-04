@@ -2,7 +2,7 @@ workflow: full
 phase: build
 context_compression: off
 build_mode: null
-build_pause: null
+build_pause: plan-ready
 subagent_dispatch: null
 tdd_mode: null
 review_mode: off
@@ -11,7 +11,7 @@ verify_mode: null
 auto_transition: true
 base_ref: 73ba6dc962b2e9175289eeac25f356bb581211a1
 design_doc: docs/superpowers/specs/2026-07-04-verify-es-ingest-runtime-design.md
-plan: null
+plan: docs/superpowers/plans/2026-07-04-verify-es-ingest-runtime.md
 verify_result: null
 verification_report: null
 branch_status: pending
