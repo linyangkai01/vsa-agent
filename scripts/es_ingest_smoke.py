@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
 from typing import Any
+from urllib.request import Request
+from urllib.request import urlopen
+
+from elasticsearch import AsyncElasticsearch
 
 
 def sample_payload(video_id: str) -> dict[str, Any]:
@@ -48,3 +58,87 @@ def validate_indexed_document(document: dict[str, Any], expected_video_id: str) 
     metadata = document.get("metadata")
     if not isinstance(metadata, dict) or metadata.get("site") != "runtime-yard":
         raise RuntimeError(f"Indexed document metadata missing expected site: {metadata!r}")
+
+
+def post_ingest(api_url: str, payload: dict[str, Any], timeout_sec: float) -> dict[str, Any]:
+    request = Request(
+        f"{api_url.rstrip('/')}/api/search/ingest",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        response_payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(response_payload, dict):
+        raise RuntimeError(f"Expected JSON object from ingest API, got: {response_payload!r}")
+    return response_payload
+
+
+async def find_indexed_document(
+    es_endpoint: str,
+    index: str,
+    video_id: str,
+    timeout_sec: float,
+    verify_certs: bool,
+) -> dict[str, Any]:
+    es = AsyncElasticsearch(es_endpoint, request_timeout=timeout_sec, verify_certs=verify_certs)
+    try:
+        await es.indices.refresh(index=index)
+        for body in (
+            {"query": {"term": {"video_id.keyword": video_id}}, "size": 1},
+            {"query": {"match": {"video_id": video_id}}, "size": 1},
+        ):
+            result = await es.search(index=index, body=body)
+            hits = result.get("hits", {}).get("hits", [])
+            if hits:
+                source = hits[0].get("_source", {})
+                if not isinstance(source, dict):
+                    raise RuntimeError(f"Expected indexed document source to be an object, got: {source!r}")
+                return source
+    finally:
+        await es.close()
+
+    raise RuntimeError(f"Indexed document not found for video_id={video_id!r} in index={index!r}")
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Validate /api/search/ingest against a real Elasticsearch index.")
+    parser.add_argument("--api-url", default=os.environ.get("VSA_API_URL", "http://127.0.0.1:8000"))
+    parser.add_argument("--es-endpoint", default=os.environ.get("VSA_ES_ENDPOINT"))
+    parser.add_argument("--index", default=os.environ.get("VSA_ES_INDEX", "vsa-video-embeddings"))
+    parser.add_argument("--video-id", default=f"runtime-video-{int(time.time())}")
+    parser.add_argument("--timeout-sec", type=float, default=30.0)
+    parser.add_argument("--insecure", action="store_true", help="Disable Elasticsearch TLS certificate verification.")
+    args = parser.parse_args(argv)
+    if not args.es_endpoint:
+        parser.error("--es-endpoint is required when VSA_ES_ENDPOINT is not set")
+    return args
+
+
+async def _run(args: argparse.Namespace) -> None:
+    payload = sample_payload(args.video_id)
+    ingest_response = post_ingest(args.api_url, payload, timeout_sec=args.timeout_sec)
+    validate_ingest_response(ingest_response, expected_video_id=args.video_id)
+    document = await find_indexed_document(
+        args.es_endpoint,
+        index=args.index,
+        video_id=args.video_id,
+        timeout_sec=args.timeout_sec,
+        verify_certs=not args.insecure,
+    )
+    validate_indexed_document(document, expected_video_id=args.video_id)
+    print("PASS: Elasticsearch ingest smoke validation")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    try:
+        asyncio.run(_run(args))
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
