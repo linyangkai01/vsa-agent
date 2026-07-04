@@ -2,11 +2,12 @@
 
 - [ ] 1.1 Confirm the ES retrieval target is the existing `embed_search_tool` path.
 - [ ] 1.2 Decide vector-first behavior and keyword fallback boundaries.
-- [ ] 1.3 Define server/runtime startup scope for the mapped `Z:\vsa-agent` project.
+- [ ] 1.3 Define the lightweight video segment record contract and its boundary from original VSS `mdx-*` indices.
+- [ ] 1.4 Define server/runtime startup scope for the mapped `Z:\vsa-agent` project.
 
 ## 2. Elasticsearch Retrieval Implementation
 
-- [ ] 2.1 Add failing unit tests proving ES embed search returns an ingested-document-shaped hit.
+- [ ] 2.1 Add failing unit tests proving ES embed search returns an ingested video-segment-shaped hit.
 - [ ] 2.2 Add failing unit tests proving ES query failures preserve fallback behavior.
 - [ ] 2.3 Implement the minimal ES retrieval changes needed for those tests.
 - [ ] 2.4 Run focused search tests.

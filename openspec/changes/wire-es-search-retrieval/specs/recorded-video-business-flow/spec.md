@@ -1,15 +1,37 @@
 ## ADDED Requirements
 
-### Requirement: Elasticsearch video search retrieval
+### Requirement: Elasticsearch video segment search retrieval
 
-The system SHALL search recorded-video metadata from Elasticsearch when search indexing is enabled and documents have been written to the configured embed index.
+The system SHALL search recorded-video segment index records from Elasticsearch when search indexing is enabled and records have been written to the configured embed index.
 
-#### Scenario: Embed search returns an ingested Elasticsearch document
+The indexed Elasticsearch records SHALL represent searchable video segments, not stored video files and not Enterprise RAG knowledge-base documents.
 
-- **GIVEN** `search.enabled` is true, `search.es_endpoint` is set, and `search.embed_index` contains a document written by `/api/search/ingest`
-- **WHEN** the project runs an embed-only recorded-video search whose query matches that document
-- **THEN** the search returns a `SearchOutput` containing a `SearchResult` for the indexed document
+#### Scenario: Embed search returns an ingested Elasticsearch video segment record
+
+- **GIVEN** `search.enabled` is true, `search.es_endpoint` is set, and `search.embed_index` contains a video segment record written by `/api/search/ingest`
+- **WHEN** the project runs an embed-only recorded-video search whose query matches that record
+- **THEN** the search returns a `SearchOutput` containing a `SearchResult` for the indexed video segment record
 - **AND** the result includes video name, description, timestamps, sensor id, screenshot URL, and similarity
+
+#### Scenario: Ingested record preserves video segment identity
+
+- **GIVEN** `/api/search/ingest` receives metadata containing video/source identity, description, timestamp range, vector, and screenshot URL fields
+- **WHEN** the endpoint indexes the record into Elasticsearch
+- **THEN** the indexed record contains stable top-level fields for `video_id`, `video_name`, `description`, `sensor_id`, `start_time`, `end_time`, `screenshot_url`, and `vector`
+- **AND** the original metadata is preserved for forward compatibility
+
+#### Scenario: Video files remain outside Elasticsearch
+
+- **GIVEN** a recorded video has been indexed for search
+- **WHEN** a search result is returned from Elasticsearch
+- **THEN** the result references the video segment by source id, timestamp range, and URL fields
+- **AND** Elasticsearch is not treated as the storage location for the video bytes
+
+#### Scenario: Enterprise RAG document knowledge is out of scope
+
+- **WHEN** the recorded-video search path indexes or searches Elasticsearch
+- **THEN** it only handles video segment search records
+- **AND** it does not create or query SOP, manual, policy, or other Enterprise RAG document collections
 
 #### Scenario: Search falls back when Elasticsearch retrieval is unavailable
 

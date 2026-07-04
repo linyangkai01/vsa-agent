@@ -6,6 +6,14 @@ The current ES path has three pieces in different maturity states:
 - `embed_search_tool` already has an ES search branch that builds a vector `script_score` query and maps ES hits into `SearchOutput`.
 - Runtime validation can post a sample ingest payload and inspect the ES index, but there is no script-owned ES runtime and no end-to-end validation that the project search tool retrieves the ingested document.
 
+The original VSS project uses Elasticsearch for video retrieval, but ES stores
+searchable video segment index records rather than video files. Video bytes live
+in VST/nvstreamer. ES records carry source identity, timestamp range,
+description text, vectors, object/frame metadata, and URL context for
+screenshots or clips. In this change, the term "document" means an
+Elasticsearch JSON index record for a video segment, not a Word/PDF document
+knowledge base.
+
 The user has a mapped server project at `Z:\vsa-agent`. The project should produce scripts/configuration that can be synced there and used to start ES for development validation. A mapped drive is enough for file sync, but starting a server-side process still depends on a command execution path on that server.
 
 ## Goals / Non-Goals
@@ -24,6 +32,9 @@ The user has a mapped server project at `Z:\vsa-agent`. The project should produ
 - Replace the current search agent or original UI flows.
 - Require real ES for normal unit tests.
 - Change the committed default `config.yaml` to enable ES.
+- Recreate the full original VSS `mdx-*` Kafka/Redis/Logstash pipeline.
+- Add Enterprise RAG document ingestion or `frag_retrieval`; those belong to a
+  separate document knowledge retrieval path, not recorded-video search.
 
 ## Decisions
 
@@ -33,9 +44,28 @@ The first implementation target is `embed_search_tool` because `search_tool` alr
 
 Alternative considered: add a new ES-specific search tool. Rejected for this phase because it would create a second route to the same indexed documents and increase agent routing ambiguity.
 
+### Treat indexed records as video segments, not general documents
+
+The current project should keep its lightweight `search.embed_index`, but the
+design language and tests should treat each indexed item as a recorded-video
+segment record. The stable fields are `video_id`, `video_name`, `description`,
+`sensor_id`, `start_time`, `end_time`, `screenshot_url`, `vector`, and
+`metadata`. This preserves the important VSS semantics without requiring
+`mdx-embed-filtered-*`, `mdx-behavior-*`, or `mdx-raw-*` in the first phase.
+
+Alternative considered: emulate the VSS MDX index families immediately.
+Rejected for this phase because it would imply adding chunk/object/frame
+schemas and a Logstash-equivalent ingest pipeline before the current search
+path is wired.
+
 ### Add keyword fallback only when vector search cannot run
 
-The ingested documents include a `vector` field when callers provide it, so vector search should remain the primary path. However, runtime validation should still be usable when embeddings or ES vector mapping are not ready. The ES retrieval implementation can fall back to a conservative `multi_match` query over `description`, `video_name`, `sensor_id`, and metadata fields when query embedding generation fails or ES rejects the vector query.
+The ingested video segment records include a `vector` field when callers
+provide it, so vector search should remain the primary path. However, runtime
+validation should still be usable when embeddings or ES vector mapping are not
+ready. The ES retrieval implementation can fall back to a conservative
+`multi_match` query over `description`, `video_name`, `sensor_id`, and metadata
+fields when query embedding generation fails or ES rejects the vector query.
 
 Alternative considered: make keyword search the default. Rejected because the project intent is ES-backed semantic search, and keyword search should not hide vector configuration problems during real deployments.
 
