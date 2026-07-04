@@ -267,10 +267,32 @@ async def _process_search_hit(
             or metadata.get("text")
             or metadata_sensor.get("description", "")
         ),
-        start_time=source.get("start_time") or source.get("timestamp") or source.get("start") or metadata.get("start_time") or metadata.get("timestamp") or metadata.get("start") or "",
-        end_time=source.get("end_time") or source.get("timestamp_end") or source.get("end") or metadata.get("end_time") or metadata.get("timestamp_end") or metadata.get("end") or "",
+        start_time=(
+            source.get("start_time")
+            or source.get("timestamp")
+            or source.get("start")
+            or metadata.get("start_time")
+            or metadata.get("timestamp")
+            or metadata.get("start")
+            or ""
+        ),
+        end_time=(
+            source.get("end_time")
+            or source.get("timestamp_end")
+            or source.get("end")
+            or metadata.get("end_time")
+            or metadata.get("timestamp_end")
+            or metadata.get("end")
+            or ""
+        ),
         sensor_id=sensor_id,
-        screenshot_url=source.get("screenshot_url") or source.get("thumbnail_url") or metadata.get("screenshot_url") or metadata.get("thumbnail_url") or "",
+        screenshot_url=(
+            source.get("screenshot_url")
+            or source.get("thumbnail_url")
+            or metadata.get("screenshot_url")
+            or metadata.get("thumbnail_url")
+            or ""
+        ),
         similarity_score=similarity,
     )
 
