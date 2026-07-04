@@ -1,5 +1,5 @@
 workflow: full
-phase: open
+phase: design
 context_compression: off
 build_mode: null
 build_pause: null
@@ -18,3 +18,5 @@ branch_status: pending
 created_at: 2026-07-04
 verified_at: null
 archived: false
+handoff_context: openspec/changes/verify-es-ingest-runtime/.comet/handoff/design-context.json
+handoff_hash: 6ddb9bfe383b25fd2c28cd3ed37d6061c106bd19d954add1c798ce2979d7e027
