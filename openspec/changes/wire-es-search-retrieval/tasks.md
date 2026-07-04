@@ -14,10 +14,10 @@
 
 ## 3. Scriptable ES Runtime
 
-- [ ] 3.1 Add Docker Compose configuration for single-node development Elasticsearch.
-- [ ] 3.2 Add start/stop/probe scripts for the ES development service.
+- [x] 3.1 Add Docker Compose configuration for single-node development Elasticsearch.
+- [x] 3.2 Add start/stop/probe scripts for the ES development service.
 - [x] 3.3 Add a runtime search validation script or command that ingests and then searches for a sample document.
-- [ ] 3.4 Document local and mapped-server usage.
+- [x] 3.4 Document local and mapped-server usage.
 
 ## 4. Server Sync And Validation
 
