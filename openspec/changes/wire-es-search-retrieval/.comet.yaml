@@ -11,7 +11,7 @@ verify_mode: null
 auto_transition: true
 base_ref: b1a6396e5653137c04cf56792a704d755ff68f5d
 design_doc: docs/superpowers/specs/2026-07-04-wire-es-search-retrieval-design.md
-plan: null
+plan: docs/superpowers/plans/2026-07-04-wire-es-search-retrieval.md
 verify_result: pending
 verification_report: null
 branch_status: pending
