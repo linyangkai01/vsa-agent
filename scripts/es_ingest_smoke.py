@@ -101,6 +101,37 @@ async def find_indexed_document(
     raise RuntimeError(f"Indexed document not found for video_id={video_id!r} in index={index!r}")
 
 
+async def search_indexed_document(
+    es_endpoint: str,
+    index: str,
+    query: str,
+    timeout_sec: float,
+    verify_certs: bool,
+) -> dict[str, Any]:
+    es = AsyncElasticsearch(es_endpoint, request_timeout=timeout_sec, verify_certs=verify_certs)
+    try:
+        body = {
+            "query": {
+                "multi_match": {
+                    "query": query,
+                    "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                }
+            },
+            "size": 1,
+        }
+        result = await es.search(index=index, body=body)
+        hits = result.get("hits", {}).get("hits", [])
+        if hits:
+            source = hits[0].get("_source", {})
+            if not isinstance(source, dict):
+                raise RuntimeError(f"Expected search hit source to be an object, got: {source!r}")
+            return source
+    finally:
+        await es.close()
+
+    raise RuntimeError(f"Search validation found no hits for query={query!r} in index={index!r}")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate /api/search/ingest against a real Elasticsearch index.")
     parser.add_argument("--api-url", default=os.environ.get("VSA_API_URL", "http://127.0.0.1:8000"))
@@ -127,7 +158,18 @@ async def _run(args: argparse.Namespace) -> None:
         verify_certs=not args.insecure,
     )
     validate_indexed_document(document, expected_video_id=args.video_id)
-    print("PASS: Elasticsearch ingest smoke validation")
+    search_hit = await search_indexed_document(
+        args.es_endpoint,
+        index=args.index,
+        query="forklift worker",
+        timeout_sec=args.timeout_sec,
+        verify_certs=not args.insecure,
+    )
+    if search_hit.get("video_id") != args.video_id:
+        raise RuntimeError(
+            f"Search hit video_id mismatch: expected {args.video_id!r}, got {search_hit.get('video_id')!r}"
+        )
+    print("PASS: Elasticsearch ingest and search smoke validation")
 
 
 def main(argv: list[str] | None = None) -> int:
