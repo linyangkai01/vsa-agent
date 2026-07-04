@@ -61,6 +61,8 @@ python scripts\es_ingest_smoke.py --api-url http://127.0.0.1:8000 --es-endpoint 
 
 Operational guide: `docs/es-ingest-runtime-validation.md`.
 
+Server validation status: no documented external Elasticsearch/API validation server is configured in this repo yet, so no server sync or server-side smoke run was performed for this build pass. The smoke path is ready to run when a server API URL and Elasticsearch endpoint are supplied.
+
 ## Next Recommended Work
 
 Finish `verify-es-ingest-runtime` through Comet verification, then merge locally to `master` and push only `master` to origin.
