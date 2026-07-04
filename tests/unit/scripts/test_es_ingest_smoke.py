@@ -1,3 +1,9 @@
+import json
+
+import pytest
+
+from scripts.es_ingest_smoke import find_indexed_document
+from scripts.es_ingest_smoke import post_ingest
 from scripts.es_ingest_smoke import sample_payload
 from scripts.es_ingest_smoke import validate_indexed_document
 from scripts.es_ingest_smoke import validate_ingest_response
@@ -62,3 +68,123 @@ def test_validate_indexed_document_rejects_wrong_video_id():
         assert "video_id" in str(exc)
     else:
         raise AssertionError("validate_indexed_document should reject mismatched video_id")
+
+
+class FakeResponse:
+    def __init__(self, payload: dict[str, object]):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
+def test_post_ingest_posts_json_to_ingest_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["method"] = request.get_method()
+        captured["content_type"] = request.headers["Content-type"]
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse({"status": "ingested", "video_id": "runtime-video-1", "indexed": True, "result_id": "abc123"})
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.urlopen", fake_urlopen)
+
+    response = post_ingest("http://127.0.0.1:8000", {"video_id": "runtime-video-1"}, timeout_sec=7.5)
+
+    assert response["result_id"] == "abc123"
+    assert captured == {
+        "url": "http://127.0.0.1:8000/api/search/ingest",
+        "timeout": 7.5,
+        "method": "POST",
+        "content_type": "application/json",
+        "body": {"video_id": "runtime-video-1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_find_indexed_document_refreshes_and_uses_match_fallback(monkeypatch):
+    created_clients = []
+
+    class FakeIndices:
+        def __init__(self):
+            self.refreshed = []
+
+        async def refresh(self, index):
+            self.refreshed.append(index)
+
+    class FakeAsyncElasticsearch:
+        def __init__(self, endpoint, request_timeout, verify_certs):
+            self.endpoint = endpoint
+            self.request_timeout = request_timeout
+            self.verify_certs = verify_certs
+            self.indices = FakeIndices()
+            self.search_bodies = []
+            self.closed = False
+            created_clients.append(self)
+
+        async def search(self, index, body):
+            self.search_bodies.append((index, body))
+            if "term" in body["query"]:
+                return {"hits": {"hits": []}}
+            return {"hits": {"hits": [{"_source": {"video_id": "runtime-video-1", "metadata": {"site": "runtime-yard"}}}]}}
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.AsyncElasticsearch", FakeAsyncElasticsearch)
+
+    document = await find_indexed_document(
+        "http://es:9200",
+        index="vsa-video-embeddings",
+        video_id="runtime-video-1",
+        timeout_sec=9.5,
+        verify_certs=False,
+    )
+
+    fake_client = created_clients[0]
+    assert document["video_id"] == "runtime-video-1"
+    assert fake_client.endpoint == "http://es:9200"
+    assert fake_client.request_timeout == 9.5
+    assert fake_client.verify_certs is False
+    assert fake_client.indices.refreshed == ["vsa-video-embeddings"]
+    assert fake_client.search_bodies == [
+        ("vsa-video-embeddings", {"query": {"term": {"video_id.keyword": "runtime-video-1"}}, "size": 1}),
+        ("vsa-video-embeddings", {"query": {"match": {"video_id": "runtime-video-1"}}, "size": 1}),
+    ]
+    assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_find_indexed_document_raises_when_missing(monkeypatch):
+    class FakeIndices:
+        async def refresh(self, index):
+            pass
+
+    class FakeAsyncElasticsearch:
+        def __init__(self, *args, **kwargs):
+            self.indices = FakeIndices()
+
+        async def search(self, index, body):
+            return {"hits": {"hits": []}}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.AsyncElasticsearch", FakeAsyncElasticsearch)
+
+    with pytest.raises(RuntimeError, match="Indexed document not found"):
+        await find_indexed_document(
+            "http://es:9200",
+            index="vsa-video-embeddings",
+            video_id="runtime-video-1",
+            timeout_sec=30.0,
+            verify_certs=True,
+        )
