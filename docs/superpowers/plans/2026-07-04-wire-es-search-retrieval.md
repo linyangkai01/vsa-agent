@@ -6,7 +6,7 @@ base-ref: 681c81767bcc5134031c406f4d7a903fc165d0c1
 
 # ES Video Segment Retrieval Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make the current project retrieve `/api/search/ingest` video segment index records through Elasticsearch, then provide scriptable local/server ES startup and validation.
 
@@ -50,7 +50,7 @@ base-ref: 681c81767bcc5134031c406f4d7a903fc165d0c1
 - Consumes: `embed_search._search_real_es(query: str, top_k: int, search_config: SearchBackendConfig) -> SearchOutput | None`
 - Produces: failing tests that define expected ES video segment search behavior before implementation.
 
-- [ ] **Step 1: Add a fake ES client and embedding client test for video segment hits**
+- [x] **Step 1: Add a fake ES client and embedding client test for video segment hits**
 
 Add tests equivalent to this shape in `tests/unit/tools/test_embed_search.py`:
 
@@ -140,7 +140,7 @@ async def test_search_real_es_returns_ingested_video_segment_record(monkeypatch)
     assert created_clients[0].closed is True
 ```
 
-- [ ] **Step 2: Add a failure-preserves-fallback test at `embed_search_tool` level**
+- [x] **Step 2: Add a failure-preserves-fallback test at `embed_search_tool` level**
 
 Add a test equivalent to:
 
@@ -182,7 +182,7 @@ async def test_embed_search_tool_uses_store_when_es_search_raises(monkeypatch):
     assert output.data[0].video_name == "fallback.mp4"
 ```
 
-- [ ] **Step 3: Run the new tests and confirm red**
+- [x] **Step 3: Run the new tests and confirm red**
 
 Run:
 
@@ -192,7 +192,7 @@ pytest tests/unit/tools/test_embed_search.py -q
 
 Expected: at least one new test fails before implementation, most likely because keyword fallback/search validation helper does not exist yet or a query/mapping expectation differs.
 
-- [ ] **Step 4: Commit tests only if they fail for the intended reason**
+- [x] **Step 4: Commit tests only if they fail for the intended reason**
 
 Commit after the red phase:
 
@@ -211,7 +211,7 @@ git commit -m "test: define es video segment retrieval"
 - Consumes: failing tests from Task 1.
 - Produces: ES vector search returning `SearchOutput` for video segment records and preserving fallback on ES errors.
 
-- [ ] **Step 1: Implement only what Task 1 requires**
+- [x] **Step 1: Implement only what Task 1 requires**
 
 In `src/vsa_agent/tools/embed_search.py`, keep `_search_real_es` vector-first. If the tests expose a missing behavior, make the smallest change. Acceptable changes:
 
@@ -235,11 +235,11 @@ def _source_text(source: dict[str, Any]) -> str:
 
 Only add a helper like this if stable top-level and metadata fallback behavior is not already covered by `_process_search_hit`.
 
-- [ ] **Step 2: Keep ES failure fallback at `embed_search_tool` boundary**
+- [x] **Step 2: Keep ES failure fallback at `embed_search_tool` boundary**
 
 Do not catch and hide every error inside `_search_real_es`. Let unexpected ES/vector failures bubble to `embed_search_tool`, where the existing warning and store fallback preserve behavior.
 
-- [ ] **Step 3: Run focused tests**
+- [x] **Step 3: Run focused tests**
 
 Run:
 
@@ -249,7 +249,7 @@ pytest tests/unit/tools/test_embed_search.py -q
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit implementation**
+- [x] **Step 4: Commit implementation**
 
 ```powershell
 git add src/vsa_agent/tools/embed_search.py tests/unit/tools/test_embed_search.py
@@ -266,7 +266,7 @@ git commit -m "feat: retrieve es video segment records"
 - Consumes: `_build_ingest_document(video_id: str, metadata: dict[str, Any]) -> dict[str, Any]`
 - Produces: explicit tests that the ingest endpoint writes a video segment index record with aliases normalized.
 
-- [ ] **Step 1: Add contract test for aliases**
+- [x] **Step 1: Add contract test for aliases**
 
 Add a test equivalent to:
 
@@ -310,7 +310,7 @@ def test_build_ingest_document_normalizes_video_segment_aliases():
     }
 ```
 
-- [ ] **Step 2: Run contract test and confirm result**
+- [x] **Step 2: Run contract test and confirm result**
 
 Run:
 
@@ -320,11 +320,11 @@ pytest tests/unit/api/test_video_search_ingest.py -q
 
 Expected: PASS if current code already satisfies the contract; otherwise FAIL for the exact missing field or alias.
 
-- [ ] **Step 3: Implement only missing normalization if the test fails**
+- [x] **Step 3: Implement only missing normalization if the test fails**
 
 If the test fails, update `_build_ingest_document` so top-level fields match the contract and `metadata` preserves the original source payload.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -334,7 +334,7 @@ pytest tests/unit/api/test_video_search_ingest.py -q
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit ingest contract**
+- [x] **Step 5: Commit ingest contract**
 
 ```powershell
 git add tests/unit/api/test_video_search_ingest.py src/vsa_agent/api/video_search_ingest.py
@@ -351,7 +351,7 @@ git commit -m "test: lock video segment ingest contract"
 - Consumes: `sample_payload`, `post_ingest`, `find_indexed_document`
 - Produces: runtime validation that can ingest and then search for a sample video segment record.
 
-- [ ] **Step 1: Add failing unit test for search validation helper**
+- [x] **Step 1: Add failing unit test for search validation helper**
 
 Add a test equivalent to:
 
@@ -417,7 +417,7 @@ async def test_search_indexed_document_uses_description_match(monkeypatch):
     assert created_clients[0].closed is True
 ```
 
-- [ ] **Step 2: Run the new script test and confirm red**
+- [x] **Step 2: Run the new script test and confirm red**
 
 Run:
 
@@ -427,7 +427,7 @@ pytest tests/unit/scripts/test_es_ingest_smoke.py -q
 
 Expected: FAIL because `search_indexed_document` is not defined.
 
-- [ ] **Step 3: Implement `search_indexed_document` and call it from `_run`**
+- [x] **Step 3: Implement `search_indexed_document` and call it from `_run`**
 
 Add this helper to `scripts/es_ingest_smoke.py`:
 
@@ -477,7 +477,7 @@ Then update `_run` after `validate_indexed_document(...)`:
         raise RuntimeError(f"Search hit video_id mismatch: expected {args.video_id!r}, got {search_hit.get('video_id')!r}")
 ```
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -487,7 +487,7 @@ pytest tests/unit/scripts/test_es_ingest_smoke.py -q
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit runtime validation helper**
+- [x] **Step 5: Commit runtime validation helper**
 
 ```powershell
 git add scripts/es_ingest_smoke.py tests/unit/scripts/test_es_ingest_smoke.py
@@ -507,7 +507,7 @@ git commit -m "feat: validate es ingest search path"
 - Consumes: Docker CLI with Compose support.
 - Produces: repeatable local/server project commands to start, stop, and probe ES.
 
-- [ ] **Step 1: Add Docker Compose file**
+- [x] **Step 1: Add Docker Compose file**
 
 Create `docker-compose.es.yml`:
 
@@ -531,7 +531,7 @@ services:
       retries: 12
 ```
 
-- [ ] **Step 2: Add start script**
+- [x] **Step 2: Add start script**
 
 Create `scripts/es-dev-start.ps1`:
 
@@ -553,7 +553,7 @@ docker compose -f docker-compose.es.yml up -d
 & "$PSScriptRoot\es-dev-probe.ps1" -Endpoint "http://127.0.0.1:$Port"
 ```
 
-- [ ] **Step 3: Add stop script**
+- [x] **Step 3: Add stop script**
 
 Create `scripts/es-dev-stop.ps1`:
 
@@ -564,7 +564,7 @@ Set-Location $repoRoot
 docker compose -f docker-compose.es.yml down
 ```
 
-- [ ] **Step 4: Add probe script**
+- [x] **Step 4: Add probe script**
 
 Create `scripts/es-dev-probe.ps1`:
 
@@ -591,7 +591,7 @@ do {
 throw "Elasticsearch did not become reachable at $Endpoint within $TimeoutSec seconds"
 ```
 
-- [ ] **Step 5: Add runtime documentation**
+- [x] **Step 5: Add runtime documentation**
 
 Create `docs/superpowers/reference/es-video-search-runtime.md` with:
 
@@ -631,7 +631,7 @@ python scripts\es_ingest_smoke.py --api-url http://127.0.0.1:8000 --es-endpoint 
 `Z:\vsa-agent` is the mapped server project copy. After local commits, sync the changed files there. If commands cannot execute through the mapped drive, validation is blocked until a server shell is available; the scripts are still copied so the server can run the same commands.
 ```
 
-- [ ] **Step 6: Run static checks for scripts/docs**
+- [x] **Step 6: Run static checks for scripts/docs**
 
 Run:
 
@@ -645,7 +645,7 @@ Test-Path docs\superpowers\reference\es-video-search-runtime.md
 
 Expected: all commands print `True`.
 
-- [ ] **Step 7: Commit ES runtime scripts**
+- [x] **Step 7: Commit ES runtime scripts**
 
 ```powershell
 git add docker-compose.es.yml scripts/es-dev-start.ps1 scripts/es-dev-stop.ps1 scripts/es-dev-probe.ps1 docs/superpowers/reference/es-video-search-runtime.md
@@ -663,7 +663,7 @@ git commit -m "chore: add scriptable es development runtime"
 - Consumes: completed Tasks 1-5.
 - Produces: checked tasks, local verification evidence, synced server project copy.
 
-- [ ] **Step 1: Run focused local verification**
+- [x] **Step 1: Run focused local verification**
 
 Run:
 
@@ -673,7 +673,7 @@ pytest tests/unit/tools/test_embed_search.py tests/unit/api/test_video_search_in
 
 Expected: PASS.
 
-- [ ] **Step 2: Run OpenSpec validation**
+- [x] **Step 2: Run OpenSpec validation**
 
 Run:
 
@@ -683,7 +683,7 @@ npx openspec validate wire-es-search-retrieval
 
 Expected: PASS.
 
-- [ ] **Step 3: Optionally run ES probe if Docker is available**
+- [x] **Step 3: Optionally run ES probe if Docker is available**
 
 Run:
 
@@ -695,7 +695,7 @@ Run:
 
 Expected: PASS if Docker Desktop/Compose can run. If Docker is unavailable, record the exact blocker in the verification report and continue with unit/OpenSpec evidence.
 
-- [ ] **Step 4: Sync changed files to `Z:\vsa-agent`**
+- [x] **Step 4: Sync changed files to `Z:\vsa-agent`**
 
 Use a safe copy command that preserves paths for changed files only. Example:
 
@@ -710,7 +710,7 @@ robocopy D:\WorkPlace\vsa-agent\openspec Z:\vsa-agent\openspec /E
 
 After running `robocopy`, treat exit codes `0` through `7` as success and `8` or above as failure.
 
-- [ ] **Step 5: Attempt mapped-server validation**
+- [x] **Step 5: Attempt mapped-server validation**
 
 If the mapped drive supports command execution from this machine, run:
 
@@ -722,18 +722,18 @@ Pop-Location
 
 Expected: PASS. If `Z:\` is only file mapping and cannot execute server-side dependencies, record that as the blocker.
 
-- [ ] **Step 6: Check off OpenSpec tasks**
+- [x] **Step 6: Check off OpenSpec tasks**
 
 Update `openspec/changes/wire-es-search-retrieval/tasks.md` so completed tasks are checked. Do not check a task whose verification was blocked; instead add a short note below it.
 
-- [ ] **Step 7: Commit verification/task updates**
+- [x] **Step 7: Commit verification/task updates**
 
 ```powershell
 git add openspec/changes/wire-es-search-retrieval/tasks.md docs/superpowers/reports
 git commit -m "chore: record es retrieval verification"
 ```
 
-- [ ] **Step 8: Run Comet build guard**
+- [x] **Step 8: Run Comet build guard**
 
 Run:
 
