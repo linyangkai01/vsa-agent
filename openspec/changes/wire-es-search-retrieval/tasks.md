@@ -21,12 +21,12 @@
 
 ## 4. Server Sync And Validation
 
-- [ ] 4.1 Sync completed files to `Z:\vsa-agent`.
-- [ ] 4.2 Attempt server-side ES startup validation from the available execution environment.
-- [ ] 4.3 If startup cannot be executed through the mapped drive environment, record the missing execution dependency clearly.
+- [x] 4.1 Sync completed files to `Z:\vsa-agent`.
+- [x] 4.2 Attempt server-side ES startup validation from the available execution environment.
+- [x] 4.3 If startup cannot be executed through the mapped drive environment, record the missing execution dependency clearly.
 
 ## 5. Verification And Closeout
 
-- [ ] 5.1 Run focused unit tests for ES search, ingest smoke helpers, and existing ingest API.
-- [ ] 5.2 Run OpenSpec validation for `wire-es-search-retrieval`.
-- [ ] 5.3 Run or document runtime ES/search validation result.
+- [x] 5.1 Run focused unit tests for ES search, ingest smoke helpers, and existing ingest API.
+- [x] 5.2 Run OpenSpec validation for `wire-es-search-retrieval`.
+- [x] 5.3 Run or document runtime ES/search validation result.
