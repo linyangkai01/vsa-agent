@@ -1,13 +1,14 @@
 # Development Status
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## Current State
 
-- Local `master` includes the completed ES ingest change.
-- `wire-es-ingest` has been archived into OpenSpec.
-- The main recorded-video business-flow spec now includes the Elasticsearch video search ingest requirement.
-- No active OpenSpec change is in progress.
+- Active OpenSpec change: `verify-es-ingest-runtime`.
+- Active branch: `codex/es-real-service-validation`.
+- Goal: add an opt-in runtime smoke path proving `/api/search/ingest` writes to a real Elasticsearch index.
+- Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
+- The smoke script is `scripts/es_ingest_smoke.py`.
 
 ## Git Policy
 
@@ -50,10 +51,16 @@ npx openspec validate wire-es-ingest
 
 Result: valid before archive.
 
+## Active Runtime Validation
+
+Current command for the next validation pass:
+
+```powershell
+python scripts\es_ingest_smoke.py --api-url http://127.0.0.1:8000 --es-endpoint <endpoint> --index vsa-video-embeddings
+```
+
+Operational guide: `docs/es-ingest-runtime-validation.md`.
+
 ## Next Recommended Work
 
-Start a new Comet change for the next ES milestone. Good candidates:
-
-1. Verify ES ingest against a real Elasticsearch service and document the server validation path.
-2. Add an end-to-end original UI search ingest smoke test.
-3. Add operational docs for ES index setup and example ingest payloads.
+Finish `verify-es-ingest-runtime` through Comet verification, then merge locally to `master` and push only `master` to origin.
