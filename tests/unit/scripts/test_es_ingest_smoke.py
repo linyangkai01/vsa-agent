@@ -5,6 +5,7 @@ import pytest
 from scripts.es_ingest_smoke import find_indexed_document
 from scripts.es_ingest_smoke import post_ingest
 from scripts.es_ingest_smoke import sample_payload
+from scripts.es_ingest_smoke import search_indexed_document
 from scripts.es_ingest_smoke import validate_indexed_document
 from scripts.es_ingest_smoke import validate_ingest_response
 
@@ -188,3 +189,65 @@ async def test_find_indexed_document_raises_when_missing(monkeypatch):
             timeout_sec=30.0,
             verify_certs=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_search_indexed_document_uses_description_match(monkeypatch):
+    created_clients = []
+
+    class FakeAsyncElasticsearch:
+        def __init__(self, endpoint, request_timeout, verify_certs):
+            self.endpoint = endpoint
+            self.request_timeout = request_timeout
+            self.verify_certs = verify_certs
+            self.search_bodies = []
+            self.closed = False
+            created_clients.append(self)
+
+        async def search(self, index, body):
+            self.search_bodies.append((index, body))
+            return {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "video_id": "runtime-video-1",
+                                "description": "forklift passes near worker in loading zone",
+                            }
+                        }
+                    ]
+                }
+            }
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.AsyncElasticsearch", FakeAsyncElasticsearch)
+
+    document = await search_indexed_document(
+        "http://es:9200",
+        index="vsa-video-embeddings",
+        query="forklift worker",
+        timeout_sec=5.0,
+        verify_certs=False,
+    )
+
+    assert document["video_id"] == "runtime-video-1"
+    assert created_clients[0].endpoint == "http://es:9200"
+    assert created_clients[0].request_timeout == 5.0
+    assert created_clients[0].verify_certs is False
+    assert created_clients[0].search_bodies == [
+        (
+            "vsa-video-embeddings",
+            {
+                "query": {
+                    "multi_match": {
+                        "query": "forklift worker",
+                        "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                    }
+                },
+                "size": 1,
+            },
+        )
+    ]
+    assert created_clients[0].closed is True
