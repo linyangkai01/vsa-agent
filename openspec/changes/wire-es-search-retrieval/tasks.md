@@ -7,10 +7,10 @@
 
 ## 2. Elasticsearch Retrieval Implementation
 
-- [ ] 2.1 Add failing unit tests proving ES embed search returns an ingested video-segment-shaped hit.
-- [ ] 2.2 Add failing unit tests proving ES query failures preserve fallback behavior.
-- [ ] 2.3 Implement the minimal ES retrieval changes needed for those tests.
-- [ ] 2.4 Run focused search tests.
+- [x] 2.1 Add failing unit tests proving ES embed search returns an ingested video-segment-shaped hit.
+- [x] 2.2 Add failing unit tests proving ES query failures preserve fallback behavior.
+- [x] 2.3 Implement the minimal ES retrieval changes needed for those tests.
+- [x] 2.4 Run focused search tests.
 
 ## 3. Scriptable ES Runtime
 
