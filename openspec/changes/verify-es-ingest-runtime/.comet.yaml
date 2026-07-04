@@ -14,7 +14,7 @@ design_doc: null
 plan: null
 verify_result: null
 verification_report: null
-branch_status: active
+branch_status: pending
 created_at: 2026-07-04
 verified_at: null
 archived: false
