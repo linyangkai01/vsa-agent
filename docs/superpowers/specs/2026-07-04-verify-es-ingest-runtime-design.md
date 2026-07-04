@@ -2,6 +2,8 @@
 comet_change: verify-es-ingest-runtime
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-04-verify-es-ingest-runtime
+status: final
 ---
 
 # Verify ES Ingest Runtime Design

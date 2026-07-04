@@ -42,7 +42,7 @@ The system SHALL validate a local archive search flow without Elasticsearch, NVI
 
 ### Requirement: Elasticsearch video search ingest
 
-The system SHALL provide a recorded-video search ingest API that indexes caller-provided video search metadata into Elasticsearch when search indexing is enabled.
+The system SHALL provide a recorded-video search ingest API that indexes caller-provided video search metadata into Elasticsearch when search indexing is enabled, and the project SHALL provide a repeatable runtime validation path for verifying that ingest against a real Elasticsearch service.
 
 #### Scenario: Search ingest skips when Elasticsearch is disabled
 
@@ -63,4 +63,12 @@ The system SHALL provide a recorded-video search ingest API that indexes caller-
 - **WHEN** Elasticsearch rejects or fails the ingest request
 - **THEN** `/api/search/ingest` returns a clear 502 error
 - **AND** the response does not claim that indexing succeeded
+
+#### Scenario: Real Elasticsearch ingest smoke validation succeeds
+
+- **GIVEN** a reachable Elasticsearch service and project configuration with `search.enabled` true, `search.es_endpoint` set, and `search.embed_index` set
+- **WHEN** the runtime validation path starts the API service and posts a representative video ingest payload to `/api/search/ingest`
+- **THEN** the endpoint returns `status` as `ingested`, `indexed` as true, and a non-empty Elasticsearch result id
+- **AND** querying the configured Elasticsearch index returns the document with the submitted `video_id`, description, sensor id, timestamps, screenshot URL, vector metadata, and original metadata
+- **AND** the validation instructions identify the exact commands, configuration values, and expected success output needed to repeat the smoke test locally or on the documented validation server
 
