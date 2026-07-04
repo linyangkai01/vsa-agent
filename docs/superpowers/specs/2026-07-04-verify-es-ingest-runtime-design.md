@@ -64,3 +64,9 @@ This gives a repeatable command and concrete assertions while keeping normal dev
 - Port conflicts may prevent starting the API service. The script or docs will support targeting an already running API URL, so users can manage service startup separately when needed.
 - Temporary config can accidentally leak into normal runs. The script will write config to a temporary path and pass it via `VSA_CONFIG`, leaving checked-in defaults unchanged.
 - ES document visibility can lag immediately after indexing. The script will refresh or retry the index lookup in a bounded way before declaring failure.
+
+## Implementation Divergence
+
+During build, the smoke path was kept narrower than the initial technical design to avoid hidden side effects in a runtime validation command. The committed script targets an already running FastAPI service, posts a representative ingest payload, refreshes and queries the configured Elasticsearch index, and validates the indexed document. Temporary config creation and API service startup are documented operational steps rather than script-owned behavior.
+
+This still satisfies the OpenSpec requirement because the project now has a repeatable runtime validation path with exact config, startup, smoke command, expected output, inspection, and cleanup instructions. It also keeps the default `config.yaml` safe with `search.enabled: false` and avoids making normal unit tests depend on Elasticsearch.
