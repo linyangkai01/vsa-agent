@@ -1,5 +1,5 @@
 workflow: full
-phase: design
+phase: build
 context_compression: off
 build_mode: null
 build_pause: null
@@ -10,7 +10,7 @@ isolation: branch
 verify_mode: null
 auto_transition: true
 base_ref: 73ba6dc962b2e9175289eeac25f356bb581211a1
-design_doc: null
+design_doc: docs/superpowers/specs/2026-07-04-verify-es-ingest-runtime-design.md
 plan: null
 verify_result: null
 verification_report: null
