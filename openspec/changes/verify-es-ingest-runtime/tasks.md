@@ -1,7 +1,7 @@
 ## 1. Runtime Validation Design
 
-- [ ] 1.1 Identify the least invasive validation entry point for a real Elasticsearch ingest smoke test.
-- [ ] 1.2 Decide whether the smoke path should be a Python script, pytest integration test, documentation-only command sequence, or a combination.
+- [x] 1.1 Identify the least invasive validation entry point for a real Elasticsearch ingest smoke test.
+- [x] 1.2 Decide whether the smoke path should be a Python script, pytest integration test, documentation-only command sequence, or a combination.
 
 ## 2. Implementation
 
@@ -13,6 +13,6 @@
 
 ## 3. Verification And Closeout
 
-- [ ] 3.1 Run focused unit tests covering the existing ingest endpoint.
-- [ ] 3.2 Run OpenSpec validation for `verify-es-ingest-runtime`.
-- [ ] 3.3 If a documented Elasticsearch server validation environment is available, sync code there and run the smoke validation; otherwise record the missing external dependency clearly.
+- [x] 3.1 Run focused unit tests covering the existing ingest endpoint.
+- [x] 3.2 Run OpenSpec validation for `verify-es-ingest-runtime`.
+- [x] 3.3 If a documented Elasticsearch server validation environment is available, sync code there and run the smoke validation; otherwise record the missing external dependency clearly.

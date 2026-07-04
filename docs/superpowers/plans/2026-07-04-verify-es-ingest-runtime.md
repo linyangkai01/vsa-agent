@@ -40,7 +40,7 @@
 - Produces: `validate_ingest_response(payload: dict[str, object], expected_video_id: str) -> str`
 - Produces: `validate_indexed_document(document: dict[str, object], expected_video_id: str) -> None`
 
-- [ ] **Step 1: Write failing tests for payload and response validation**
+- [x] **Step 1: Write failing tests for payload and response validation**
 
 Add `tests/unit/scripts/test_es_ingest_smoke.py`:
 
@@ -111,7 +111,7 @@ def test_validate_indexed_document_rejects_wrong_video_id():
         raise AssertionError("validate_indexed_document should reject mismatched video_id")
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -121,7 +121,7 @@ python -m pytest tests\unit\scripts\test_es_ingest_smoke.py -q
 
 Expected: FAIL because `scripts.es_ingest_smoke` does not exist.
 
-- [ ] **Step 3: Implement helper functions**
+- [x] **Step 3: Implement helper functions**
 
 Create `scripts/es_ingest_smoke.py` with:
 
@@ -178,7 +178,7 @@ def validate_indexed_document(document: dict[str, Any], expected_video_id: str) 
         raise RuntimeError(f"Indexed document metadata missing expected site: {metadata!r}")
 ```
 
-- [ ] **Step 4: Run helper tests**
+- [x] **Step 4: Run helper tests**
 
 Run:
 
@@ -188,7 +188,7 @@ python -m pytest tests\unit\scripts\test_es_ingest_smoke.py -q
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -208,7 +208,7 @@ git commit -m "test: add es ingest smoke validation helpers"
 - Consumes: running FastAPI service exposing `/api/search/ingest`
 - Consumes: reachable Elasticsearch endpoint
 
-- [ ] **Step 1: Add tests for API request helper with fake opener**
+- [x] **Step 1: Add tests for API request helper with fake opener**
 
 Add these tests to `tests/unit/scripts/test_es_ingest_smoke.py`:
 
@@ -257,7 +257,7 @@ def test_post_ingest_posts_json_to_ingest_endpoint(monkeypatch):
     }
 ```
 
-- [ ] **Step 2: Implement HTTP POST helper using Python standard library**
+- [x] **Step 2: Implement HTTP POST helper using Python standard library**
 
 Add `post_ingest(api_url: str, payload: dict[str, Any], timeout_sec: float) -> dict[str, Any]` using `urllib.request.Request` and `urllib.request.urlopen`.
 
@@ -269,7 +269,7 @@ Implementation requirements:
 - Set `Content-Type: application/json`.
 - Return the decoded JSON object as `dict[str, Any]`.
 
-- [ ] **Step 3: Implement Elasticsearch lookup helpers**
+- [x] **Step 3: Implement Elasticsearch lookup helpers**
 
 Add async helpers:
 
@@ -298,7 +298,7 @@ Implementation requirements:
 - Return `hits["hits"][0]["_source"]` when found.
 - Raise `RuntimeError(f"Indexed document not found for video_id={video_id!r} in index={index!r}")` when both searches return no hits.
 
-- [ ] **Step 4: Implement CLI**
+- [x] **Step 4: Implement CLI**
 
 Add `argparse` flags:
 
@@ -311,7 +311,7 @@ Add `argparse` flags:
 
 The CLI should print `PASS: Elasticsearch ingest smoke validation` on success and exit non-zero on failure.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -321,7 +321,7 @@ python -m pytest tests\unit\scripts\test_es_ingest_smoke.py -q
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
@@ -340,7 +340,7 @@ git commit -m "feat: add es ingest runtime smoke script"
 - Produces: documented local/server validation flow
 - Consumes: `scripts/es_ingest_smoke.py`
 
-- [ ] **Step 1: Write validation documentation**
+- [x] **Step 1: Write validation documentation**
 
 Create `docs/es-ingest-runtime-validation.md` with these sections:
 
@@ -354,7 +354,7 @@ Create `docs/es-ingest-runtime-validation.md` with these sections:
 - Cleanup command for the test index or test document
 - Server validation notes
 
-- [ ] **Step 2: Update development status**
+- [x] **Step 2: Update development status**
 
 Update `docs/DEVELOPMENT_STATUS.md`:
 
@@ -362,7 +362,7 @@ Update `docs/DEVELOPMENT_STATUS.md`:
 - Branch: `codex/es-real-service-validation`
 - Next validation command: `python scripts/es_ingest_smoke.py --api-url http://127.0.0.1:8000 --es-endpoint <endpoint> --index vsa-video-embeddings`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run:
 
@@ -381,7 +381,7 @@ git commit -m "docs: add es ingest runtime validation guide"
 - Consumes: Comet shell guard
 - Produces: build-ready change for verify phase
 
-- [ ] **Step 1: Run focused unit tests**
+- [x] **Step 1: Run focused unit tests**
 
 Run:
 
@@ -391,7 +391,7 @@ python -m pytest tests\unit\scripts\test_es_ingest_smoke.py tests\unit\api\test_
 
 Expected: PASS.
 
-- [ ] **Step 2: Run OpenSpec validation**
+- [x] **Step 2: Run OpenSpec validation**
 
 Run:
 
@@ -401,7 +401,7 @@ npx openspec validate verify-es-ingest-runtime
 
 Expected: `Change 'verify-es-ingest-runtime' is valid`.
 
-- [ ] **Step 3: Run Comet build guard**
+- [x] **Step 3: Run Comet build guard**
 
 Run:
 
@@ -411,7 +411,7 @@ bash -lc 'source .agents/skills/comet/scripts/comet-env.sh && "$COMET_BASH" "$CO
 
 Expected: guard passes and `.comet.yaml` moves to `phase: verify`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run:
 
