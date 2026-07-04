@@ -69,6 +69,32 @@ class TestProcessSearchHit:
         assert result.end_time == "2026-07-03T08:00:05Z"
         assert result.screenshot_url == "http://frames/1.jpg"
 
+    async def test_extracts_ingest_metadata_aliases_when_top_level_fields_missing(self):
+        hit = {
+            "_score": 1.77,
+            "_source": {
+                "video_id": "runtime-video-1",
+                "metadata": {
+                    "filename": "runtime-validation.mp4",
+                    "caption": "forklift passes near worker in loading zone",
+                    "sensor": {"id": "camera-runtime-1"},
+                    "timestamp": "2026-07-04T08:00:00Z",
+                    "timestamp_end": "2026-07-04T08:00:05Z",
+                    "thumbnail_url": "http://example.invalid/frames/runtime-validation.jpg",
+                },
+            },
+        }
+
+        result = await _process_search_hit(hit)
+
+        assert result is not None
+        assert result.video_name == "runtime-validation.mp4"
+        assert result.description == "forklift passes near worker in loading zone"
+        assert result.sensor_id == "camera-runtime-1"
+        assert result.start_time == "2026-07-04T08:00:00Z"
+        assert result.end_time == "2026-07-04T08:00:05Z"
+        assert result.screenshot_url == "http://example.invalid/frames/runtime-validation.jpg"
+
 
 class TestBuildEsQuery:
     def test_uses_configured_vector_field(self):
@@ -154,3 +180,38 @@ class TestEmbedSearchToolWithRealEs:
         assert fake_es.search_calls[0][0] == "video-embeddings"
         assert "embedding.vector" in fake_es.search_calls[0][1]["query"]["script_score"]["script"]["source"]
         assert fake_es.closed is True
+
+    async def test_uses_store_when_es_search_raises(self, monkeypatch):
+        from vsa_agent.config import AppConfig, SearchBackendConfig
+        from vsa_agent.tools import embed_search
+        from vsa_agent.tools.search import SearchResult
+
+        async def fake_search_real_es(query, top_k, search_config):
+            raise RuntimeError("es rejected vector query")
+
+        class FakeStore:
+            async def search(self, query, top_k):
+                assert query == "worker near forklift"
+                assert top_k == 2
+                return SearchOutput(
+                    data=[
+                        SearchResult(
+                            video_name="fallback.mp4",
+                            description="fallback result",
+                            start_time="t1",
+                            end_time="t2",
+                            sensor_id="cam-fallback",
+                            similarity=0.42,
+                        )
+                    ]
+                )
+
+        monkeypatch.setattr(
+            "vsa_agent.config.get_config",
+            lambda: AppConfig(search=SearchBackendConfig(enabled=True, es_endpoint="http://es:9200")),
+        )
+        monkeypatch.setattr(embed_search, "_search_real_es", fake_search_real_es)
+
+        output = await embed_search.embed_search_tool("worker near forklift", store=FakeStore(), top_k=2)
+
+        assert output.data[0].video_name == "fallback.mp4"
