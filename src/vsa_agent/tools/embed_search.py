@@ -199,14 +199,24 @@ async def _process_search_hit(
         return None
 
     source = hit.get("_source", {})
+    metadata = source.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
     sensor = source.get("sensor", {})
     if not isinstance(sensor, dict):
         sensor = {}
+    metadata_sensor = metadata.get("sensor", {})
+    if not isinstance(metadata_sensor, dict):
+        metadata_sensor = {}
     sensor_id = (
         source.get("sensor_id")
         or source.get("sensorId")
         or sensor.get("id")
         or source.get("camera_id")
+        or metadata.get("sensor_id")
+        or metadata.get("sensorId")
+        or metadata_sensor.get("id")
+        or metadata.get("camera_id")
         or ""
     )
 
@@ -227,6 +237,11 @@ async def _process_search_hit(
             or source.get("file_name")
             or source.get("videoPath")
             or source.get("video_path")
+            or metadata.get("video_name")
+            or metadata.get("filename")
+            or metadata.get("file_name")
+            or metadata.get("videoPath")
+            or metadata.get("video_path")
             or ""
         )
 
@@ -246,11 +261,38 @@ async def _process_search_hit(
             or source.get("summary")
             or source.get("text")
             or sensor.get("description", "")
+            or metadata.get("description")
+            or metadata.get("caption")
+            or metadata.get("summary")
+            or metadata.get("text")
+            or metadata_sensor.get("description", "")
         ),
-        start_time=source.get("start_time") or source.get("timestamp") or source.get("start") or "",
-        end_time=source.get("end_time") or source.get("timestamp_end") or source.get("end") or "",
+        start_time=(
+            source.get("start_time")
+            or source.get("timestamp")
+            or source.get("start")
+            or metadata.get("start_time")
+            or metadata.get("timestamp")
+            or metadata.get("start")
+            or ""
+        ),
+        end_time=(
+            source.get("end_time")
+            or source.get("timestamp_end")
+            or source.get("end")
+            or metadata.get("end_time")
+            or metadata.get("timestamp_end")
+            or metadata.get("end")
+            or ""
+        ),
         sensor_id=sensor_id,
-        screenshot_url=source.get("screenshot_url") or source.get("thumbnail_url") or "",
+        screenshot_url=(
+            source.get("screenshot_url")
+            or source.get("thumbnail_url")
+            or metadata.get("screenshot_url")
+            or metadata.get("thumbnail_url")
+            or ""
+        ),
         similarity_score=similarity,
     )
 
