@@ -1,5 +1,5 @@
 workflow: full
-phase: build
+phase: verify
 context_compression: off
 build_mode: executing-plans
 build_pause: null
@@ -20,3 +20,4 @@ verified_at: null
 archived: false
 handoff_context: openspec/changes/wire-es-search-retrieval/.comet/handoff/design-context.json
 handoff_hash: 3ae811dbb4950f942b9cd7b7597fb72ffc999dceb226abcdd7b6029cd3bc83f2
+build_command: "python -m pytest tests/unit/tools/test_embed_search.py tests/unit/api/test_video_search_ingest.py tests/unit/scripts/test_es_ingest_smoke.py -q"
