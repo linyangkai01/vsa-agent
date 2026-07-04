@@ -20,6 +20,44 @@ class TestVideoSearchIngest:
 
         assert router is not None
 
+    def test_build_ingest_document_normalizes_video_segment_aliases(self):
+        from vsa_agent.api.video_search_ingest import _build_ingest_document
+
+        document = _build_ingest_document(
+            "video-42",
+            {
+                "filename": "dock-camera.mp4",
+                "caption": "worker walks through loading dock",
+                "sensor": {"id": "camera-7"},
+                "timestamp": "2026-07-04T09:00:00Z",
+                "timestamp_end": "2026-07-04T09:00:04Z",
+                "thumbnail_url": "http://example.invalid/thumb.jpg",
+                "vector": [0.2, 0.3, 0.4],
+                "site": "dock-a",
+            },
+        )
+
+        assert document == {
+            "video_id": "video-42",
+            "video_name": "dock-camera.mp4",
+            "description": "worker walks through loading dock",
+            "sensor_id": "camera-7",
+            "start_time": "2026-07-04T09:00:00Z",
+            "end_time": "2026-07-04T09:00:04Z",
+            "screenshot_url": "http://example.invalid/thumb.jpg",
+            "vector": [0.2, 0.3, 0.4],
+            "metadata": {
+                "filename": "dock-camera.mp4",
+                "caption": "worker walks through loading dock",
+                "sensor": {"id": "camera-7"},
+                "timestamp": "2026-07-04T09:00:00Z",
+                "timestamp_end": "2026-07-04T09:00:04Z",
+                "thumbnail_url": "http://example.invalid/thumb.jpg",
+                "vector": [0.2, 0.3, 0.4],
+                "site": "dock-a",
+            },
+        }
+
     def test_ingest_skips_when_search_disabled(self, monkeypatch: pytest.MonkeyPatch):
         from vsa_agent.api import video_search_ingest
 

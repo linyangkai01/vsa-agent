@@ -1,9 +1,9 @@
 ## 1. Search Retrieval Design
 
-- [ ] 1.1 Confirm the ES retrieval target is the existing `embed_search_tool` path.
-- [ ] 1.2 Decide vector-first behavior and keyword fallback boundaries.
-- [ ] 1.3 Define the lightweight video segment record contract and its boundary from original VSS `mdx-*` indices.
-- [ ] 1.4 Define server/runtime startup scope for the mapped `Z:\vsa-agent` project.
+- [x] 1.1 Confirm the ES retrieval target is the existing `embed_search_tool` path.
+- [x] 1.2 Decide vector-first behavior and keyword fallback boundaries.
+- [x] 1.3 Define the lightweight video segment record contract and its boundary from original VSS `mdx-*` indices.
+- [x] 1.4 Define server/runtime startup scope for the mapped `Z:\vsa-agent` project.
 
 ## 2. Elasticsearch Retrieval Implementation
 
