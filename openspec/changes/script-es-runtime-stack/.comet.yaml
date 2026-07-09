@@ -13,7 +13,7 @@ base_ref: 398294a36f97dcd2a0cd6f003f83ef5f1982728c
 design_doc: docs/superpowers/specs/2026-07-06-script-es-runtime-stack-design.md
 plan: docs/superpowers/plans/2026-07-09-script-es-runtime-stack.md
 verify_result: null
-verification_report: null
+verification_report: docs/superpowers/reports/2026-07-09-script-es-runtime-stack-verification.md
 branch_status: null
 created_at: 2026-07-06
 verified_at: null
