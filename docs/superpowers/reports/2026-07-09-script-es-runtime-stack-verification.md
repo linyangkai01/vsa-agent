@@ -74,16 +74,22 @@ Runtime validation is therefore blocked until Docker is available in the executi
 
 ## Server Sync
 
-Sync to `Z:\vsa-agent` was attempted from this thread, but the required sandbox
-escalation was not executed by the platform approval channel:
+Sync to `Z:\vsa-agent` completed after the approval channel recovered.
+
+Synced paths:
+
+- `scripts\es-runtime-stack.ps1`
+- `tests\unit\scripts\test_es_runtime_stack_script.py`
+- `docs\`
+- `openspec\`
+
+Spot-checked synced files:
 
 ```text
-Automatic approval review failed: unexpected status 503 Service Unavailable
+Z:\vsa-agent\scripts\es-runtime-stack.ps1
+Z:\vsa-agent\tests\unit\scripts\test_es_runtime_stack_script.py
+Z:\vsa-agent\docs\superpowers\reports\2026-07-09-script-es-runtime-stack-verification.md
 ```
-
-No alternate write path was used. Sync remains pending until `Z:\vsa-agent` is
-added as a writable root for this thread or the escalation approval channel is
-available again.
 
 ## Review Gate
 

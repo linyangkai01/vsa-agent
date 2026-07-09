@@ -13,7 +13,7 @@
 
 - [x] 3.1 Update ES runtime documentation with one-command local validation, mapped-server `Z:\vsa-agent` usage, expected output, and troubleshooting.
 - [x] 3.2 Update development status or verification notes so the project state clearly shows this change is in progress.
-- [ ] 3.3 Sync completed scripts and docs to `Z:\vsa-agent` after local implementation.
+- [x] 3.3 Sync completed scripts and docs to `Z:\vsa-agent` after local implementation.
 
 ## 4. Verification And Closeout
 
