@@ -1,18 +1,18 @@
 ## 1. Runtime Stack Design
 
-- [ ] 1.1 Confirm the stack wrapper boundaries around existing ES lifecycle scripts, FastAPI startup, temporary config, smoke validation, and cleanup.
-- [ ] 1.2 Identify the minimal testable units for stack behavior without requiring Docker or a live API in normal unit tests.
+- [x] 1.1 Confirm the stack wrapper boundaries around existing ES lifecycle scripts, FastAPI startup, temporary config, smoke validation, and cleanup.
+- [x] 1.2 Identify the minimal testable units for stack behavior without requiring Docker or a live API in normal unit tests.
 
 ## 2. Stack Script Implementation
 
-- [ ] 2.1 Add a PowerShell stack validation script that starts ES, writes a temporary search-enabled config, starts FastAPI, waits for health, runs `scripts/es_ingest_smoke.py`, and prints PASS/FAIL.
-- [ ] 2.2 Add a companion stop or cleanup path that stops only owned API processes and uses the existing ES stop behavior.
-- [ ] 2.3 Add focused tests or static checks for config generation, health probing, command construction, and failure messages where practical.
+- [x] 2.1 Add a PowerShell stack validation script that starts ES, writes a temporary search-enabled config, starts FastAPI, waits for health, runs `scripts/es_ingest_smoke.py`, and prints PASS/FAIL.
+- [x] 2.2 Add a companion stop or cleanup path that stops only owned API processes and uses the existing ES stop behavior.
+- [x] 2.3 Add focused tests or static checks for config generation, health probing, command construction, and failure messages where practical.
 
 ## 3. Documentation And Server Sync
 
-- [ ] 3.1 Update ES runtime documentation with one-command local validation, mapped-server `Z:\vsa-agent` usage, expected output, and troubleshooting.
-- [ ] 3.2 Update development status or verification notes so the project state clearly shows this change is in progress.
+- [x] 3.1 Update ES runtime documentation with one-command local validation, mapped-server `Z:\vsa-agent` usage, expected output, and troubleshooting.
+- [x] 3.2 Update development status or verification notes so the project state clearly shows this change is in progress.
 - [ ] 3.3 Sync completed scripts and docs to `Z:\vsa-agent` after local implementation.
 
 ## 4. Verification And Closeout

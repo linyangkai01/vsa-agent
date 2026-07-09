@@ -1,14 +1,15 @@
 # Development Status
 
-Last updated: 2026-07-04
+Last updated: 2026-07-09
 
 ## Current State
 
-- Active OpenSpec change: `verify-es-ingest-runtime`.
-- Active branch: `codex/es-real-service-validation`.
-- Goal: add an opt-in runtime smoke path proving `/api/search/ingest` writes to a real Elasticsearch index.
+- Active OpenSpec change: `script-es-runtime-stack`.
+- Active branch: `codex/script-es-runtime-stack`.
+- Goal: add a one-command PowerShell stack validation path that starts Elasticsearch, starts FastAPI with a temporary search-enabled config, runs ingest/search smoke validation, and cleans up owned resources.
 - Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
-- The smoke script is `scripts/es_ingest_smoke.py`.
+- Stack wrapper: `scripts/es-runtime-stack.ps1`.
+- Smoke script: `scripts/es_ingest_smoke.py`.
 
 ## Git Policy
 
@@ -51,18 +52,23 @@ npx openspec validate wire-es-ingest
 
 Result: valid before archive.
 
+## Active Change
+
+- `script-es-runtime-stack`: building a PowerShell stack command that starts ES, starts FastAPI with a temporary search-enabled config, runs ingest/search smoke validation, and cleans up owned resources.
+- Next validation command: `.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200`.
+
 ## Active Runtime Validation
 
 Current command for the next validation pass:
 
 ```powershell
-python scripts\es_ingest_smoke.py --api-url http://127.0.0.1:8000 --es-endpoint <endpoint> --index vsa-video-embeddings
+.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200
 ```
 
-Operational guide: `docs/es-ingest-runtime-validation.md`.
+Operational guide: `docs/superpowers/reference/es-video-search-runtime.md`.
 
-Server validation status: no documented external Elasticsearch/API validation server is configured in this repo yet, so no server sync or server-side smoke run was performed for this build pass. The smoke path is ready to run when a server API URL and Elasticsearch endpoint are supplied.
+Server validation status: `Z:\vsa-agent` is the mapped server project copy. Local changes must be synced there after implementation; runtime validation still depends on Docker/Python availability in that execution environment.
 
 ## Next Recommended Work
 
-Finish `verify-es-ingest-runtime` through Comet verification, then merge locally to `master` and push only `master` to origin.
+Finish `script-es-runtime-stack` through Comet verification, sync changed files to `Z:\vsa-agent`, then merge locally to `master` and push only `master` to origin.
