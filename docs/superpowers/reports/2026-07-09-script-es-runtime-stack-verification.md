@@ -105,21 +105,38 @@ the script on the Ubuntu server for native bash validation.
 
 ## Server Sync
 
-Sync to `Z:\vsa-agent` completed after the approval channel recovered.
+Server sync is configured to use the already-authenticated Windows mapped drive
+at `Z:\vsa-agent`. Project scripts do not request or store the server password.
 
-Synced paths:
+The targeted sync helper passed dry-run manifest validation:
 
-- `scripts\es-runtime-stack.ps1`
-- `tests\unit\scripts\test_es_runtime_stack_script.py`
-- `docs\`
-- `openspec\`
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps1 -DryRun
+```
 
-Spot-checked synced files:
+Result:
 
 ```text
-Z:\vsa-agent\scripts\es-runtime-stack.ps1
-Z:\vsa-agent\tests\unit\scripts\test_es_runtime_stack_script.py
-Z:\vsa-agent\docs\superpowers\reports\2026-07-09-script-es-runtime-stack-verification.md
+PASS: dry run completed for selected files
+```
+
+The mapped-drive write preflight is currently blocked in this Codex sandbox:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps1 -PreflightOnly
+```
+
+Result:
+
+```text
+Access denied while writing to mapped target 'Z:\vsa-agent'.
+```
+
+Run the same command from the normal Windows PowerShell session that owns the
+`Z:` mapping, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps1
 ```
 
 ## Review Gate

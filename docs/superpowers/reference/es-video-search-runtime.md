@@ -112,3 +112,33 @@ chmod +x ./scripts/es-runtime-stack.sh
 server shell must run from `/data/project/lyk/vsa-agent`. Docker/Python must be
 available in the execution environment. File mapping alone is not proof that
 commands are running on the remote server.
+
+## Mapped-Drive Sync Strategy
+
+This project syncs server code through the already-authenticated Windows mapped
+drive at `Z:\vsa-agent`. Do not use Git as the normal server sync path for this
+project when password secrecy is the concern.
+
+Before copying files, run the mapped-drive preflight:
+
+```powershell
+.\scripts\sync-server-files.ps1 -PreflightOnly
+```
+
+Then sync the runtime stack manifest:
+
+```powershell
+.\scripts\sync-server-files.ps1
+```
+
+For a no-write preview:
+
+```powershell
+.\scripts\sync-server-files.ps1 -DryRun
+```
+
+The helper copies only an explicit manifest of files required for runtime stack
+validation. It avoids full-tree scans, avoids recursive `robocopy /E`, and does
+not request or store any server password. If the script reports `Access denied`,
+run the same command from the normal Windows PowerShell session that owns the
+`Z:` mapping, or reconnect the mapped drive with write access.

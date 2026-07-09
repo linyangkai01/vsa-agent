@@ -3,6 +3,7 @@ from pathlib import Path
 
 SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
+SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 
 
 def _script_text() -> str:
@@ -11,6 +12,10 @@ def _script_text() -> str:
 
 def _bash_script_text() -> str:
     return BASH_SCRIPT.read_text(encoding="utf-8")
+
+
+def _sync_script_text() -> str:
+    return SYNC_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_es_runtime_stack_script_exists():
@@ -107,3 +112,37 @@ def test_es_runtime_stack_bash_reports_pass_and_cleans_up_owned_process():
     assert "trap cleanup EXIT" in text
     assert "API_PID" in text
     assert "kill" in text
+
+
+def test_sync_server_files_script_exists():
+    assert SYNC_SCRIPT.exists()
+
+
+def test_sync_server_files_script_exposes_target_and_manifest_options():
+    text = _sync_script_text()
+
+    assert '[string]$TargetRoot = "Z:\\vsa-agent"' in text
+    assert "[string[]]$IncludePaths" in text
+    assert "[switch]$DryRun" in text
+    assert "[switch]$PreflightOnly" in text
+
+
+def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():
+    text = _sync_script_text()
+
+    assert "[System.IO.File]::Copy" in text
+    assert "[System.IO.Directory]::CreateDirectory" in text
+    assert "$IncludePaths" in text
+    assert "Resolve-Path" in text
+    assert "Join-Path $TargetRoot" in text
+    assert "PASS: synced selected files to server target" in text
+    assert "robocopy" not in text.lower()
+
+
+def test_sync_server_files_script_reports_mapped_drive_permission_boundary():
+    text = _sync_script_text()
+
+    assert "Test-TargetWritable" in text
+    assert "Access denied while writing to mapped target" in text
+    assert "already-authenticated mapped drive" in text
+    assert "No password is requested or stored by this script" in text

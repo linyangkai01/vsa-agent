@@ -67,7 +67,7 @@ Current command for the next validation pass:
 
 Operational guide: `docs/superpowers/reference/es-video-search-runtime.md`.
 
-Server validation status: `Z:\vsa-agent` is the mapped server project copy. Local changes must be synced there after implementation; runtime validation still depends on Docker/Python availability in that execution environment.
+Server validation status: `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`. Current Codex sandbox attempts can read `Z:\vsa-agent` but receive `Access denied` on writes; if that happens, run the same script from the normal Windows PowerShell session that owns the `Z:` mapping.
 
 ## Next Recommended Work
 
