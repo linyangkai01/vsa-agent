@@ -18,6 +18,8 @@
   - Keep the main session responsible for coordination, integration, verification, Git cleanup, and final merge back to local `master`.
   - Do not manually create unrelated parallel branches, worktrees, or agent sessions outside the Comet workflow.
 - If local code changes are intended to run on a project server, and the project documentation or current task explicitly identifies that server as the validation environment, sync the updated code to the server and run the required server-side validation before marking the work complete.
+- The mapped server project at `Z:\vsa-agent` is an explicitly approved write/sync target for this project. When the runtime sandbox allows access to that path, agents may write updated project files there for server sync without asking for separate per-command approval.
+- If sandbox permissions are downgraded later, `Z:\vsa-agent` still needs to be included by the host runtime as a writable root. This instruction records project approval but cannot by itself expand the Codex filesystem sandbox.
 
 ## End-Of-Turn Reporting
 
