@@ -72,6 +72,37 @@ docker : The term 'docker' is not recognized as the name of a cmdlet, function, 
 
 Runtime validation is therefore blocked until Docker is available in the execution environment, or the command is run from a server shell where Docker Compose is installed and available on PATH.
 
+Follow-up server attempt from Ubuntu showed that PowerShell Core is not installed:
+
+```text
+Command 'pwsh' not found
+```
+
+A Linux bash wrapper was added so the Ubuntu server can validate without
+installing PowerShell Core:
+
+```bash
+cd /data/project/lyk/vsa-agent
+chmod +x ./scripts/es-runtime-stack.sh
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch
+```
+
+Linux wrapper static contract validation passed locally:
+
+```powershell
+pytest tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_es_ingest_smoke.py -q
+```
+
+Result:
+
+```text
+19 passed
+```
+
+Local `bash -n scripts/es-runtime-stack.sh` could not run in this Windows thread
+because Git Bash failed with `couldn't create signal pipe, Win32 error 5`; run
+the script on the Ubuntu server for native bash validation.
+
 ## Server Sync
 
 Sync to `Z:\vsa-agent` completed after the approval channel recovered.

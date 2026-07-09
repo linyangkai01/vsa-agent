@@ -47,10 +47,18 @@ keyword search against the same index to prove the record is retrievable.
 ## One-Command Stack Validation
 
 Use this when you want the project to start Elasticsearch, start FastAPI with a
-temporary search-enabled config, and run ingest/search smoke validation:
+temporary search-enabled config, and run ingest/search smoke validation.
+
+On Windows PowerShell:
 
 ```powershell
 .\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200 -Index vsa-video-embeddings
+```
+
+On Linux/Ubuntu bash:
+
+```bash
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings
 ```
 
 Expected success output includes:
@@ -72,6 +80,12 @@ To stop Elasticsearch after validation, include:
 .\scripts\es-runtime-stack.ps1 -StopElasticsearch
 ```
 
+or on Linux/Ubuntu:
+
+```bash
+./scripts/es-runtime-stack.sh --stop-elasticsearch
+```
+
 If the script reports Docker, port, Uvicorn, or smoke validation failures, treat
 that output as the runtime blocker and do not report ES runtime validation as
 successful.
@@ -86,6 +100,15 @@ cd Z:\vsa-agent
 .\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200
 ```
 
-`Z:\vsa-agent` must be executable from the current Windows session and
-Docker/Python must be available in that execution environment. File mapping
-alone is not proof that commands are running on the remote server.
+From the Ubuntu server shell:
+
+```bash
+cd /data/project/lyk/vsa-agent
+chmod +x ./scripts/es-runtime-stack.sh
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch
+```
+
+`Z:\vsa-agent` must be executable from the current Windows session, or the Ubuntu
+server shell must run from `/data/project/lyk/vsa-agent`. Docker/Python must be
+available in the execution environment. File mapping alone is not proof that
+commands are running on the remote server.

@@ -5,7 +5,7 @@
 
 ## 2. Stack Script Implementation
 
-- [x] 2.1 Add a PowerShell stack validation script that starts ES, writes a temporary search-enabled config, starts FastAPI, waits for health, runs `scripts/es_ingest_smoke.py`, and prints PASS/FAIL.
+- [x] 2.1 Add Windows/Linux stack validation scripts that start ES, write a temporary search-enabled config, start FastAPI, wait for health, run `scripts/es_ingest_smoke.py`, and print PASS/FAIL.
 - [x] 2.2 Add a companion stop or cleanup path that stops only owned API processes and uses the existing ES stop behavior.
 - [x] 2.3 Add focused tests or static checks for config generation, health probing, command construction, and failure messages where practical.
 

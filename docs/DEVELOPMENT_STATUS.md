@@ -6,9 +6,9 @@ Last updated: 2026-07-09
 
 - Active OpenSpec change: `script-es-runtime-stack`.
 - Active branch: `codex/script-es-runtime-stack`.
-- Goal: add a one-command PowerShell stack validation path that starts Elasticsearch, starts FastAPI with a temporary search-enabled config, runs ingest/search smoke validation, and cleans up owned resources.
+- Goal: add one-command stack validation paths for Windows and Linux that start Elasticsearch, start FastAPI with a temporary search-enabled config, run ingest/search smoke validation, and clean up owned resources.
 - Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
-- Stack wrapper: `scripts/es-runtime-stack.ps1`.
+- Stack wrappers: `scripts/es-runtime-stack.ps1`, `scripts/es-runtime-stack.sh`.
 - Smoke script: `scripts/es_ingest_smoke.py`.
 
 ## Git Policy
@@ -54,15 +54,15 @@ Result: valid before archive.
 
 ## Active Change
 
-- `script-es-runtime-stack`: building a PowerShell stack command that starts ES, starts FastAPI with a temporary search-enabled config, runs ingest/search smoke validation, and cleans up owned resources.
-- Next validation command: `.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200`.
+- `script-es-runtime-stack`: building stack commands that start ES, start FastAPI with a temporary search-enabled config, run ingest/search smoke validation, and clean up owned resources.
+- Next server validation command: `./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch`.
 
 ## Active Runtime Validation
 
 Current command for the next validation pass:
 
-```powershell
-.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200
+```bash
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch
 ```
 
 Operational guide: `docs/superpowers/reference/es-video-search-runtime.md`.
