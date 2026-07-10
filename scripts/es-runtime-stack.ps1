@@ -104,6 +104,14 @@ function PythonCommand {
     }
 }
 
+function Stop-OwnedProcessTree {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -ne $Process -and -not $Process.HasExited) {
+        & taskkill.exe /PID $Process.Id /T /F | Out-Null
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $runtimeDir = Join-Path $repoRoot ".runtime\es-stack"
 $configPath = Join-Path $runtimeDir "config.yaml"
@@ -167,9 +175,7 @@ try {
     Write-Host "  index: $Index"
     Write-Host "  config: $configPath"
 } finally {
-    if ($null -ne $apiProcess -and -not $apiProcess.HasExited) {
-        Stop-Process -Id $apiProcess.Id -Force
-    }
+    Stop-OwnedProcessTree -Process $apiProcess
 
     $env:VSA_CONFIG = $oldVsaConfig
     $env:PYTHONPATH = $oldPythonPath
@@ -183,5 +189,8 @@ try {
     }
     if (Test-Path -LiteralPath $apiErrLogPath) {
         Write-Host "API error log: $apiErrLogPath"
+    }
+    if (Test-Path -LiteralPath $configPath) {
+        Write-Host "Temporary config retained: $configPath"
     }
 }

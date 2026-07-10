@@ -144,3 +144,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps
 Automatic reviewer dispatch was skipped because the available subagent tool
 requires explicit user authorization for delegation/parallel agent work. Local
 verification commands above were run instead.
+
+## Closeout Revalidation (2026-07-10)
+
+The standard review gate found and this change fixed three important issues:
+
+- Windows cleanup now terminates the owned process tree, including a FastAPI
+  child started through `conda run`.
+- Linux starts FastAPI in an isolated session and terminates that process group
+  during cleanup. Both wrappers now report a retained temporary config on every
+  exit path.
+- The mapped-drive sync helper rejects absolute and traversal paths before they
+  can escape the local repository or the `Z:\vsa-agent` target root.
+
+Fresh verification:
+
+```powershell
+python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_es_ingest_smoke.py -q
+```
+
+Result: `28 passed`.
+
+`scripts/es-runtime-stack.ps1` and `scripts/sync-server-files.ps1` parsed with
+the PowerShell parser, and `bash -n scripts/es-runtime-stack.sh` completed
+without errors. The OpenSpec validation command completed with:
+
+```text
+Change 'script-es-runtime-stack' is valid
+```
+
+An attempted `-DryRun -IncludePaths ..\outside.txt` was rejected before sync
+with `Path '..\outside.txt' escapes repository root.`

@@ -20,9 +20,33 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $targetRootCandidate = Join-Path $TargetRoot "."
 $targetRootPath = (Resolve-Path -LiteralPath $targetRootCandidate).Path
+
+function Resolve-PathWithinRoot {
+    param(
+        [string]$Root,
+        [string]$RelativePath,
+        [string]$Label
+    )
+
+    if ([System.IO.Path]::IsPathRooted($RelativePath)) {
+        throw "Path '$RelativePath' escapes $Label root."
+    }
+
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $candidatePath = [System.IO.Path]::GetFullPath((Join-Path $normalizedRoot $RelativePath))
+    $rootPrefix = $normalizedRoot + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $candidatePath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path '$RelativePath' escapes $Label root."
+    }
+
+    return $candidatePath
+}
 
 function Test-TargetWritable {
     param([string]$Path)
@@ -43,7 +67,7 @@ function Test-TargetWritable {
 
 $missingSources = New-Object System.Collections.Generic.List[string]
 foreach ($relativePath in $IncludePaths) {
-    $sourcePath = Join-Path $repoRoot $relativePath
+    $sourcePath = Resolve-PathWithinRoot -Root $repoRoot -RelativePath $relativePath -Label "repository"
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
         $missingSources.Add($relativePath) | Out-Null
     }
@@ -69,9 +93,9 @@ if ($PreflightOnly) {
 $copied = New-Object System.Collections.Generic.List[string]
 
 foreach ($relativePath in $IncludePaths) {
-    $sourcePath = Join-Path $repoRoot $relativePath
+    $sourcePath = Resolve-PathWithinRoot -Root $repoRoot -RelativePath $relativePath -Label "repository"
     $resolvedSource = (Resolve-Path -LiteralPath $sourcePath).Path
-    $destinationPath = Join-Path $targetRootPath $relativePath
+    $destinationPath = Resolve-PathWithinRoot -Root $targetRootPath -RelativePath $relativePath -Label "target"
     $destinationDir = Split-Path -Parent $destinationPath
 
     if ($DryRun) {

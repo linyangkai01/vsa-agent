@@ -61,9 +61,22 @@ def test_es_runtime_stack_reports_pass_and_cleans_up_owned_process():
     text = _script_text()
 
     assert "PASS: ES runtime stack validation succeeded" in text
-    assert "Stop-Process" in text
+    assert "Stop-OwnedProcessTree" in text
     assert "$apiProcess" in text
     assert "finally" in text
+
+
+def test_es_runtime_stack_terminates_the_owned_process_tree():
+    text = _script_text()
+
+    assert "taskkill.exe" in text
+    assert "/T" in text
+
+
+def test_es_runtime_stack_retains_temporary_config_with_an_explicit_notice():
+    text = _script_text()
+
+    assert "Temporary config retained: $configPath" in text
 
 
 def test_es_runtime_stack_bash_script_exists():
@@ -114,6 +127,20 @@ def test_es_runtime_stack_bash_reports_pass_and_cleans_up_owned_process():
     assert "kill" in text
 
 
+def test_es_runtime_stack_bash_terminates_the_owned_process_group_and_checks_health_payload():
+    text = _bash_script_text()
+
+    assert "setsid" in text
+    assert 'kill -- "-$API_PID"' in text
+    assert "json.load(sys.stdin).get(\"status\") == \"ok\"" in text
+
+
+def test_es_runtime_stack_bash_retains_temporary_config_with_an_explicit_notice():
+    text = _bash_script_text()
+
+    assert "Temporary config retained: $CONFIG_PATH" in text
+
+
 def test_sync_server_files_script_exists():
     assert SYNC_SCRIPT.exists()
 
@@ -146,3 +173,12 @@ def test_sync_server_files_script_reports_mapped_drive_permission_boundary():
     assert "Access denied while writing to mapped target" in text
     assert "already-authenticated mapped drive" in text
     assert "No password is requested or stored by this script" in text
+
+
+def test_sync_server_files_script_rejects_paths_outside_the_repo_and_target_roots():
+    text = _sync_script_text()
+
+    assert "Resolve-PathWithinRoot" in text
+    assert "Path '$RelativePath' escapes $Label root" in text
+    assert "-Root $repoRoot" in text
+    assert "-Root $targetRootPath" in text

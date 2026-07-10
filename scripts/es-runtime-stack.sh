@@ -80,7 +80,7 @@ API_PID=""
 
 cleanup() {
   if [[ -n "$API_PID" ]] && kill -0 "$API_PID" >/dev/null 2>&1; then
-    kill "$API_PID" >/dev/null 2>&1 || true
+    kill -- "-$API_PID" >/dev/null 2>&1 || true
     wait "$API_PID" >/dev/null 2>&1 || true
   fi
 
@@ -93,6 +93,7 @@ cleanup() {
 
   [[ -f "$API_LOG_PATH" ]] && echo "API log: $API_LOG_PATH"
   [[ -f "$API_ERR_LOG_PATH" ]] && echo "API error log: $API_ERR_LOG_PATH"
+  [[ -f "$CONFIG_PATH" ]] && echo "Temporary config retained: $CONFIG_PATH"
 }
 trap cleanup EXIT
 
@@ -169,7 +170,7 @@ wait_http_health() {
       return 1
     fi
 
-    if curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1; then
+    if curl -fsS "$API_HEALTH_URL" 2>/dev/null | python -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "ok" else 1)'; then
       return 0
     fi
 
@@ -183,6 +184,7 @@ wait_http_health() {
 require_command docker
 require_command curl
 require_command python
+require_command setsid
 if [[ -n "$CONDA_ENV" ]]; then
   require_command conda
 fi
@@ -215,9 +217,9 @@ export VSA_CONFIG="$CONFIG_PATH"
 export PYTHONPATH="$REPO_ROOT/src"
 
 if [[ -n "$CONDA_ENV" ]]; then
-  conda run -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
+  setsid conda run -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
 else
-  python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
+  setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
 fi
 API_PID=$!
 
