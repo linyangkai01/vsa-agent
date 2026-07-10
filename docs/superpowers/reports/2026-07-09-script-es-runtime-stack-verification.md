@@ -175,3 +175,17 @@ Change 'script-es-runtime-stack' is valid
 
 An attempted `-DryRun -IncludePaths ..\outside.txt` was rejected before sync
 with `Path '..\outside.txt' escapes repository root.`
+
+## Server Authorization Blocker (2026-07-10)
+
+The current Codex process can read `Z:\vsa-agent` but cannot write it. The
+SSHFS mapping is mounted as `ykh@10.157.68.44`, while the current Windows
+identity is `lyk\codexsandboxonline`; the mapped directory grants full control
+to `lyk\81945` only. The remote filesystem rejected an ACL grant attempt.
+
+Direct SSH authentication as `ykh@10.157.68.44` was also unavailable in the
+current process (`Permission denied (publickey,password)`). No password or
+private key was requested, copied, or stored. Server sync and native Ubuntu
+runtime validation remain blocked until this execution identity is granted
+write access to the mapping, or an authorized non-interactive SSH credential is
+made available.
