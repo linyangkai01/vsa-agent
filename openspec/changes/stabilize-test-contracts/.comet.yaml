@@ -14,7 +14,7 @@ base_ref: 398294a5f0a28fcf1c1284109e8a4ab43ccf8a03
 design_doc: docs/superpowers/specs/2026-07-10-stabilize-test-contracts-design.md
 plan: docs/superpowers/plans/2026-07-10-stabilize-test-contracts.md
 verify_result: pending
-verification_report: null
+verification_report: docs/superpowers/reports/2026-07-11-stabilize-test-contracts-verify.md
 branch_status: pending
 created_at: 2026-07-10
 verified_at: null
