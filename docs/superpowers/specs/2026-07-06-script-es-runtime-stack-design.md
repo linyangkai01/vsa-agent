@@ -4,101 +4,117 @@ role: technical-design
 canonical_spec: openspec
 ---
 
-# Script ES Runtime Stack Design
+# ES 运行时全栈与原版前端验证设计
 
-## Context
+## 背景
 
-The project already has the ES runtime pieces needed for video segment search
-validation:
+项目已有用于视频片段检索验证的 ES 运行时基础能力：
 
-- `docker-compose.es.yml` defines the single-node development Elasticsearch
-  service.
-- `scripts/es-dev-start.ps1`, `scripts/es-dev-probe.ps1`, and
-  `scripts/es-dev-stop.ps1` manage Elasticsearch directly.
-- `scripts/es_ingest_smoke.py` validates the API and ES behavior once both
-  services are reachable.
-- `vsa_agent.api.routes:app` exposes `/health` and registers
-  `/api/search/ingest`.
+- `docker-compose.es.yml` 定义单节点开发用 Elasticsearch 服务。
+- `scripts/es-dev-start.ps1`、`scripts/es-dev-probe.ps1` 和
+  `scripts/es-dev-stop.ps1` 直接管理 Elasticsearch。
+- `scripts/es_ingest_smoke.py` 在 API 与 ES 都可访问时，验证写入与检索。
+- `vsa_agent.api.routes:app` 已提供 `/health` 并注册 `/api/search/ingest`。
 
-The missing piece is orchestration. Today a developer has to start ES, create a
-temporary search-enabled config, start FastAPI, wait for health, run the smoke
-script, then clean up. This change turns that into a single repeatable stack
-validation path that can run locally or from the mapped server project copy at
-`Z:\vsa-agent`.
+现有运行脚本只覆盖 ES、FastAPI 和自动化 smoke 验证。它没有启动原版
+VSS 前端，且后端没有实现前端已经调用的 `/api/v1/search` 契约。因此浏览器
+输入无法证明真实业务流确实经过 Elasticsearch。
 
-## Goals
+本变更将这些步骤收敛为一条可重复的全栈路径，可在本地或映射的服务器项目
+`Z:\vsa-agent` 中运行：启动 ES、API 与原版 UI，预写入一条可检索的样例记录，
+再从前端搜索框输入查询确认结果。
 
-- Add a scriptable ES + FastAPI stack validation command.
-- Keep committed `config.yaml` safe with `search.enabled: false`.
-- Generate a temporary runtime config for validation and pass it through
-  `VSA_CONFIG`.
-- Start FastAPI with `uvicorn vsa_agent.api.routes:app`.
-- Wait for both ES and API health before running smoke validation.
-- Run `scripts/es_ingest_smoke.py` against the configured API URL and ES
-  endpoint.
-- Clean up the API process and temporary config owned by the stack script.
-- Leave clear PASS/FAIL output and troubleshooting hints.
-- Provide an interactive, original-UI-compatible validation mode that keeps ES,
-  FastAPI, and the frontend running after readiness succeeds.
-- Make the original VSS search request flow reach the project ES-backed search
-  tool without adding a parallel query implementation.
+## 目标
 
-## Non-Goals
+- 提供一键启动 ES、FastAPI 与原版 UI 的交互式脚本。
+- 保持提交的 `config.yaml` 安全，默认仍为 `search.enabled: false`。
+- 生成临时运行配置，并只向本次 API 子进程传入 `VSA_CONFIG`。
+- 让原版 VSS Search UI 的请求经 `/api/v1/search` 进入项目后端。
+- 复用已有 `SearchAgent`、`SearchInput` 和注册的 `embed_search` 工具，使启用
+  搜索时由工具查询 Elasticsearch，而不是新增平行检索实现。
+- 启动后等待 ES、API 和 UI 就绪，运行一次 ingest smoke 以建立浏览器可查的
+  样例记录。
+- 服务就绪后保持运行，直到用户按 `Ctrl+C`。
+- 输出 UI、API、ES、索引地址和可核验的日志位置。
+- 仅处理用户明确指定的 ES、API、UI 端口占用，不影响其他端口进程。
 
-- Do not implement original NVIDIA VSS Kafka, Logstash, VST, or MDX services.
-- Do not store video bytes in Elasticsearch.
-- Do not enable Elasticsearch by default in committed config.
-- Do not manage a production Elasticsearch cluster.
-- Do not require Docker or Elasticsearch for normal unit tests.
+## 非目标
 
-## Selected Approach
+- 不实现 NVIDIA 原版的 Kafka、Logstash、VST 或 MDX 服务。
+- 不将视频字节写入 Elasticsearch。
+- 不改变提交的默认 `config.yaml`，也不管理生产 ES 集群。
+- 不要求普通单元测试启动 Docker、Elasticsearch、浏览器或真实模型服务。
+- 不新增专供验证使用的前端页面、前端 ES 客户端或重复的搜索算法。
 
-Use a PowerShell stack-level orchestrator and keep the Python smoke script
-focused on business validation.
+## 方案
 
-The main script should be named `scripts/es-runtime-stack.ps1`. It owns the
-validation sequence:
+### 全栈启动器
 
-1. Resolve the repo root from the script location.
-2. Start or reuse the development ES service through `scripts/es-dev-start.ps1`.
-3. Write a temporary YAML config under `.runtime/es-stack/config.yaml`.
-4. Start FastAPI in a child process with `VSA_CONFIG` pointing at that temp
-   config.
-5. Poll `http://127.0.0.1:<ApiPort>/health` until ready.
-6. Invoke `python scripts/es_ingest_smoke.py` with the selected API URL, ES
-   endpoint, index, and `--insecure`.
-7. Print a concise PASS line with API URL, ES endpoint, and index.
-8. In cleanup, stop only the API process started by the script. If requested,
-   call `scripts/es-dev-stop.ps1` to stop ES.
+保留 `scripts/es-runtime-stack.ps1` 与对应 Linux 脚本为统一入口，并在其上增加
+交互模式。PowerShell/Bash 负责进程生命周期；Python 保持负责 API 业务与
+ingest/search smoke 验证。
 
-This keeps responsibilities clean:
+交互模式按下列顺序运行：
 
-- PowerShell manages local/server process lifecycle.
-- Docker Compose remains isolated in the existing ES lifecycle scripts.
-- Python smoke validation continues to assert API and ES behavior.
+1. 由脚本位置解析仓库根目录。
+2. 检查选定的 ES、API 与 UI 端口。
+3. 若端口被占用，记录端口、PID 和进程命令行，结束占用进程并轮询端口释放。
+4. 端口无法释放则立即失败，不启动任何新的部分服务。
+5. 通过现有 `scripts/es-dev-start.ps1` 启动或复用开发 ES。
+6. 在 `.runtime/es-stack/config.yaml` 写入搜索已启用的临时配置。
+7. 以 `VSA_CONFIG` 指向临时配置的方式启动
+   `uvicorn vsa_agent.api.routes:app`，并等待 `/health` 返回成功。
+8. 运行 `scripts/es_ingest_smoke.py`，将已知视频检索记录写入 ES 并验证可检索。
+9. 设置原版 UI 所需的运行环境，启动 UI 并等待其 HTTP 服务可访问。
+10. 输出浏览器地址、API 地址、ES 地址、索引名和日志路径，然后保持前台运行。
 
-### Original UI Search Flow
+用户按 `Ctrl+C` 后，脚本只停止本次启动的 API 与 UI 子进程；ES 是否停止沿用
+显式 `-StopElasticsearch` 选项。脚本不会恢复启动前因占用目标端口而被终止的
+旧进程。
 
-The original VSS search component sends `POST ${NEXT_PUBLIC_AGENT_API_URL_BASE}/search`
-with `query`, `top_k`, `source_type`, optional time/source filters, and
-`agent_mode`. The API must return `{ "data": SearchResult[] }`, which the
-existing UI renders directly. The stack extension adds that missing API route
-under the existing `/api/v1` prefix and adapts its request to the existing
-`SearchInput` and `execute_search_agent` flow. Search resolution continues
-through the registered `embed_search` tool, whose enabled runtime path uses
-Elasticsearch. No frontend-specific ES client or duplicate search algorithm is
-introduced.
+### 原版前端搜索业务流
 
-The interactive launcher injects `NEXT_PUBLIC_AGENT_API_URL_BASE` for the UI,
-enables the Search tab, and starts the original UI after API health is ready.
-Operational logs must include the search route request and the
-`search_agent.embed_search` event so a manual browser query has auditable ES
-evidence.
+原版 VSS Search 组件已经固定使用如下请求：
 
-## Runtime Config
+```text
+POST ${NEXT_PUBLIC_AGENT_API_URL_BASE}/search
+```
 
-The temporary config should preserve the existing baseline except for the
-search section required by validation:
+请求包含 `query`、`top_k`、`source_type`、可选时间/视频源过滤条件以及
+`agent_mode`；它要求响应为：
+
+```json
+{ "data": ["SearchResult", "..."] }
+```
+
+实际响应中的数组元素仍是已有的 `SearchResult` 字段，例如 `video_name`、
+`description`、`start_time`、`end_time`、`sensor_id`、`similarity`、
+`screenshot_url` 和 `object_ids`。
+
+后端新增 `/api/v1/search` 路由，将该请求适配给已有 `SearchInput` 并调用
+`execute_search_agent`。该代理继续从工具注册表取 `embed_search`；当临时配置
+启用搜索时，`embed_search` 使用 Elasticsearch。路由将工具结果封装回
+`{ "data": [...] }`，由原版结果列表直接渲染。
+
+这条链路为：
+
+```text
+VSS Search 输入
+  -> POST /api/v1/search
+  -> SearchAgent
+  -> 已注册 embed_search
+  -> Elasticsearch
+  -> { data: [...] }
+  -> 原版视频搜索结果列表
+```
+
+API 日志需要记录搜索请求与 `search_agent.embed_search` 执行事件。两者和前端
+结果共同构成“浏览器输入确实经过 ES”的验证证据。
+
+## 临时运行配置
+
+临时配置从已提交的 `config.yaml` 复制后，仅修改搜索段，避免复制或破坏模型、
+工具、服务与 profile 设置：
 
 ```yaml
 search:
@@ -114,102 +130,67 @@ search:
   allow_mock_fallback: true
 ```
 
-Implementation can either generate a full merged config or copy the committed
-`config.yaml` and patch only the `search` section. The safer first
-implementation is copy-and-patch because it preserves model, tool, server, and
-profile settings without duplicating the whole config schema.
+## 命令与参数
 
-## Command Shape
-
-The stack script should expose practical parameters:
+交互式启动默认使用：
 
 ```powershell
 .\scripts\es-runtime-stack.ps1 `
   -ApiPort 8000 `
   -EsPort 9200 `
+  -UiPort 3000 `
   -Index vsa-video-embeddings `
-  -CondaEnv vsa-agent `
-  -StopElasticsearch
+  -CondaEnv vsa-agent
 ```
 
-Recommended defaults:
+- `ApiPort`：默认 `8000`。
+- `EsPort`：默认 `9200`。
+- `UiPort`：默认 `3000`。
+- `Index`：默认 `vsa-video-embeddings`。
+- `CondaEnv`：默认空；提供后通过 `conda run -n <env>` 启动 Python/Uvicorn。
+- `StopElasticsearch`：默认 `false`；仅在退出时显式停止 ES。
+- 非交互 smoke 模式保留给 CI 或无浏览器环境，并在验证完成后按现有语义清理。
 
-- `ApiPort`: `8000`
-- `EsPort`: `9200`
-- `Index`: `vsa-video-embeddings`
-- `CondaEnv`: empty by default; when supplied, run Python/Uvicorn through
-  `conda run -n <env>`.
-- `StopElasticsearch`: false by default so a developer can keep ES warm across
-  repeated validation runs.
+## 错误处理与端口接管
 
-The interactive entry point additionally accepts `-UiPort` (default `3000`) and
-starts the original UI. It is the default mode for manual browser validation;
-an explicit smoke option preserves non-interactive CI-style validation.
+脚本对缺少 Docker Compose、ES 无法就绪、Python/Uvicorn 不可用、API/UI 早退和
+smoke 失败输出明确错误，不得报告成功。
 
-## Error Handling
+端口接管的边界如下：
 
-The script should fail early and plainly when prerequisites are missing:
+- 只检查并结束选定的 `EsPort`、`ApiPort` 和 `UiPort` 的占用进程。
+- 结束前必须记录 PID、命令行及其目标端口。
+- 结束后等待端口确认释放；超过限定时间仍未释放即失败。
+- 不扫描、不结束其他端口的进程。
+- 正常退出或异常退出时，只清理本次脚本自身启动的 API/UI 进程。
 
-- Docker Compose unavailable or ES does not become reachable.
-- API port is already occupied.
-- FastAPI process exits before `/health` becomes ready.
-- `scripts/es_ingest_smoke.py` returns non-zero.
+## 测试与验收
 
-Before starting a component, the interactive launcher must inspect its target
-port. When a process owns that port, it logs the PID and command line, stops
-the owning process, and waits for the port to become free. It never terminates
-processes for ports outside the selected API, UI, and ES ports. If a port cannot
-be released, startup fails before creating a partial stack.
+普通单元测试不启动 Docker 或浏览器，覆盖以下边界：
 
-Cleanup should run after both success and failure. The script should stop only
-the API and UI processes it started, and report the path to any retained
-temporary config or log file. It must not attempt to restore a process that it
-terminated because it occupied a requested target port.
+- `/api/v1/search` 的原版请求与 `{data: [...]}` 响应契约。
+- 路由到 `SearchAgent` 和注册 `embed_search` 的调用路径。
+- 端口发现、停止命令构造、端口释放等待和失败信息。
+- UI 启动命令与 `NEXT_PUBLIC_AGENT_API_URL_BASE`、Search tab 环境变量。
+- 既有 `tests/unit/scripts/test_es_ingest_smoke.py` 的 ingest/search 保障。
 
-## Testing Strategy
+服务器实测时，启动器完成 smoke 后在浏览器打开 UI，输入与样例记录匹配的查询。
+验收同时要求：结果列表有对应视频记录；API 日志有搜索请求和
+`search_agent.embed_search` 事件；ES 索引中仍可查询到该记录。
 
-Normal unit tests should not start Docker or FastAPI. The first test layer
-should cover script-adjacent behavior that is safe to run offline:
+## 服务端同步
 
-- Static checks that the stack script exists and references the expected
-  lifecycle scripts and smoke script.
-- If helpers are moved into Python or a small reusable module, unit-test
-  temporary config generation and command construction.
-- Existing `tests/unit/scripts/test_es_ingest_smoke.py` continues to protect the
-  smoke validator.
-- API tests cover the original `/api/v1/search` request and `{data: ...}`
-  response contract with the registered search-agent flow.
-- Script tests cover target-port discovery, termination command construction,
-  and the interactive UI command/environment contract without starting Docker
-  or a browser.
+本地验证通过后，将修改的脚本、API、测试、文档与 OpenSpec 文件同步到
+`Z:\vsa-agent`。映射盘只用于同步；真实运行验证仍在服务器侧具备 Docker、
+Python、Node 及项目依赖的终端中执行。若依赖缺失，记录确切阻塞原因，不将其
+误报为验证通过。
 
-Runtime verification is opt-in:
+## 风险与缓解
 
-```powershell
-.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200
-```
-
-Expected success output should include a clear PASS message and the endpoints
-used. If Docker is unavailable on the current machine, verification should
-record the exact blocker rather than claiming success.
-
-## Server Sync
-
-After local implementation and verification, sync the changed scripts, docs,
-tests, and OpenSpec files to `Z:\vsa-agent`. The mapped drive can hold the
-runnable files, but true runtime validation requires a server-side shell with
-Docker and Python available. If only file mapping is available, record that as
-the blocker.
-
-## Risks
-
-- Docker is not installed or cannot run in the current environment.
-  Mitigation: preflight and clear blocker message.
-- Port `8000` or `9200` is already occupied.
-  Mitigation: expose `-ApiPort` and `-EsPort` parameters and print selected
-  endpoints.
-- API process may linger after smoke failure.
-  Mitigation: track and stop only the process started by the stack script.
-- Temporary config could be confused with committed config.
-  Mitigation: write under `.runtime/es-stack/`, set `VSA_CONFIG` only for the
-  child API process, and document that `config.yaml` remains unchanged.
+- Docker 或容器运行环境不可用：启动前检查并报告阻塞项。
+- 目标端口属于无关服务：只接管用户明确选择的三类端口，并完整记录证据。
+- API/UI 在运行期退出：就绪检查和子进程状态检查会立即返回失败。
+- 临时配置与提交配置混淆：只写入 `.runtime/es-stack/`，仅对子进程设置
+  `VSA_CONFIG`。
+- ES 调用未被人工确认：前端结果、API 搜索日志、工具事件与 ES 文档四者共同
+  提供可追溯证据。
