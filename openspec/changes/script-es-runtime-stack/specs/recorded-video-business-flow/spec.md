@@ -71,6 +71,15 @@ and FastAPI API process.
 - **AND** the original UI renders the returned video-search result
 - **AND** API logs record the request and the `search_agent.embed_search` execution evidence
 
+#### Scenario: Fast validation uses deterministic embeddings
+
+- **GIVEN** the interactive runtime stack generates its temporary search-enabled configuration
+- **WHEN** it runs the ingest smoke and the user submits the documented browser query
+- **THEN** `search.force_mock_embedding` is enabled only in that temporary configuration
+- **AND** the indexed record and ES query use the same deterministic mock embedding dimension
+- **AND** the search route returns the Elasticsearch result rather than an in-memory fallback
+- **AND** committed and production-style configurations keep `search.force_mock_embedding` disabled by default
+
 #### Scenario: Interactive runtime stack reclaims requested ports
 
 - **GIVEN** a process occupies the selected API, UI, or ES port

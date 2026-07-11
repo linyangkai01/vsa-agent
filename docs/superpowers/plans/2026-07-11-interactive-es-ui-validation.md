@@ -18,6 +18,7 @@ base-ref: a20786b41a8827781dda08846866c1eeb7d0e999
 
 - 开发必须遵循 Comet；本计划属于 OpenSpec change `script-es-runtime-stack`。
 - 已提交的 `config.yaml` 必须继续保持 `search.enabled: false`；只向子进程传入 `.runtime/es-stack/config.yaml` 的 `VSA_CONFIG`。
+- `search.force_mock_embedding` 默认必须为 `false`；仅快速验证生成的临时配置将其设为 `true`，使 ingest 与浏览器查询使用相同确定性向量。
 - 不实现原版 NVIDIA 的 Kafka、Logstash、VST 或 MDX 服务，不写入视频字节，不新增独立前端页面、前端 ES 客户端或平行搜索算法。
 - 仅检查、记录并终止用户指定的 `EsPort`、`ApiPort`、`UiPort` 的监听者；不得扫描或终止其它端口。
 - 正常单元测试不得启动 Docker、Elasticsearch、浏览器或真实模型服务。
@@ -31,8 +32,10 @@ base-ref: a20786b41a8827781dda08846866c1eeb7d0e999
 - Create `src/vsa_agent/api/original_ui_search.py`: 原版 VSS `POST /api/v1/search` adapter；输入为现有 `SearchInput`，输出为现有 `SearchOutput`。
 - Modify `src/vsa_agent/api/routes.py`: 挂载上述 router。
 - Modify `src/vsa_agent/agents/search_agent.py`: 在已有 `write_live_trace_event("search_agent.embed_search", ...)` 同时写入 API 日志，便于浏览器验收时检索。
+- Modify `src/vsa_agent/config.py` and `src/vsa_agent/tools/embed_search.py`: 增加并消费仅用于快速验证的 `force_mock_embedding` 开关。
 - Create `tests/unit/api/test_original_ui_search_route.py`: 不启动 ES 的路由契约、SearchAgent 调用和 app 注册测试。
 - Modify `tests/unit/agents/test_search_agent.py`: 覆盖 embed-only 路径会记录 `search_agent.embed_search`。
+- Modify `tests/unit/test_config_search.py` and `tests/unit/tools/test_embed_search.py`: 覆盖开关默认关闭及开启时跳过真实 embedding 客户端。
 - Modify `scripts/es_ingest_smoke.py` and `tests/unit/scripts/test_es_ingest_smoke.py`: 写入与 mock query embedding 维度一致的样例向量，并经新 API 搜索验证 `{data: [...]}`。
 - Modify `scripts/es-runtime-stack.ps1`, `scripts/es-runtime-stack.sh`, and `tests/unit/scripts/test_es_runtime_stack_script.py`: 添加 UI 端口、端口接管、UI 子进程、就绪检查、持续交互模式和仅 smoke 退出模式。
 - Modify `docs/superpowers/reference/es-video-search-runtime.md`, `docs/DEVELOPMENT_STATUS.md`, and `scripts/sync-server-files.ps1`: 记录操作方式、浏览器证据、同步新增文件和当前状态。

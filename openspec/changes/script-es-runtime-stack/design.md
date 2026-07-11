@@ -86,6 +86,14 @@ config file passed via `VSA_CONFIG`.
    ports. It logs PID and command-line evidence before termination, waits for
    the release, and fails before startup if the release does not complete.
 
+7. Make fast validation vector generation deterministic.
+
+   The temporary stack config will set `search.force_mock_embedding: true`.
+   This makes the ingest smoke record and the browser-originated query use the
+   same deterministic mock vector even when the baseline configuration has a
+   real embedding service. The flag defaults to false, so it does not alter
+   production-style runtime behavior.
+
 ## Risks / Trade-offs
 
 - Docker may be unavailable locally or through the mapped drive -> the script
