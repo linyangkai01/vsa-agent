@@ -1,14 +1,14 @@
 # Development Status
 
-Last updated: 2026-07-04
+Last updated: 2026-07-11
 
 ## Current State
 
-- Active OpenSpec change: `verify-es-ingest-runtime`.
-- Active branch: `codex/es-real-service-validation`.
-- Goal: add an opt-in runtime smoke path proving `/api/search/ingest` writes to a real Elasticsearch index.
-- Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
-- The smoke script is `scripts/es_ingest_smoke.py`.
+- Active OpenSpec changes:
+  - `stabilize-test-contracts` on `feature/20260710/stabilize-test-contracts`: report-flow tests now validate Markdown structure and report data without binding output language; configuration diagnostics and DashScope runners isolate missing-key behavior.
+  - `script-es-runtime-stack` on `codex/script-es-runtime-stack`: ES runtime-stack validation remains active in its separate worktree.
+- `stabilize-test-contracts` verification: focused suite `54 passed`; full suite `660 passed, 4 skipped, 1 warning` using a worktree-local temporary directory.
+- The four skips remain conditional skips; no skip was converted to a failure or removed.
 
 ## Git Policy
 
