@@ -41,20 +41,31 @@
 ## 验证命令
 
 ```powershell
-$env:TEMP=(Resolve-Path '.tmp\pytest-verify-final').Path
-$env:TMP=$env:TEMP
-python -m pytest -q
-```
-
-结果：`660 passed, 4 skipped, 1 warning in 22.86s`。
-
-四项跳过均保留为条件跳过。唯一警告来自第三方 `starlette.testclient` 对 `httpx` 的弃用提示，与本变更无关。
-
-```powershell
 openspec validate stabilize-test-contracts --strict
 ```
 
 结果：`Change 'stabilize-test-contracts' is valid`。
+
+```powershell
+bash -n scripts/run_live_acceptance_dashscope.sh
+bash -n scripts/run_live_top_agent_video_dashscope.sh
+```
+
+结果：两个脚本语法检查均以退出码 `0` 结束。
+
+```powershell
+conda run -n vsa-agent python -m pytest tests/acceptance/test_phase6_report_postprocessing_flow.py tests/acceptance/test_report_flow.py tests/unit/test_config.py tests/unit/test_dashscope_live_runner.py -q
+```
+
+结果：`36 passed in 3.79s`。
+
+```powershell
+conda run -n vsa-agent python -m pytest -q -rs
+```
+
+结果：`584 passed, 2 skipped, 1 warning in 13.70s`。
+
+两项跳过均保留为条件跳过，原因均为 `LIVE_API_KEY` 或 `OPENAI_API_KEY` 未配置，位于 `tests/acceptance/test_evaluator_live_api.py`。唯一警告来自第三方 `starlette.testclient` 对 `httpx` 的弃用提示，与本变更无关。
 
 ## 结论
 

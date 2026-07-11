@@ -7,8 +7,8 @@ Last updated: 2026-07-11
 - Active OpenSpec changes:
   - `stabilize-test-contracts` on `feature/20260710/stabilize-test-contracts`: report-flow tests now validate Markdown structure and report data without binding output language; configuration diagnostics and DashScope runners isolate missing-key behavior.
   - `script-es-runtime-stack` on `codex/script-es-runtime-stack`: ES runtime-stack validation remains active in its separate worktree.
-- `stabilize-test-contracts` verification: focused suite `54 passed`; full suite `660 passed, 4 skipped, 1 warning` using a worktree-local temporary directory.
-- The four skips remain conditional skips; no skip was converted to a failure or removed.
+- `stabilize-test-contracts` verification: OpenSpec strict validation passed; DashScope wrapper syntax checks passed; focused suite `36 passed`; full suite `584 passed, 2 skipped, 1 warning`.
+- The two skips remain conditional live-API skips for missing `LIVE_API_KEY` or `OPENAI_API_KEY`; no skip was converted to a failure or removed.
 
 ## Git Policy
 
