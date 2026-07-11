@@ -1,6 +1,6 @@
 workflow: full
 language: zh-CN
-phase: build
+phase: verify
 context_compression: off
 build_mode: executing-plans
 build_pause: null
@@ -8,7 +8,7 @@ subagent_dispatch: null
 tdd_mode: tdd
 review_mode: standard
 isolation: worktree
-verify_mode: null
+verify_mode: full
 auto_transition: true
 base_ref: 398294a5f0a28fcf1c1284109e8a4ab43ccf8a03
 design_doc: docs/superpowers/specs/2026-07-10-stabilize-test-contracts-design.md
