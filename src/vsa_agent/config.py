@@ -187,6 +187,7 @@ class SearchBackendConfig(BaseModel):
     request_timeout_sec: float = 30.0
     verify_certs: bool = True
     allow_mock_fallback: bool = True
+    force_mock_embedding: bool = False
 
 
 class AppConfig(BaseModel):
