@@ -21,3 +21,9 @@
 - [x] 4.2 Run OpenSpec validation for `script-es-runtime-stack`.
 - [x] 4.3 Attempt real stack validation if Docker and the runtime environment are available; otherwise record the exact blocker.
 - [ ] 4.4 Finish on the local development branch, merge locally to `master`, push only remote `master`, and archive the Comet change after verification passes.
+
+## 5. Interactive Original-UI ES Validation
+
+- [ ] 5.1 Add a tested `/api/v1/search` route that preserves the original VSS Search request and `{data: [...]}` response contract while reusing SearchAgent and registered `embed_search`.
+- [ ] 5.2 Extend the Windows and Linux ES stack launchers with an interactive all-stack mode that reclaims only selected ES/API/UI ports, starts the original UI, and retains owned services until interruption.
+- [ ] 5.3 Add focused tests and documentation for the search route, UI runtime environment, port-reclamation behavior, browser validation evidence, and mapped-server sync.

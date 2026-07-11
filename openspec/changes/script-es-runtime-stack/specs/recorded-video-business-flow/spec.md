@@ -51,3 +51,31 @@ and FastAPI API process.
 - **THEN** the validation path reports the missing dependency or blocked action clearly
 - **AND** it does not report runtime smoke validation as successful
 - **AND** the server sync documentation keeps the scripts available at `Z:\vsa-agent` for execution when the dependency is available
+
+#### Scenario: Interactive runtime stack starts the original UI
+
+- **GIVEN** the user selects interactive runtime mode
+- **WHEN** the user runs the documented all-stack launcher
+- **THEN** it starts Elasticsearch, FastAPI with the temporary search-enabled configuration, and the original UI
+- **AND** it configures the original UI to use the FastAPI `/api/v1` base URL
+- **AND** it retains the services until the user interrupts the launcher
+- **AND** it prints the browser URL, API URL, ES endpoint, and configured index
+
+#### Scenario: Original UI search resolves through Elasticsearch
+
+- **GIVEN** interactive runtime mode has indexed the smoke video-search record
+- **WHEN** a user submits a query through the original VSS Search UI
+- **THEN** the UI sends its existing search request to `/api/v1/search`
+- **AND** the API routes the request through the existing SearchAgent and registered `embed_search` tool
+- **AND** the enabled runtime tool queries Elasticsearch and returns `{data: [...]}` in the original UI contract
+- **AND** the original UI renders the returned video-search result
+- **AND** API logs record the request and the `search_agent.embed_search` execution evidence
+
+#### Scenario: Interactive runtime stack reclaims requested ports
+
+- **GIVEN** a process occupies the selected API, UI, or ES port
+- **WHEN** the all-stack launcher starts
+- **THEN** it logs the target port, PID, and command line before terminating the occupying process
+- **AND** it waits for the selected port to be released before starting the replacement service
+- **AND** if the port cannot be released, it fails without starting a partial stack
+- **AND** it does not terminate processes that do not occupy a selected target port

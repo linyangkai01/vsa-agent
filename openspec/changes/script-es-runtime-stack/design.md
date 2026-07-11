@@ -30,6 +30,10 @@ config file passed via `VSA_CONFIG`.
 - Make the same commands usable from the mapped server project at
   `Z:\vsa-agent`.
 - Preserve normal unit tests without requiring a running Elasticsearch service.
+- Provide an interactive mode that starts ES, the API, and original UI together
+  and retains them for browser-driven validation.
+- Connect the original UI's existing `/api/v1/search` contract to the existing
+  SearchAgent and ES-backed `embed_search` tool path.
 
 **Non-Goals:**
 
@@ -68,6 +72,20 @@ config file passed via `VSA_CONFIG`.
    process. The ES stop script should continue to use `docker compose -f
    docker-compose.es.yml down`, matching the existing ES runtime ownership.
 
+5. Reuse the original search contract rather than add a validation-only UI.
+
+   The original VSS Search component already submits `POST
+   ${NEXT_PUBLIC_AGENT_API_URL_BASE}/search` and renders `{data: SearchResult[]}`.
+   The project will provide that route through its existing API prefix, adapt
+   the request to `SearchInput`, and call the existing search-agent/tool stack.
+   This retains one business flow from browser input through ES retrieval.
+
+6. Treat selected ports as deliberate process-ownership boundaries.
+
+   The interactive launcher will reclaim only the configured API, UI, and ES
+   ports. It logs PID and command-line evidence before termination, waits for
+   the release, and fails before startup if the release does not complete.
+
 ## Risks / Trade-offs
 
 - Docker may be unavailable locally or through the mapped drive -> the script
@@ -80,6 +98,9 @@ config file passed via `VSA_CONFIG`.
   port parameters and print the chosen endpoints.
 - Background processes can linger after failures -> wrapper cleanup must run in
   `finally`-style logic and docs must include the stop command.
+- A requested port could belong to an unrelated service -> reclamation is
+  limited to the explicit target ports, is recorded in logs, and is opt-out
+  configurable rather than scanning or killing arbitrary processes.
 
 ## Migration Plan
 
