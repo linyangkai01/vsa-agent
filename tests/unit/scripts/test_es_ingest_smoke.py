@@ -3,7 +3,9 @@ import json
 import pytest
 
 from scripts.es_ingest_smoke import find_indexed_document
+from scripts.es_ingest_smoke import mock_query_vector
 from scripts.es_ingest_smoke import post_ingest
+from scripts.es_ingest_smoke import post_original_ui_search
 from scripts.es_ingest_smoke import sample_payload
 from scripts.es_ingest_smoke import search_indexed_document
 from scripts.es_ingest_smoke import validate_indexed_document
@@ -11,7 +13,7 @@ from scripts.es_ingest_smoke import validate_ingest_response
 
 
 def test_sample_payload_contains_required_metadata():
-    payload = sample_payload("runtime-video-1")
+    payload = sample_payload("runtime-video-1", "forklift near worker")
 
     assert payload["video_id"] == "runtime-video-1"
     metadata = payload["metadata"]
@@ -21,7 +23,7 @@ def test_sample_payload_contains_required_metadata():
     assert metadata["start_time"] == "2026-07-04T08:00:00Z"
     assert metadata["end_time"] == "2026-07-04T08:00:05Z"
     assert metadata["screenshot_url"] == "http://example.invalid/frames/runtime-validation.jpg"
-    assert metadata["vector"] == [0.11, 0.22, 0.33]
+    assert metadata["vector"] == mock_query_vector("forklift near worker")
 
 
 def test_validate_ingest_response_returns_result_id():
@@ -55,7 +57,7 @@ def test_validate_indexed_document_accepts_required_fields():
             "start_time": "2026-07-04T08:00:00Z",
             "end_time": "2026-07-04T08:00:05Z",
             "screenshot_url": "http://example.invalid/frames/runtime-validation.jpg",
-            "vector": [0.11, 0.22, 0.33],
+            "vector": mock_query_vector("forklift near worker"),
             "metadata": {"site": "runtime-yard"},
         },
         expected_video_id="runtime-video-1",
@@ -107,6 +109,27 @@ def test_post_ingest_posts_json_to_ingest_endpoint(monkeypatch):
         "method": "POST",
         "content_type": "application/json",
         "body": {"video_id": "runtime-video-1"},
+    }
+
+
+def test_post_original_ui_search_posts_vss_contract(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse({"data": [{"video_name": "runtime-validation.mp4"}]})
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.urlopen", fake_urlopen)
+
+    response = post_original_ui_search("http://127.0.0.1:8000", "forklift near worker", 1, 7.5)
+
+    assert response["data"][0]["video_name"] == "runtime-validation.mp4"
+    assert captured == {
+        "url": "http://127.0.0.1:8000/api/v1/search",
+        "timeout": 7.5,
+        "body": {"query": "forklift near worker", "top_k": 1, "source_type": "video_file", "agent_mode": False},
     }
 
 
