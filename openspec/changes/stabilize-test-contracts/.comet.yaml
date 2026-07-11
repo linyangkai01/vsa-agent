@@ -1,4 +1,4 @@
-﻿workflow: full
+workflow: full
 language: zh-CN
 phase: build
 context_compression: off
@@ -24,4 +24,4 @@ handoff_context: openspec/changes/stabilize-test-contracts/.comet/handoff/design
 handoff_hash: 200a92b45353ed52fd9ba67a6c8b1233578042ebf55aafbd85b683a738d8f00d
 classic_profile: full
 classic_migration: 1
-run_id: 710aafe5-f18b-46d6-8fac-fcc9805741e9
+run_id: e1ec15ff-224c-412a-8891-e7746041b20c
