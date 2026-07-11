@@ -25,13 +25,13 @@ async def test_single_video_report_flow_returns_markdown_side_effect():
         return {
             "query": kwargs["query"],
             "source_type": kwargs["source_type"],
-            "summary_text": "person walking near forklift",
+            "summary_text": "forklift proximity summary",
             "chunks": [],
             "events": [
                 {
                     "start_timestamp": "00:00:05",
                     "end_timestamp": "00:00:09",
-                    "description": "person walking near forklift",
+                    "description": "person walking near forklift event",
                 }
             ],
         }
@@ -48,7 +48,8 @@ async def test_single_video_report_flow_returns_markdown_side_effect():
     assert _heading_levels(markdown) == [1, 2, 2, 2, 2]
     assert "- sensor_id: video.mp4" in markdown
     assert "生成详细报告" in markdown
-    assert "person walking near forklift" in markdown
+    assert "forklift proximity summary" in markdown
+    assert "person walking near forklift event" in markdown
     assert "[00:00:05 - 00:00:09]" in markdown
 
 
