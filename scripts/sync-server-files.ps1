@@ -1,6 +1,7 @@
 param(
     [string]$TargetRoot = "Z:\vsa-agent",
     [string[]]$IncludePaths = @(
+        "docker-compose.es.yml",
         "scripts\es-runtime-stack.ps1",
         "scripts\es-runtime-stack.sh",
         "scripts\es_ingest_smoke.py",

@@ -4,6 +4,7 @@ from pathlib import Path
 SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
 SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
+ES_COMPOSE = Path("docker-compose.es.yml")
 
 
 def _script_text() -> str:
@@ -16,6 +17,14 @@ def _bash_script_text() -> str:
 
 def _sync_script_text() -> str:
     return SYNC_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_elasticsearch_uses_docker_managed_named_volume_by_default():
+    text = ES_COMPOSE.read_text(encoding="utf-8")
+
+    assert "esdata:/usr/share/elasticsearch/data" in text
+    assert "VSA_ES_VOLUME_NAME:-vsa-agent-es-data" in text
+    assert "VSA_ES_DATA_DIR" not in text
 
 
 def test_es_runtime_stack_script_exists():
@@ -178,6 +187,7 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert "[string[]]$IncludePaths" in text
     assert "[switch]$DryRun" in text
     assert "[switch]$PreflightOnly" in text
+    assert '"docker-compose.es.yml"' in text
 
 
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():

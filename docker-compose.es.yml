@@ -9,9 +9,13 @@ services:
     ports:
       - "${VSA_ES_PORT:-9200}:9200"
     volumes:
-      - ${VSA_ES_DATA_DIR:-./.runtime/elasticsearch}:/usr/share/elasticsearch/data
+      - esdata:/usr/share/elasticsearch/data
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9200 >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
+
+volumes:
+  esdata:
+    name: ${VSA_ES_VOLUME_NAME:-vsa-agent-es-data}

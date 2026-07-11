@@ -211,7 +211,6 @@ cd "$REPO_ROOT"
 for port in "$ES_PORT" "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
 export VSA_ES_PORT="$ES_PORT"
-export VSA_ES_DATA_DIR="$REPO_ROOT/.runtime/elasticsearch"
 export VSA_ES_CONTAINER_NAME="vsa-agent-es"
 docker compose -f docker-compose.es.yml up -d
 

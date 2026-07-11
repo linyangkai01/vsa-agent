@@ -83,6 +83,12 @@ remains unchanged and keeps `search.enabled: false`. The temporary config sets
 `search.force_mock_embedding: true` so smoke ingest and browser query use the
 same deterministic vector; production configurations keep that flag disabled.
 
+Elasticsearch data uses the Docker-managed named volume `vsa-agent-es-data` by
+default. This avoids requiring write access or `sudo chown` on the project
+directory. A user still needs permission to run Docker commands. To remove the
+validation data intentionally, run `docker volume rm vsa-agent-es-data` after
+stopping the stack.
+
 To stop Elasticsearch after validation, include:
 
 ```powershell
