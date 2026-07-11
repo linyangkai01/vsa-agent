@@ -1,10 +1,12 @@
 param(
     [int]$ApiPort = 8000,
     [int]$EsPort = 9200,
+    [int]$UiPort = 3000,
     [string]$Index = "vsa-video-embeddings",
     [string]$CondaEnv = "",
     [int]$TimeoutSec = 90,
-    [switch]$StopElasticsearch
+    [switch]$StopElasticsearch,
+    [switch]$SmokeOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +26,26 @@ function Test-PortAvailable {
             $listener.Stop()
         }
     }
+}
+
+function Wait-PortFree {
+    param([int]$Port, [int]$TimeoutSec)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while (@(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue).Count -gt 0) {
+        if ((Get-Date) -ge $deadline) { throw "Port $Port was not released within $TimeoutSec seconds" }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+function Reclaim-Port {
+    param([int]$Port, [int]$TimeoutSec)
+    $owners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($ownerPid in $owners) {
+        $command = (Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid" -ErrorAction SilentlyContinue).CommandLine
+        Write-Host "Reclaiming port $Port from PID ${ownerPid}: $command"
+        & taskkill.exe /PID $ownerPid /T /F | Out-Null
+    }
+    Wait-PortFree -Port $Port -TimeoutSec $TimeoutSec
 }
 
 function Wait-HttpHealth {
@@ -73,6 +95,7 @@ search:
   request_timeout_sec: 30.0
   verify_certs: false
   allow_mock_fallback: true
+  force_mock_embedding: true
 "@
 
     $pattern = "(?ms)^search:\r?\n(?:^[ \t]+.*\r?\n?)*"
@@ -117,21 +140,25 @@ $runtimeDir = Join-Path $repoRoot ".runtime\es-stack"
 $configPath = Join-Path $runtimeDir "config.yaml"
 $apiLogPath = Join-Path $runtimeDir "api.log"
 $apiErrLogPath = Join-Path $runtimeDir "api.err.log"
+$uiLogPath = Join-Path $runtimeDir "ui.log"
+$uiErrLogPath = Join-Path $runtimeDir "ui.err.log"
 $apiUrl = "http://127.0.0.1:$ApiPort"
 $apiHealthUrl = "$apiUrl/health"
 $esEndpoint = "http://127.0.0.1:$EsPort"
 $apiProcess = $null
+$uiProcess = $null
 $oldVsaConfig = $env:VSA_CONFIG
 $oldPythonPath = $env:PYTHONPATH
+$oldSearchTab = $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB
+$oldAgentApiUrl = $env:NEXT_PUBLIC_AGENT_API_URL_BASE
+$oldUiPort = $env:PORT
 
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 
 try {
     Set-Location $repoRoot
 
-    if (-not (Test-PortAvailable -Port $ApiPort)) {
-        throw "API port $ApiPort is already in use. Pass -ApiPort with another value."
-    }
+    foreach ($port in @($EsPort, $ApiPort, $UiPort)) { Reclaim-Port -Port $port -TimeoutSec $TimeoutSec }
 
     & "$PSScriptRoot\es-dev-start.ps1" -Port $EsPort
     Write-SearchConfig -SourceConfig (Join-Path $repoRoot "config.yaml") -TargetConfig $configPath -EsEndpoint $esEndpoint -Index $Index
@@ -174,11 +201,22 @@ try {
     Write-Host "  es:  $esEndpoint"
     Write-Host "  index: $Index"
     Write-Host "  config: $configPath"
+    if (-not $SmokeOnly) {
+        $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = "true"
+        $env:NEXT_PUBLIC_AGENT_API_URL_BASE = "$apiUrl/api/v1"
+        $env:PORT = "$UiPort"
+        $uiProcess = Start-Process -FilePath "bash" -ArgumentList @("scripts/run_original_ui_vss.sh") -WorkingDirectory $repoRoot -RedirectStandardOutput $uiLogPath -RedirectStandardError $uiErrLogPath -PassThru
+        Wait-Process -Id $uiProcess.Id
+    }
 } finally {
+    Stop-OwnedProcessTree -Process $uiProcess
     Stop-OwnedProcessTree -Process $apiProcess
 
     $env:VSA_CONFIG = $oldVsaConfig
     $env:PYTHONPATH = $oldPythonPath
+    $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = $oldSearchTab
+    $env:NEXT_PUBLIC_AGENT_API_URL_BASE = $oldAgentApiUrl
+    $env:PORT = $oldUiPort
 
     if ($StopElasticsearch) {
         & "$PSScriptRoot\es-dev-stop.ps1"

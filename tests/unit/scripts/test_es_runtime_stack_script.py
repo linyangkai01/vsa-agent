@@ -31,6 +31,8 @@ def test_es_runtime_stack_exposes_expected_parameters():
         '[string]$Index = "vsa-video-embeddings"',
         '[string]$CondaEnv = ""',
         "[switch]$StopElasticsearch",
+        "[int]$UiPort = 3000",
+        "[switch]$SmokeOnly",
     ):
         assert parameter in text
 
@@ -54,6 +56,7 @@ def test_es_runtime_stack_generates_temporary_search_config():
     assert "search:" in text
     assert "enabled: true" in text
     assert "verify_certs: false" in text
+    assert "force_mock_embedding: true" in text
     assert "config.yaml" in text
 
 
@@ -93,6 +96,8 @@ def test_es_runtime_stack_bash_exposes_expected_options():
         "--conda-env",
         "--timeout-sec",
         "--stop-elasticsearch",
+        "--ui-port",
+        "--smoke-only",
     ):
         assert option in text
 
@@ -115,6 +120,27 @@ def test_es_runtime_stack_bash_generates_temporary_search_config():
     assert "search:" in text
     assert "enabled: true" in text
     assert "verify_certs: false" in text
+    assert "force_mock_embedding: true" in text
+
+
+def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
+    text = _script_text()
+    for required in (
+        "Get-NetTCPConnection", "Win32_Process", "taskkill.exe", "Wait-PortFree",
+        "run_original_ui_vss.sh", "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
+        "NEXT_PUBLIC_AGENT_API_URL_BASE", "$uiProcess", "SmokeOnly",
+    ):
+        assert required in text
+
+
+def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
+    text = _bash_script_text()
+    for required in (
+        "port_listener_pids", "kill -TERM", "wait_for_port_free",
+        "run_original_ui_vss.sh", "UI_PID", "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
+        "NEXT_PUBLIC_AGENT_API_URL_BASE", "SMOKE_ONLY",
+    ):
+        assert required in text
     assert "config.yaml" in text
 
 

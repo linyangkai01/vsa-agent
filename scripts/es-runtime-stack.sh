@@ -3,10 +3,12 @@ set -Eeuo pipefail
 
 API_PORT=8000
 ES_PORT=9200
+UI_PORT=3000
 INDEX="vsa-video-embeddings"
 CONDA_ENV=""
 TIMEOUT_SEC=90
 STOP_ELASTICSEARCH=0
+SMOKE_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -16,6 +18,8 @@ Usage:
 Options:
   --api-port PORT            FastAPI port. Default: 8000
   --es-port PORT             Elasticsearch port. Default: 9200
+  --ui-port PORT             Original UI port. Default: 3000
+  --smoke-only               Exit after smoke validation.
   --index NAME               Elasticsearch index. Default: vsa-video-embeddings
   --conda-env NAME           Run Python through conda run -n NAME.
   --timeout-sec SECONDS      Startup timeout. Default: 90
@@ -39,6 +43,8 @@ while [[ $# -gt 0 ]]; do
       ES_PORT="$2"
       shift 2
       ;;
+    --ui-port|-UiPort) UI_PORT="$2"; shift 2 ;;
+    --smoke-only|-SmokeOnly) SMOKE_ONLY=1; shift ;;
     --index|-Index)
       INDEX="$2"
       shift 2
@@ -77,8 +83,17 @@ API_URL="http://127.0.0.1:${API_PORT}"
 API_HEALTH_URL="${API_URL}/health"
 ES_ENDPOINT="http://127.0.0.1:${ES_PORT}"
 API_PID=""
+UI_PID=""
+
+port_listener_pids() { lsof -ti "TCP:$1" -sTCP:LISTEN 2>/dev/null || true; }
+wait_for_port_free() { local deadline=$((SECONDS + TIMEOUT_SEC)); while [[ -n "$(port_listener_pids "$1")" ]]; do (( SECONDS >= deadline )) && { echo "ERROR: port $1 was not released" >&2; return 1; }; sleep 1; done; }
+reclaim_port() { local pid; for pid in $(port_listener_pids "$1"); do echo "Reclaiming port $1 from PID $pid: $(ps -p "$pid" -o args=)"; kill -TERM "$pid" || true; done; wait_for_port_free "$1"; }
 
 cleanup() {
+  if [[ -n "$UI_PID" ]] && kill -0 "$UI_PID" >/dev/null 2>&1; then
+    kill -- "-$UI_PID" >/dev/null 2>&1 || true
+    wait "$UI_PID" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$API_PID" ]] && kill -0 "$API_PID" >/dev/null 2>&1; then
     kill -- "-$API_PID" >/dev/null 2>&1 || true
     wait "$API_PID" >/dev/null 2>&1 || true
@@ -147,6 +162,7 @@ search_block = f"""search:
   request_timeout_sec: 30.0
   verify_certs: false
   allow_mock_fallback: true
+  force_mock_embedding: true
 """
 
 pattern = re.compile(r"(?ms)^search:\r?\n(?:^[ \t]+.*\r?\n?)*")
@@ -192,10 +208,7 @@ fi
 mkdir -p "$RUNTIME_DIR"
 cd "$REPO_ROOT"
 
-if ! port_available "$API_PORT"; then
-  echo "ERROR: API port $API_PORT is already in use. Pass --api-port with another value." >&2
-  exit 1
-fi
+for port in "$ES_PORT" "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
 export VSA_ES_PORT="$ES_PORT"
 export VSA_ES_DATA_DIR="$REPO_ROOT/.runtime/elasticsearch"
@@ -236,3 +249,8 @@ echo "  api: $API_URL"
 echo "  es:  $ES_ENDPOINT"
 echo "  index: $INDEX"
 echo "  config: $CONFIG_PATH"
+if [[ "$SMOKE_ONLY" == "0" ]]; then
+  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$RUNTIME_DIR/ui.log" 2>"$RUNTIME_DIR/ui.err.log" &
+  UI_PID=$!
+  wait "$UI_PID"
+fi
