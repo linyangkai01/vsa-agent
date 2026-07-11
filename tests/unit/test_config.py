@@ -259,15 +259,22 @@ class TestRuntimeConfig:
         assert "llm" in result.stdout
         assert "vlm" in result.stdout
 
-    def test_config_doctor_cli_reports_missing_key(self, monkeypatch):
+    def test_config_doctor_cli_reports_missing_key(self, monkeypatch, tmp_path):
         monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(Path("config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+        (tmp_path / "config.local.yaml").write_text(
+            yaml.safe_dump({"backends": {"dashscope": {"api_key": "local-secret"}}}),
+            encoding="utf-8",
+        )
         env = os.environ.copy()
         env["PYTHONPATH"] = "src"
         env["VSA_PROFILE"] = "dashscope_remote"
         env.pop("DASHSCOPE_API_KEY", None)
+        env["VSA_LOCAL_CONFIG"] = ""
 
         result = subprocess.run(
-            [sys.executable, "-m", "vsa_agent", "config", "doctor", "--config", "config.yaml"],
+            [sys.executable, "-m", "vsa_agent", "config", "doctor", "--config", str(config_path)],
             cwd=Path.cwd(),
             env=env,
             text=True,
