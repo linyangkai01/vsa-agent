@@ -2,6 +2,8 @@
 comet_change: stabilize-test-contracts
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-11-stabilize-test-contracts
+status: final
 ---
 
 # 测试契约稳定化技术设计
@@ -59,3 +61,4 @@ fi
 - 结构化测试只验证层级、顺序与数据，不把当前标题文案重新引入契约。
 - 仅对无 Key 的脚本入口提前退出；提供 Key 时仍执行现有的配置诊断和运行路径。
 - 修改 Shell 文件时保持 LF 行尾，满足 `.gitattributes` 和现有测试。
+

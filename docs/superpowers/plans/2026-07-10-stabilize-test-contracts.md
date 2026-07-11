@@ -1,3 +1,7 @@
+---
+archived-with: 2026-07-11-stabilize-test-contracts
+status: final
+---
 ﻿---
 change: stabilize-test-contracts
 design-doc: docs/superpowers/specs/2026-07-10-stabilize-test-contracts-design.md
