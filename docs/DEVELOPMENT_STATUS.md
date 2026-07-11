@@ -1,12 +1,12 @@
 # Development Status
 
-Last updated: 2026-07-09
+Last updated: 2026-07-11
 
 ## Current State
 
 - Active OpenSpec change: `script-es-runtime-stack`.
 - Active branch: `codex/script-es-runtime-stack`.
-- Goal: add one-command stack validation paths for Windows and Linux that start Elasticsearch, start FastAPI with a temporary search-enabled config, run ingest/search smoke validation, and clean up owned resources.
+- Goal: provide an interactive Windows/Linux ES, API and original-UI launcher that verifies the original `/api/v1/search` business flow.
 - Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
 - Stack wrappers: `scripts/es-runtime-stack.ps1`, `scripts/es-runtime-stack.sh`.
 - Smoke script: `scripts/es_ingest_smoke.py`.
@@ -55,7 +55,7 @@ Result: valid before archive.
 ## Active Change
 
 - `script-es-runtime-stack`: building stack commands that start ES, start FastAPI with a temporary search-enabled config, run ingest/search smoke validation, and clean up owned resources.
-- Next server validation command: `./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch`.
+- Next server validation command: `./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings`.
 
 ## Active Runtime Validation
 

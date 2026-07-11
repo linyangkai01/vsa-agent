@@ -46,19 +46,21 @@ keyword search against the same index to prove the record is retrievable.
 
 ## One-Command Stack Validation
 
-Use this when you want the project to start Elasticsearch, start FastAPI with a
-temporary search-enabled config, and run ingest/search smoke validation.
+Use this to start Elasticsearch, FastAPI and the original VSS UI together. The
+default interactive mode writes a sample record, verifies `/api/v1/search`, and
+keeps the stack running for browser validation. It reclaims only the selected
+ES/API/UI ports before startup.
 
 On Windows PowerShell:
 
 ```powershell
-.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200 -Index vsa-video-embeddings
+.\scripts\es-runtime-stack.ps1 -ApiPort 8000 -EsPort 9200 -UiPort 3000 -Index vsa-video-embeddings
 ```
 
 On Linux/Ubuntu bash:
 
 ```bash
-./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings
 ```
 
 Expected success output includes:
@@ -70,9 +72,16 @@ PASS: ES runtime stack validation succeeded
   index: vsa-video-embeddings
 ```
 
+Open `http://127.0.0.1:3000`, switch to Search, and search for
+`forklift near worker`. The result list must include `runtime-validation.mp4`.
+Confirm `.runtime/es-stack/api.log` contains both `original_ui.search.request`
+and `search_agent.embed_search`.
+
 The script writes a temporary config under `.runtime\es-stack\config.yaml` and
 passes it to the API process through `VSA_CONFIG`. The committed `config.yaml`
-remains unchanged and keeps `search.enabled: false`.
+remains unchanged and keeps `search.enabled: false`. The temporary config sets
+`search.force_mock_embedding: true` so smoke ingest and browser query use the
+same deterministic vector; production configurations keep that flag disabled.
 
 To stop Elasticsearch after validation, include:
 
