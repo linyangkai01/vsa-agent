@@ -9,6 +9,8 @@ param(
         "scripts\bootstrap_node.sh",
         "scripts\run_original_ui_vss.sh",
         "scripts\es_ingest_smoke.py",
+        "frontend\original-ui\packages\nemo-agent-toolkit-ui\utils\data\throttle.ts",
+        "frontend\original-ui\packages\nemo-agent-toolkit-ui\__tests__\utils\throttle.test.ts",
         "src\vsa_agent\config.py",
         "src\vsa_agent\api\routes.py",
         "src\vsa_agent\api\video_search_ingest.py",

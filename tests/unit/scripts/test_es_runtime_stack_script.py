@@ -6,6 +6,7 @@ BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
 SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 ES_COMPOSE = Path("docker-compose.es.yml")
 PYPROJECT = Path("pyproject.toml")
+GITIGNORE = Path(".gitignore")
 
 
 def _script_text() -> str:
@@ -30,6 +31,12 @@ def test_elasticsearch_uses_docker_managed_named_volume_by_default():
 
 def test_runtime_stack_declares_its_asgi_server_dependency():
     assert '"uvicorn>=0.30"' in PYPROJECT.read_text(encoding="utf-8")
+
+
+def test_original_ui_data_source_directory_is_not_ignored():
+    text = GITIGNORE.read_text(encoding="utf-8")
+
+    assert "!frontend/original-ui/packages/nemo-agent-toolkit-ui/utils/data/" in text
 
 
 def test_es_runtime_stack_script_exists():
@@ -240,6 +247,8 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"src\\vsa_agent\\api\\video_search_ingest.py"' in text
     assert '"scripts\\bootstrap_node.sh"' in text
     assert '"scripts\\run_original_ui_vss.sh"' in text
+    assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\utils\\data\\throttle.ts"' in text
+    assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
 
 
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():
