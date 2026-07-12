@@ -369,7 +369,7 @@ start_file_log_stream "api" "$API_LOG_PATH"
 start_file_log_stream "api.err" "$API_ERR_LOG_PATH"
 
 if [[ -n "$CONDA_ENV" ]]; then
-  PYTHONUNBUFFERED=1 setsid conda run -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
+  PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
 else
   PYTHONUNBUFFERED=1 setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
 fi

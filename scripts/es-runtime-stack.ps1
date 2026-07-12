@@ -123,7 +123,7 @@ function PythonCommand {
 
     return @{
         File = "conda"
-        Args = @("run", "-n", $CondaEnv, "python") + $PythonArgs
+        Args = @("run", "--no-capture-output", "-n", $CondaEnv, "python") + $PythonArgs
     }
 }
 

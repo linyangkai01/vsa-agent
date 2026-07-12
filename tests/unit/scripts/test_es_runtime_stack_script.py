@@ -105,6 +105,14 @@ def test_es_runtime_stack_uses_existing_lifecycle_and_smoke_scripts():
     assert "Invoke-RestMethod" in text
 
 
+def test_stack_preserves_conda_subprocess_logs_for_api_observability():
+    windows = _script_text()
+    linux = _bash_script_text()
+
+    assert '"--no-capture-output"' in windows
+    assert "conda run --no-capture-output -n" in linux
+
+
 def test_es_runtime_stack_generates_temporary_search_config():
     text = _script_text()
 

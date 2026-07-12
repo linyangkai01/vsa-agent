@@ -105,6 +105,13 @@ config file passed via `VSA_CONFIG`.
    no source-map compiler option, runtime declaration, or dependency will
    change.
 
+9. Preserve API subprocess output for runtime observability.
+
+   When a Conda environment is selected, both launchers will invoke
+   `conda run --no-capture-output`. This keeps Uvicorn and application logger
+   output flowing into the existing API log files without changing logger
+   levels, request payloads, or service behavior.
+
 ## Risks / Trade-offs
 
 - Docker may be unavailable locally or through the mapped drive -> the script
