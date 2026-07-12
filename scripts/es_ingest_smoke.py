@@ -123,6 +123,7 @@ async def find_indexed_document(
 async def search_indexed_document(
     es_endpoint: str,
     index: str,
+    video_id: str,
     query: str,
     timeout_sec: float,
     verify_certs: bool,
@@ -131,9 +132,12 @@ async def search_indexed_document(
     try:
         body = {
             "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                "bool": {
+                    "must": [{"multi_match": {
+                        "query": query,
+                        "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                    }}],
+                    "filter": [{"term": {"video_id.keyword": video_id}}],
                 }
             },
             "size": 1,
@@ -181,6 +185,7 @@ async def _run(args: argparse.Namespace) -> None:
     search_hit = await search_indexed_document(
         args.es_endpoint,
         index=args.index,
+        video_id=args.video_id,
         query="forklift worker",
         timeout_sec=args.timeout_sec,
         verify_certs=not args.insecure,

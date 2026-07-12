@@ -250,6 +250,7 @@ async def test_search_indexed_document_uses_description_match(monkeypatch):
     document = await search_indexed_document(
         "http://es:9200",
         index="vsa-video-embeddings",
+        video_id="runtime-video-1",
         query="forklift worker",
         timeout_sec=5.0,
         verify_certs=False,
@@ -264,9 +265,12 @@ async def test_search_indexed_document_uses_description_match(monkeypatch):
             "vsa-video-embeddings",
             {
                 "query": {
-                    "multi_match": {
-                        "query": "forklift worker",
-                        "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                    "bool": {
+                        "must": [{"multi_match": {
+                            "query": "forklift worker",
+                            "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                        }}],
+                        "filter": [{"term": {"video_id.keyword": "runtime-video-1"}}],
                     }
                 },
                 "size": 1,
