@@ -105,8 +105,8 @@ class TestVideoSearchIngest:
             async def create(self, index, mappings):
                 self.created_indices.append((index, mappings))
 
-            async def index(self, index, document):
-                self.index_calls.append((index, document))
+            async def index(self, index, document, id):
+                self.index_calls.append((index, document, id))
                 return {"_id": "es-doc-1", "result": "created"}
 
             async def close(self):
@@ -162,6 +162,7 @@ class TestVideoSearchIngest:
             ("video-embeddings", {"properties": {"vector": {"type": "dense_vector", "dims": 3}}})
         ]
         assert fake_client.index_calls[0][0] == "video-embeddings"
+        assert fake_client.index_calls[0][2] == "video-1"
         indexed_document = fake_client.index_calls[0][1]
         assert indexed_document["video_id"] == "video-1"
         assert indexed_document["video_name"] == "risk.mp4"
@@ -180,7 +181,7 @@ class TestVideoSearchIngest:
             def __init__(self, *args, **kwargs):
                 pass
 
-            async def index(self, index, document):
+            async def index(self, index, document, id):
                 raise RuntimeError("index rejected")
 
             async def close(self):

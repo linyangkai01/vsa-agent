@@ -4,6 +4,7 @@ import pytest
 
 from scripts.es_ingest_smoke import find_indexed_document
 from scripts.es_ingest_smoke import mock_query_vector
+from scripts.es_ingest_smoke import _parse_args
 from scripts.es_ingest_smoke import post_ingest
 from scripts.es_ingest_smoke import post_original_ui_search
 from scripts.es_ingest_smoke import sample_payload
@@ -24,6 +25,12 @@ def test_sample_payload_contains_required_metadata():
     assert metadata["end_time"] == "2026-07-04T08:00:05Z"
     assert metadata["screenshot_url"] == "http://example.invalid/frames/runtime-validation.jpg"
     assert metadata["vector"] == mock_query_vector("forklift near worker")
+
+
+def test_default_smoke_video_id_is_stable():
+    args = _parse_args(["--es-endpoint", "http://es:9200"])
+
+    assert args.video_id == "runtime-validation-video"
 
 
 def test_validate_ingest_response_returns_result_id():

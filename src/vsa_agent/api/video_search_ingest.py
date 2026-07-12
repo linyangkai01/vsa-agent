@@ -93,6 +93,7 @@ async def video_search_ingest(request: VideoSearchIngestRequest) -> VideoSearchI
         response = await es_client.index(
             index=search_config.embed_index,
             document=document,
+            id=request.video_id,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Elasticsearch indexing failed: {exc}") from exc

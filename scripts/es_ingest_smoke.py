@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 from typing import Any
 from urllib.request import Request
 from urllib.request import urlopen
@@ -160,7 +159,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-url", default=os.environ.get("VSA_API_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--es-endpoint", default=os.environ.get("VSA_ES_ENDPOINT"))
     parser.add_argument("--index", default=os.environ.get("VSA_ES_INDEX", "vsa-video-embeddings"))
-    parser.add_argument("--video-id", default=f"runtime-video-{int(time.time())}")
+    parser.add_argument("--video-id", default="runtime-validation-video")
     parser.add_argument("--timeout-sec", type=float, default=30.0)
     parser.add_argument("--search-query", default="forklift near worker")
     parser.add_argument("--insecure", action="store_true", help="Disable Elasticsearch TLS certificate verification.")
