@@ -150,6 +150,13 @@ def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
         "NEXT_PUBLIC_AGENT_API_URL_BASE", "SMOKE_ONLY",
     ):
         assert required in text
+
+
+def test_linux_stack_bootstraps_node_and_ui_dependencies_before_starting_ui():
+    text = _bash_script_text()
+
+    assert 'bash "$SCRIPT_DIR/bootstrap_node.sh"' in text
+    assert 'npm run ui:install' in text
     assert "config.yaml" in text
 
 

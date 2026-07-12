@@ -176,6 +176,19 @@ target.write_text(updated, encoding="utf-8")
 PY
 }
 
+ensure_ui_runtime() {
+  if ! command -v npm >/dev/null 2>&1; then
+    bash "$SCRIPT_DIR/bootstrap_node.sh"
+  fi
+  if [[ -f "$REPO_ROOT/.deps/node-env.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/.deps/node-env.sh"
+  fi
+  if [[ ! -x "$REPO_ROOT/frontend/original-ui/node_modules/.bin/turbo" ]]; then
+    npm run ui:install
+  fi
+}
+
 wait_http_health() {
   local deadline
   deadline=$((SECONDS + TIMEOUT_SEC))
@@ -250,6 +263,7 @@ echo "  es:  $ES_ENDPOINT"
 echo "  index: $INDEX"
 echo "  config: $CONFIG_PATH"
 if [[ "$SMOKE_ONLY" == "0" ]]; then
+  ensure_ui_runtime
   NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$RUNTIME_DIR/ui.log" 2>"$RUNTIME_DIR/ui.err.log" &
   UI_PID=$!
   wait "$UI_PID"
