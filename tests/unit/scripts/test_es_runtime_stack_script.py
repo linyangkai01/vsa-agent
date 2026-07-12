@@ -299,6 +299,7 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\map\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\dashboard\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\alerts\\lib-src\\server.d.ts"' in text
+    assert '"docs\\superpowers\\reports\\2026-07-12-interactive-es-ui-validation.md"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\utils\\data\\throttle.ts"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
 

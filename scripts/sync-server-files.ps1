@@ -30,6 +30,7 @@ param(
         "docs\DEVELOPMENT_STATUS.md",
         "docs\superpowers\reference\es-video-search-runtime.md",
         "docs\superpowers\reports\2026-07-09-script-es-runtime-stack-verification.md",
+        "docs\superpowers\reports\2026-07-12-interactive-es-ui-validation.md",
         "docs\superpowers\plans\2026-07-11-interactive-es-ui-validation.md",
         "openspec\changes\script-es-runtime-stack\.comet.yaml",
         "openspec\changes\script-es-runtime-stack\proposal.md",
