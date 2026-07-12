@@ -49,7 +49,9 @@ keyword search against the same index to prove the record is retrievable.
 Use this to start Elasticsearch, FastAPI and the original VSS UI together. The
 default interactive mode writes a sample record, verifies `/api/v1/search`, and
 keeps the stack running for browser validation. It reclaims only the selected
-ES/API/UI ports before startup.
+API/UI ports before startup. Elasticsearch remains Docker Compose-owned so the
+launcher does not kill Docker's port proxy; an ES startup failure prints the
+last container logs instead.
 
 On Windows PowerShell:
 
@@ -105,6 +107,36 @@ If the script reports Docker, port, Uvicorn, or smoke validation failures, treat
 that output as the runtime blocker and do not report ES runtime validation as
 successful.
 
+## Ubuntu Server Preflight (No Administrator Permission Required)
+
+The launcher uses files inside the repository, Docker access already available
+to the current user, and the selected Conda environment. It never uses `sudo`.
+Before the first run after synchronizing dependency declarations, install the
+project dependencies into the same environment used by the launcher:
+
+```bash
+cd /data/project/lyk/vsa-agent
+conda run -n vsa-agent python -m pip install --upgrade -e '.[dev]'
+```
+
+The launcher checks `aiohttp`, `elasticsearch[async]` version 8.14 through 8.x,
+and `uvicorn` before starting Docker. If this check fails, run the command
+above; the launcher will not claim that the stack started.
+
+When Node.js is absent, interactive mode downloads the repository-pinned Node
+runtime to `.deps/node` and installs original-UI dependencies without a system
+package installation. Node bootstrap, package install, and UI failures are in
+`.runtime/es-stack/ui.err.log`; FastAPI failures are in
+`.runtime/es-stack/api.err.log`. The launcher tails the relevant log when a
+child process exits before readiness.
+
+For API/UI ports, the launcher logs the owning PID and command, sends `TERM`,
+waits five seconds, then sends `KILL` only if the listener remains. If neither
+`lsof` nor `fuser` is available, it fails before starting a partial stack. Port
+9200 is intentionally left to Docker Compose: if another service owns it,
+Docker's error and ES logs identify the conflict without killing an unrelated
+Docker proxy.
+
 ## Mapped Server Copy
 
 `Z:\vsa-agent` is the mapped server project copy. After local commits, sync the
@@ -157,3 +189,6 @@ validation. It avoids full-tree scans, avoids recursive `robocopy /E`, and does
 not request or store any server password. If the script reports `Access denied`,
 run the same command from the normal Windows PowerShell session that owns the
 `Z:` mapping, or reconnect the mapped drive with write access.
+
+The manifest includes the stack launcher, Node bootstrap helper, and original
+UI runner together so the server does not execute stale startup dependencies.

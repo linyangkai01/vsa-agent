@@ -6,6 +6,8 @@ param(
         "environment.yml",
         "scripts\es-runtime-stack.ps1",
         "scripts\es-runtime-stack.sh",
+        "scripts\bootstrap_node.sh",
+        "scripts\run_original_ui_vss.sh",
         "scripts\es_ingest_smoke.py",
         "src\vsa_agent\config.py",
         "src\vsa_agent\api\routes.py",

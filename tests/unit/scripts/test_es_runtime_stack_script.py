@@ -5,6 +5,7 @@ SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
 SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 ES_COMPOSE = Path("docker-compose.es.yml")
+PYPROJECT = Path("pyproject.toml")
 
 
 def _script_text() -> str:
@@ -25,6 +26,10 @@ def test_elasticsearch_uses_docker_managed_named_volume_by_default():
     assert "esdata:/usr/share/elasticsearch/data" in text
     assert "VSA_ES_VOLUME_NAME:-vsa-agent-es-data" in text
     assert "VSA_ES_DATA_DIR" not in text
+
+
+def test_runtime_stack_declares_its_asgi_server_dependency():
+    assert '"uvicorn>=0.30"' in PYPROJECT.read_text(encoding="utf-8")
 
 
 def test_es_runtime_stack_script_exists():
@@ -152,6 +157,42 @@ def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
         assert required in text
 
 
+def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
+    text = _bash_script_text()
+
+    for required in (
+        "wait_ui_health", "UI_URL=", "UI_LOG_PATH=", "UI_ERR_LOG_PATH=",
+        "Original UI process exited before readiness", "tail -n 100",
+    ):
+        assert required in text
+
+
+def test_linux_stack_uses_port_discovery_fallbacks_without_killing_es_proxy():
+    text = _bash_script_text()
+
+    assert "command -v lsof" in text
+    assert "command -v fuser" in text
+    assert 'for port in "$API_PORT" "$UI_PORT"' in text
+    assert 'pids="$(port_listener_pids "$port")" || return 1' in text
+    assert "PORT_TERMINATION_GRACE_SEC=5" in text
+
+
+def test_linux_stack_preflights_python_and_reports_each_service_failure():
+    text = _bash_script_text()
+
+    for required in (
+        "verify_python_runtime",
+        "aiohttp",
+        "elasticsearch[async]>=8.14,<9",
+        "FastAPI error log",
+        "Elasticsearch logs",
+        "docker compose -f docker-compose.es.yml logs --tail=100 elasticsearch",
+        "kill -KILL",
+        "Original UI exited after readiness",
+    ):
+        assert required in text
+
+
 def test_linux_stack_bootstraps_node_and_ui_dependencies_before_starting_ui():
     text = _bash_script_text()
 
@@ -197,6 +238,8 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert "[switch]$PreflightOnly" in text
     assert '"docker-compose.es.yml"' in text
     assert '"src\\vsa_agent\\api\\video_search_ingest.py"' in text
+    assert '"scripts\\bootstrap_node.sh"' in text
+    assert '"scripts\\run_original_ui_vss.sh"' in text
 
 
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():

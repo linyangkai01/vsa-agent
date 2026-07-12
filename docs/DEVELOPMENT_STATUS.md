@@ -1,6 +1,6 @@
 # Development Status
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 ## Current State
 
@@ -62,12 +62,12 @@ Result: valid before archive.
 Current command for the next validation pass:
 
 ```bash
-./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings --conda-env vsa-agent
 ```
 
 Operational guide: `docs/superpowers/reference/es-video-search-runtime.md`.
 
-Server validation status: `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`. Current Codex sandbox attempts can read `Z:\vsa-agent` but receive `Access denied` on writes; if that happens, run the same script from the normal Windows PowerShell session that owns the `Z:` mapping.
+Server validation status: backend ES/API smoke validation has passed on Ubuntu after the named Docker volume, async client, ES 8.x client, mapping, and deterministic smoke-query fixes. Original UI startup was blocked by unavailable `npm`; the active launcher now bootstraps a repository-local Node runtime, validates Python dependencies before launch, and writes UI/API/ES failure diagnostics. Sync and browser validation remain pending. `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`. Current Codex sandbox attempts can read `Z:\vsa-agent` but receive `Access denied` on writes; if that happens, run the same script from the normal Windows PowerShell session that owns the `Z:` mapping.
 
 ## Next Recommended Work
 

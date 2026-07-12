@@ -9,6 +9,7 @@ CONDA_ENV=""
 TIMEOUT_SEC=90
 STOP_ELASTICSEARCH=0
 SMOKE_ONLY=0
+PORT_TERMINATION_GRACE_SEC=5
 
 usage() {
   cat <<'EOF'
@@ -79,15 +80,68 @@ RUNTIME_DIR="$REPO_ROOT/.runtime/es-stack"
 CONFIG_PATH="$RUNTIME_DIR/config.yaml"
 API_LOG_PATH="$RUNTIME_DIR/api.log"
 API_ERR_LOG_PATH="$RUNTIME_DIR/api.err.log"
+UI_LOG_PATH="$RUNTIME_DIR/ui.log"
+UI_ERR_LOG_PATH="$RUNTIME_DIR/ui.err.log"
 API_URL="http://127.0.0.1:${API_PORT}"
 API_HEALTH_URL="${API_URL}/health"
+UI_URL="http://127.0.0.1:${UI_PORT}"
 ES_ENDPOINT="http://127.0.0.1:${ES_PORT}"
 API_PID=""
 UI_PID=""
 
-port_listener_pids() { lsof -ti "TCP:$1" -sTCP:LISTEN 2>/dev/null || true; }
-wait_for_port_free() { local deadline=$((SECONDS + TIMEOUT_SEC)); while [[ -n "$(port_listener_pids "$1")" ]]; do (( SECONDS >= deadline )) && { echo "ERROR: port $1 was not released" >&2; return 1; }; sleep 1; done; }
-reclaim_port() { local pid; for pid in $(port_listener_pids "$1"); do echo "Reclaiming port $1 from PID $pid: $(ps -p "$pid" -o args=)"; kill -TERM "$pid" || true; done; wait_for_port_free "$1"; }
+port_listener_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "TCP:$1" -sTCP:LISTEN 2>/dev/null || true
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "$1" 2>/dev/null | tr ' ' '\n' || true
+  else
+    echo "ERROR: lsof or fuser is required to reclaim API/UI ports" >&2
+    return 127
+  fi
+}
+wait_for_port_free() {
+  local port="$1" deadline=$((SECONDS + TIMEOUT_SEC))
+  local force_deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC)) pids pid forced=0
+  while true; do
+    pids="$(port_listener_pids "$port")" || return 1
+    [[ -z "$pids" ]] && return 0
+
+    if (( SECONDS >= deadline )); then
+      echo "ERROR: port $port was not released; remaining PID(s): $pids" >&2
+      return 1
+    fi
+    if (( forced == 0 && SECONDS >= force_deadline )); then
+      echo "Port $port remained occupied after TERM; forcing remaining listener(s) to stop." >&2
+      for pid in $pids; do
+        kill -KILL "$pid" >/dev/null 2>&1 || true
+      done
+      forced=1
+    fi
+    sleep 1
+  done
+}
+
+reclaim_port() {
+  local port="$1" pids pid
+  pids="$(port_listener_pids "$port")" || return 1
+  for pid in $pids; do
+    echo "Reclaiming port $port from PID $pid: $(ps -p "$pid" -o args= 2>/dev/null || true)"
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+  done
+  wait_for_port_free "$port"
+}
+
+tail_log() {
+  local label="$1" path="$2"
+  [[ -f "$path" ]] || return 0
+  echo "--- ${label}: ${path} ---" >&2
+  tail -n 100 "$path" >&2 || true
+}
+
+report_elasticsearch_logs() {
+  echo "--- Elasticsearch logs ---" >&2
+  docker compose -f docker-compose.es.yml logs --tail=100 elasticsearch >&2 || true
+}
 
 cleanup() {
   if [[ -n "$UI_PID" ]] && kill -0 "$UI_PID" >/dev/null 2>&1; then
@@ -108,9 +162,12 @@ cleanup() {
 
   [[ -f "$API_LOG_PATH" ]] && echo "API log: $API_LOG_PATH"
   [[ -f "$API_ERR_LOG_PATH" ]] && echo "API error log: $API_ERR_LOG_PATH"
+  [[ -f "$UI_LOG_PATH" ]] && echo "UI log: $UI_LOG_PATH"
+  [[ -f "$UI_ERR_LOG_PATH" ]] && echo "UI error log: $UI_ERR_LOG_PATH"
   [[ -f "$CONFIG_PATH" ]] && echo "Temporary config retained: $CONFIG_PATH"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -125,6 +182,31 @@ python_cmd() {
   else
     python "$@"
   fi
+}
+
+verify_python_runtime() {
+  python_cmd - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    import aiohttp  # noqa: F401
+    import elasticsearch  # noqa: F401
+    import uvicorn  # noqa: F401
+    client_version = version("elasticsearch")
+except (ImportError, PackageNotFoundError) as exc:
+    raise SystemExit(
+        "ERROR: Python runtime requires aiohttp and elasticsearch[async]>=8.14,<9. "
+        "Install the project dependencies in the selected conda environment. "
+        f"Missing dependency: {exc}"
+    )
+
+major, minor = (int(part) for part in client_version.split(".")[:2])
+if (major, minor) < (8, 14) or major >= 9:
+    raise SystemExit(
+        "ERROR: Elasticsearch Python client must satisfy elasticsearch[async]>=8.14,<9; "
+        f"found {client_version!r}."
+    )
+PY
 }
 
 port_available() {
@@ -196,6 +278,7 @@ wait_http_health() {
   while (( SECONDS < deadline )); do
     if [[ -n "$API_PID" ]] && ! kill -0 "$API_PID" >/dev/null 2>&1; then
       echo "ERROR: FastAPI process exited before health check succeeded" >&2
+      tail_log "FastAPI error log" "$API_ERR_LOG_PATH"
       return 1
     fi
 
@@ -208,6 +291,25 @@ wait_http_health() {
   done
 
   echo "ERROR: FastAPI did not become reachable at $API_HEALTH_URL within $TIMEOUT_SEC seconds" >&2
+  tail_log "FastAPI error log" "$API_ERR_LOG_PATH"
+  return 1
+}
+
+wait_ui_health() {
+  local deadline=$((SECONDS + TIMEOUT_SEC))
+  while (( SECONDS < deadline )); do
+    if [[ -n "$UI_PID" ]] && ! kill -0 "$UI_PID" >/dev/null 2>&1; then
+      echo "ERROR: Original UI process exited before readiness" >&2
+      tail_log "UI error log" "$UI_ERR_LOG_PATH"
+      return 1
+    fi
+    if curl -fsS "$UI_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: Original UI did not become reachable at $UI_URL within $TIMEOUT_SEC seconds" >&2
+  tail_log "UI error log" "$UI_ERR_LOG_PATH"
   return 1
 }
 
@@ -218,20 +320,26 @@ require_command setsid
 if [[ -n "$CONDA_ENV" ]]; then
   require_command conda
 fi
+verify_python_runtime
 
 mkdir -p "$RUNTIME_DIR"
 cd "$REPO_ROOT"
 
-for port in "$ES_PORT" "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
+for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
 export VSA_ES_PORT="$ES_PORT"
 export VSA_ES_CONTAINER_NAME="vsa-agent-es"
-docker compose -f docker-compose.es.yml up -d
+if ! docker compose -f docker-compose.es.yml up -d; then
+  echo "ERROR: Docker Compose could not start Elasticsearch." >&2
+  report_elasticsearch_logs
+  exit 1
+fi
 
 deadline=$((SECONDS + TIMEOUT_SEC))
 until curl -fsS "$ES_ENDPOINT" >/dev/null 2>&1; do
   if (( SECONDS >= deadline )); then
     echo "ERROR: Elasticsearch did not become reachable at $ES_ENDPOINT within $TIMEOUT_SEC seconds" >&2
+    report_elasticsearch_logs
     exit 1
   fi
   sleep 2
@@ -264,7 +372,13 @@ echo "  index: $INDEX"
 echo "  config: $CONFIG_PATH"
 if [[ "$SMOKE_ONLY" == "0" ]]; then
   ensure_ui_runtime
-  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$RUNTIME_DIR/ui.log" 2>"$RUNTIME_DIR/ui.err.log" &
+  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$UI_LOG_PATH" 2>"$UI_ERR_LOG_PATH" &
   UI_PID=$!
-  wait "$UI_PID"
+  wait_ui_health
+  echo "  ui:  $UI_URL"
+  if ! wait "$UI_PID"; then
+    echo "ERROR: Original UI exited after readiness" >&2
+    tail_log "UI error log" "$UI_ERR_LOG_PATH"
+    exit 1
+  fi
 fi
