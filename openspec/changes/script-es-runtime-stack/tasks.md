@@ -22,11 +22,16 @@
 - [x] 4.3 Attempt real stack validation if Docker and the runtime environment are available; otherwise record the exact blocker.
 - [ ] 4.4 Finish on the local development branch, merge locally to `master`, push only remote `master`, and archive the Comet change after verification passes.
 
+## 8. Verification Edge Cases
+
+- [x] 6.4 Make smoke cleanup skip stale-record deletion when the configured Elasticsearch index does not yet exist.
+
 ## 5. Interactive Original-UI ES Validation
 
 - [x] 5.1 Add a tested `/api/v1/search` route that preserves the original VSS Search request and `{data: [...]}` response contract while reusing SearchAgent and registered `embed_search`.
 - [x] 5.2 Extend the Windows and Linux ES stack launchers with an interactive all-stack mode that reclaims only selected ES/API/UI ports, starts the original UI, and retains owned services until interruption.
 - [x] 5.3 Add focused tests and documentation for the search route, UI runtime environment, port-reclamation behavior, browser validation evidence, and mapped-server sync.
+- [x] 5.4 Make the Windows interactive launcher wait for an HTTP-ready original UI and fail on early or non-zero UI exit while retaining UI log paths.
 
 ## 6. 运行时产物清理
 

@@ -113,6 +113,14 @@ config file passed via `VSA_CONFIG`.
    application search events flow into the existing API log files without
    logging result payloads or changing service behavior.
 
+10. Treat first-run and UI readiness failures as validation failures.
+
+   The smoke cleanup checks whether the configured index exists before issuing
+   a stale-record deletion, so a fresh ES volume can proceed to ingest and
+   create the index. The Windows interactive launcher polls the original UI
+   URL after starting it, checks for early/non-zero process exit, and reports
+   the UI log paths before declaring the stack ready.
+
 ## Risks / Trade-offs
 
 - Docker may be unavailable locally or through the mapped drive -> the script

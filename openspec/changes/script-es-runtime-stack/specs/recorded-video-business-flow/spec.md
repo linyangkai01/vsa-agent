@@ -52,6 +52,20 @@ and FastAPI API process.
 - **AND** it does not report runtime smoke validation as successful
 - **AND** the server sync documentation keeps the scripts available at `Z:\vsa-agent` for execution when the dependency is available
 
+#### Scenario: Fresh runtime validation starts without a pre-existing ES index
+
+- **GIVEN** the configured Elasticsearch index does not exist on a fresh runtime volume
+- **WHEN** the smoke validation removes stale validation records before ingest
+- **THEN** it skips stale-record deletion without treating the missing index as an Elasticsearch failure
+- **AND** it continues to ingest the validation document so the API can create the configured index
+
+#### Scenario: Windows interactive runtime confirms original UI readiness
+
+- **GIVEN** interactive runtime mode starts the original UI process
+- **WHEN** the UI process exits before serving its configured HTTP URL or exits non-zero after becoming ready
+- **THEN** the launcher reports a validation failure with the process exit status
+- **AND** it prints the UI stdout and stderr log paths for diagnosis
+
 #### Scenario: Interactive runtime stack starts the original UI
 
 - **GIVEN** the user selects interactive runtime mode

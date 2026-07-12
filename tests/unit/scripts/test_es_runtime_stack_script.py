@@ -199,6 +199,20 @@ def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
         assert required in text
 
 
+def test_windows_stack_waits_for_ui_readiness_and_reports_failures():
+    text = _script_text()
+
+    for required in (
+        "Wait-UiReady",
+        "Invoke-WebRequest",
+        "Original UI process exited before readiness",
+        "Original UI did not become reachable",
+        "UI log:",
+        "UI error log:",
+    ):
+        assert required in text
+
+
 def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
     text = _bash_script_text()
     for required in (

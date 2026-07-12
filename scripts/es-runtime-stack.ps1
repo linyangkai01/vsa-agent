@@ -74,6 +74,32 @@ function Wait-HttpHealth {
     throw "FastAPI did not become reachable at $Url within $TimeoutSec seconds"
 }
 
+function Wait-UiReady {
+    param(
+        [string]$Url,
+        [int]$TimeoutSec,
+        [System.Diagnostics.Process]$Process
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        if ($Process.HasExited) {
+            throw "Original UI process exited before readiness. ExitCode=$($Process.ExitCode)"
+        }
+
+        try {
+            $response = Invoke-WebRequest -Uri $Url -TimeoutSec 5 -UseBasicParsing
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+                return
+            }
+        } catch {
+            Start-Sleep -Seconds 2
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Original UI did not become reachable at $Url within $TimeoutSec seconds"
+}
+
 function Write-SearchConfig {
     param(
         [string]$SourceConfig,
@@ -144,6 +170,7 @@ $uiLogPath = Join-Path $runtimeDir "ui.log"
 $uiErrLogPath = Join-Path $runtimeDir "ui.err.log"
 $apiUrl = "http://127.0.0.1:$ApiPort"
 $apiHealthUrl = "$apiUrl/health"
+$uiUrl = "http://127.0.0.1:$UiPort"
 $esEndpoint = "http://127.0.0.1:$EsPort"
 $apiProcess = $null
 $uiProcess = $null
@@ -197,19 +224,26 @@ try {
         throw "ES ingest/search smoke failed with exit code $LASTEXITCODE"
     }
 
-    Write-Host "PASS: ES runtime stack validation succeeded"
-    Write-Host "  api: $apiUrl"
-    Write-Host "  es:  $esEndpoint"
-    Write-Host "  index: $Index"
-    Write-Host "  config: $configPath"
     if (-not $SmokeOnly) {
         $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = "true"
         $env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"
         $env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"
         $env:PORT = "$UiPort"
         $uiProcess = Start-Process -FilePath "bash" -ArgumentList @("scripts/run_original_ui_vss.sh") -WorkingDirectory $repoRoot -RedirectStandardOutput $uiLogPath -RedirectStandardError $uiErrLogPath -PassThru
+        Wait-UiReady -Url $uiUrl -TimeoutSec $TimeoutSec -Process $uiProcess
+        Write-Host "  ui:  $uiUrl"
         Wait-Process -Id $uiProcess.Id
+        $uiProcess.Refresh()
+        if ($uiProcess.ExitCode -ne 0) {
+            throw "Original UI exited after readiness. ExitCode=$($uiProcess.ExitCode)"
+        }
     }
+
+    Write-Host "PASS: ES runtime stack validation succeeded"
+    Write-Host "  api: $apiUrl"
+    Write-Host "  es:  $esEndpoint"
+    Write-Host "  index: $Index"
+    Write-Host "  config: $configPath"
 } finally {
     Stop-OwnedProcessTree -Process $uiProcess
     Stop-OwnedProcessTree -Process $apiProcess
@@ -230,6 +264,12 @@ try {
     }
     if (Test-Path -LiteralPath $apiErrLogPath) {
         Write-Host "API error log: $apiErrLogPath"
+    }
+    if (Test-Path -LiteralPath $uiLogPath) {
+        Write-Host "UI log: $uiLogPath"
+    }
+    if (Test-Path -LiteralPath $uiErrLogPath) {
+        Write-Host "UI error log: $uiErrLogPath"
     }
     if (Test-Path -LiteralPath $configPath) {
         Write-Host "Temporary config retained: $configPath"

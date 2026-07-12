@@ -7,7 +7,7 @@ subagent_dispatch: null
 tdd_mode: tdd
 review_mode: standard
 isolation: branch
-verify_mode: null
+verify_mode: full
 auto_transition: true
 base_ref: 398294a5f0a28fcf1c1284109e8a4ab43ccf8a03
 design_doc: docs/superpowers/specs/2026-07-06-script-es-runtime-stack-design.md
@@ -19,4 +19,9 @@ created_at: 2026-07-06
 verified_at: null
 archived: false
 handoff_context: openspec/changes/script-es-runtime-stack/.comet/handoff/design-context.json
-handoff_hash: 50aae025a38ee6f8aedd35b764ca2d474db560b64173b0e97eef24beb935a543
+handoff_hash: 92c159f4ebcebb26794732f6ee0be4eb456354954d2bd086a06a623696bcc844
+language: null
+direct_override: null
+classic_profile: full
+classic_migration: 1
+run_id: c0e72901-0f13-4ad7-b0bb-1cb3d6af12a0

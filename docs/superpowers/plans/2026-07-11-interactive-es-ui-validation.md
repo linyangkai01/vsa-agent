@@ -54,7 +54,7 @@ base-ref: a20786b41a8827781dda08846866c1eeb7d0e999
 - Produces: `POST /api/v1/search` with response `SearchOutput` serialized as `{"data": [SearchResult, ...]}`.
 - Calls: `execute_search(search_input: SearchAgentInput) -> SearchOutput` from `src/vsa_agent/agents/search_agent.py`; it resolves registered `embed_search` through `ToolRegistry` and emits `search_agent.embed_search` in the embed-only path.
 
-- [ ] **Step 1: 写入会失败的路由测试**
+- [x] **Step 1: 写入会失败的路由测试**
 
 ```python
 # tests/unit/api/test_original_ui_search_route.py
@@ -99,13 +99,13 @@ def test_vss_search_route_is_registered_on_application():
     assert "/api/v1/search" in {route.path for route in app.routes}
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `python -m pytest tests/unit/api/test_original_ui_search_route.py -q`
 
 Expected: FAIL，提示 `vsa_agent.api.original_ui_search` 尚不存在。
 
-- [ ] **Step 3: 实现最小 adapter 并挂载 router**
+- [x] **Step 3: 实现最小 adapter 并挂载 router**
 
 ```python
 # src/vsa_agent/api/original_ui_search.py
@@ -134,13 +134,13 @@ async def original_ui_search(request: SearchInput) -> SearchOutput:
 
 Add `from vsa_agent.api.original_ui_search import router as original_ui_search_router` and `app.router.routes.extend(original_ui_search_router.routes)` beside the existing ingest router setup. In each existing `search_agent.embed_search` success/error trace branch, add a matching `logger.info("search_agent.embed_search path=%s query=%r", path, query)` before returning so `api.log` contains the event name without logging credentials or whole result payloads.
 
-- [ ] **Step 4: 运行路由与 agent 回归测试**
+- [x] **Step 4: 运行路由与 agent 回归测试**
 
 Run: `python -m pytest tests/unit/api/test_original_ui_search_route.py tests/unit/api/test_video_search_ingest.py tests/unit/agents/test_search_agent.py -q`
 
 Expected: PASS；路由测试证明原版 `data.data` 消费契约与 agent 参数转换没有回归。
 
-- [ ] **Step 5: 提交该可测试单元**
+- [x] **Step 5: 提交该可测试单元**
 
 ```powershell
 git add src/vsa_agent/api/original_ui_search.py src/vsa_agent/api/routes.py src/vsa_agent/agents/search_agent.py tests/unit/api/test_original_ui_search_route.py tests/unit/agents/test_search_agent.py
@@ -157,7 +157,7 @@ git commit -m "feat: expose original UI search through search agent"
 - Consumes: `/api/search/ingest`，以及 Task 1 的 `/api/v1/search`。
 - Produces: `post_original_ui_search(api_url, query, top_k, timeout_sec) -> dict[str, Any]`；成功输出仍包含 `PASS: Elasticsearch ingest and search smoke validation`。
 
-- [ ] **Step 1: 增加失败测试，先固定新请求和向量维度**
+- [x] **Step 1: 增加失败测试，先固定新请求和向量维度**
 
 ```python
 def test_post_original_ui_search_posts_vss_contract(monkeypatch):
@@ -169,13 +169,13 @@ def test_post_original_ui_search_posts_vss_contract(monkeypatch):
     assert captured["body"] == {"query": "forklift near worker", "top_k": 1, "source_type": "video_file", "agent_mode": False}
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `python -m pytest tests/unit/scripts/test_es_ingest_smoke.py -q`
 
 Expected: FAIL，缺少 `post_original_ui_search`。
 
-- [ ] **Step 3: 实现 API 搜索 smoke**
+- [x] **Step 3: 实现 API 搜索 smoke**
 
 在 `scripts/es_ingest_smoke.py` 添加下列纯函数，并在 `_run` 的 ingest、直接 ES `multi_match` 验证之后调用它：
 
@@ -198,13 +198,13 @@ def post_original_ui_search(api_url: str, query: str, top_k: int, timeout_sec: f
 
 Change `sample_payload(video_id, vector)` to receive `mock_query_vector(args.search_query)` and add `--search-query` default `forklift near worker`. This gives the ingested document the same four dimensions as the mock embed search query; retain the direct ES document and keyword-search assertions, then require the route response to contain the sample `video_name`. Do not call a remote embedding service in this script.
 
-- [ ] **Step 4: 运行 smoke 单元测试**
+- [x] **Step 4: 运行 smoke 单元测试**
 
 Run: `python -m pytest tests/unit/scripts/test_es_ingest_smoke.py -q`
 
 Expected: PASS；所有请求都被 fake `urlopen`/fake ES 捕获，未启动 Docker。
 
-- [ ] **Step 5: 提交该可测试单元**
+- [x] **Step 5: 提交该可测试单元**
 
 ```powershell
 git add scripts/es_ingest_smoke.py tests/unit/scripts/test_es_ingest_smoke.py
@@ -222,7 +222,7 @@ git commit -m "test: verify original UI search API in ES smoke"
 - Consumes: `ApiPort=8000`, `EsPort=9200`, new `UiPort=3000`, `CondaEnv`, `TimeoutSec`, `StopElasticsearch` and existing `run_original_ui_vss.sh`。
 - Produces: 默认交互式运行；`-SmokeOnly` / `--smoke-only` 为 CI 保留验证后退出路径；UI 使用 `NEXT_PUBLIC_ENABLE_SEARCH_TAB=true`、`NEXT_PUBLIC_AGENT_API_URL_BASE=http://127.0.0.1:<ApiPort>/api/v1` 与 `PORT=<UiPort>`。
 
-- [ ] **Step 1: 先扩展离线脚本契约测试**
+- [x] **Step 1: 先扩展离线脚本契约测试**
 
 ```python
 def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
@@ -242,13 +242,13 @@ def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
         assert required in text
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py -q`
 
 Expected: FAIL，因为两份启动器还没有 UI、端口接管或 smoke-only 接口。
 
-- [ ] **Step 3: 实现 PowerShell 生命周期**
+- [x] **Step 3: 实现 PowerShell 生命周期**
 
 在参数中加入 `[int]$UiPort = 3000` 和 `[switch]$SmokeOnly`。以以下 helper 替换仅检测 `$ApiPort` 的逻辑，并在调用 `es-dev-start.ps1` 前依次对 `$EsPort,$ApiPort,$UiPort` 执行：
 
@@ -272,7 +272,7 @@ function Reclaim-Port {
 
 新增 `$uiProcess`、`ui.log`、`ui.err.log`、`Wait-HttpReachable`；使用临时环境变量启动 `bash scripts/run_original_ui_vss.sh`，传入 `PORT=$UiPort` 与三个 `NEXT_PUBLIC_*` 值。API health、ingest/API search smoke、UI HTTP 探测均成功后打印 UI/API/ES/index/log 路径。若非 `SmokeOnly`，运行 `Wait-Process -Id $uiProcess.Id`；在 `finally` 对 `$uiProcess` 和 `$apiProcess` 调用现有 `Stop-OwnedProcessTree`，仅在 `StopElasticsearch` 时调用 `es-dev-stop.ps1`，随后恢复父 shell 环境变量。
 
-- [ ] **Step 4: 实现 bash 生命周期**
+- [x] **Step 4: 实现 bash 生命周期**
 
 加入 `UI_PORT=3000`、`SMOKE_ONLY=0`、`UI_PID=""` 和参数解析。实现 `port_listener_pids`（优先 `lsof -ti TCP:$1 -sTCP:LISTEN`，退回 `fuser -n tcp`/`ss`）、`reclaim_port`（打印 `pid` 与 `ps -p "$pid" -o args=`，先 `kill -TERM`，超时后 `kill -KILL`，调用 `wait_for_port_free`）、`wait_http_reachable`。在所有三个端口释放后才运行 `docker compose`，并用下列环境启动独立 UI 进程组：
 
@@ -287,7 +287,7 @@ UI_PID=$!
 
 `cleanup` 必须仅终止非空的 `API_PID`/`UI_PID` 进程组，打印四个日志路径，并保留现有 `STOP_ELASTICSEARCH` 行为。`SMOKE_ONLY=1` 时在 smoke 后正常退出；默认等待 UI PID，使 `Ctrl+C` 触发 trap。
 
-- [ ] **Step 5: 运行静态、语法与焦点测试**
+- [x] **Step 5: 运行静态、语法与焦点测试**
 
 Run:
 
@@ -299,7 +299,7 @@ bash -n scripts/es-runtime-stack.sh
 
 Expected: pytest 全部 PASS；两个语法检查均打印/返回成功。若当前 Windows shell 的 bash 不能创建信号管道，只记录该精确环境限制，Ubuntu 必须补跑 `bash -n`。
 
-- [ ] **Step 6: 提交该可测试单元**
+- [x] **Step 6: 提交该可测试单元**
 
 ```powershell
 git add scripts/es-runtime-stack.ps1 scripts/es-runtime-stack.sh tests/unit/scripts/test_es_runtime_stack_script.py
@@ -320,7 +320,7 @@ git commit -m "feat: run interactive ES API and original UI stack"
 - Consumes: Tasks 1-3 的脚本、API、单元测试。
 - Produces: Windows/Ubuntu 命令、浏览器证据步骤、精确同步 manifest 与包含成功或阻塞证据的验证报告。
 
-- [ ] **Step 1: 先写出文档验收清单**
+- [x] **Step 1: 先写出文档验收清单**
 
 在运行文档新增以下命令和验收项：
 
@@ -331,7 +331,7 @@ cd /data/project/lyk/vsa-agent
 
 浏览器打开 `http://127.0.0.1:3000`，进入已启用的 Search 页，输入 `forklift near worker`，确认结果中出现 `runtime-validation.mp4`。同一时间在 `.runtime/es-stack/api.log` 找到 `original_ui.search.request` 和 `search_agent.embed_search`，并使用 `curl http://127.0.0.1:9200/vsa-video-embeddings/_search` 确认索引记录。说明 `Ctrl+C` 只清理本次 API/UI，`--stop-elasticsearch` 才停止 ES，且三个指定端口上已有进程会被终止且不会恢复。
 
-- [ ] **Step 2: 更新同步清单与状态**
+- [x] **Step 2: 更新同步清单与状态**
 
 在 `IncludePaths` 加入：
 
@@ -348,7 +348,7 @@ docs\superpowers\reports\2026-07-11-interactive-es-ui-validation.md
 
 更新状态文件：目标改为“交互式 ES/API/UI 与原版 VSS Search 验证”，下一条服务器命令改为本任务命令。仅在单元、OpenSpec、服务器浏览器验收都已有证据后勾选 `tasks.md` 的 5.1-5.3。
 
-- [ ] **Step 3: 本地验证、同步与服务器验证**
+- [x] **Step 3: 本地验证、同步与服务器验证**
 
 Run:
 
@@ -361,7 +361,7 @@ npx openspec validate script-es-runtime-stack
 
 Expected: 测试与 OpenSpec PASS，sync 输出每个显式文件。随后在服务器运行 Step 1 命令，收集浏览器结果、`api.log` 两个事件和 ES `_search` 的输出写入报告；Docker、conda、Node 或权限失败必须逐字记录为 BLOCKED，不能标记通过。
 
-- [ ] **Step 4: 提交验证资料**
+- [x] **Step 4: 提交验证资料**
 
 ```powershell
 git add docs/superpowers/reference/es-video-search-runtime.md docs/DEVELOPMENT_STATUS.md scripts/sync-server-files.ps1 openspec/changes/script-es-runtime-stack/tasks.md openspec/changes/script-es-runtime-stack/.comet.yaml docs/superpowers/reports/2026-07-11-interactive-es-ui-validation.md
@@ -394,11 +394,11 @@ Which approach?
 - Modify: `tests/unit/api/test_video_search_ingest.py`
 - Modify: `tests/unit/scripts/test_es_ingest_smoke.py`
 
-- [ ] 先在 API 单元测试中断言 `AsyncElasticsearch.index()` 接收 `id="video-1"`；在 smoke 参数测试中断言默认 `--video-id` 为 `runtime-validation-video`。
-- [ ] 运行两个聚焦测试，确认现有实现分别因缺少 `id` 参数和时间戳默认 ID 而失败。
-- [ ] 在 ingest API 调用中传入 `id=request.video_id`；将 smoke 默认 ID 改为 `runtime-validation-video`，并在写入前仅删除视频名、传感器和 `runtime-yard` 元数据均匹配的历史验证文档。
-- [ ] 运行 `python -m pytest tests/unit/api/test_video_search_ingest.py tests/unit/scripts/test_es_ingest_smoke.py -q`。
-- [ ] 提交：`fix: keep ES smoke validation idempotent`。
+- [x] 先在 API 单元测试中断言 `AsyncElasticsearch.index()` 接收 `id="video-1"`；在 smoke 参数测试中断言默认 `--video-id` 为 `runtime-validation-video`。
+- [x] 运行两个聚焦测试，确认现有实现分别因缺少 `id` 参数和时间戳默认 ID 而失败。
+- [x] 在 ingest API 调用中传入 `id=request.video_id`；将 smoke 默认 ID 改为 `runtime-validation-video`，并在写入前仅删除视频名、传感器和 `runtime-yard` 元数据均匹配的历史验证文档。
+- [x] 运行 `python -m pytest tests/unit/api/test_video_search_ingest.py tests/unit/scripts/test_es_ingest_smoke.py -q`。
+- [x] 提交：`fix: keep ES smoke validation idempotent`。
 
 ### Task 6: 清理失效声明源映射
 
@@ -409,8 +409,8 @@ Which approach?
 - Modify: `scripts/sync-server-files.ps1`
 - Modify: `tests/unit/scripts/test_es_runtime_stack_script.py`
 
-- [ ] 先添加静态测试，要求三个文件都不包含 `sourceMappingURL=server.d.ts.map`，且同步清单包含三个文件。
-- [ ] 运行聚焦测试，确认其因现有陈旧引用和缺失同步清单失败。
-- [ ] 只删除三个 `sourceMappingURL` 注释，并将三个声明文件加入定向同步清单。
-- [ ] 运行 `python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py -q`；在服务器上重启运行栈，确认 UI 日志不再出现 `failed to read input source map`。
-- [ ] 提交：`fix: remove stale original UI declaration source maps`。
+- [x] 先添加静态测试，要求三个文件都不包含 `sourceMappingURL=server.d.ts.map`，且同步清单包含三个文件。
+- [x] 运行聚焦测试，确认其因现有陈旧引用和缺失同步清单失败。
+- [x] 只删除三个 `sourceMappingURL` 注释，并将三个声明文件加入定向同步清单。
+- [x] 运行 `python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py -q`；在服务器上重启运行栈，确认 UI 日志不再出现 `failed to read input source map`。
+- [x] 提交：`fix: remove stale original UI declaration source maps`。

@@ -138,6 +138,8 @@ async def delete_stale_validation_documents(
 ) -> None:
     es = AsyncElasticsearch(es_endpoint, request_timeout=timeout_sec, verify_certs=verify_certs)
     try:
+        if not await es.indices.exists(index=index):
+            return
         await es.delete_by_query(
             index=index,
             query=STALE_VALIDATION_DOCUMENT_QUERY,

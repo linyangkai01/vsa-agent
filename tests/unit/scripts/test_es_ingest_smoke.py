@@ -38,11 +38,17 @@ def test_default_smoke_video_id_is_stable():
 async def test_delete_stale_validation_documents_only_targets_smoke_metadata(monkeypatch):
     created_clients = []
 
+    class FakeIndices:
+        async def exists(self, index):
+            assert index == "vsa-video-embeddings"
+            return True
+
     class FakeAsyncElasticsearch:
         def __init__(self, endpoint, request_timeout, verify_certs):
             self.endpoint = endpoint
             self.request_timeout = request_timeout
             self.verify_certs = verify_certs
+            self.indices = FakeIndices()
             self.delete_calls = []
             self.closed = False
             created_clients.append(self)
@@ -78,6 +84,42 @@ async def test_delete_stale_validation_documents_only_targets_smoke_metadata(mon
             True,
         )
     ]
+    assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_delete_stale_validation_documents_skips_missing_index(monkeypatch):
+    created_clients = []
+
+    class FakeIndices:
+        async def exists(self, index):
+            assert index == "vsa-video-embeddings"
+            return False
+
+    class FakeAsyncElasticsearch:
+        def __init__(self, endpoint, request_timeout, verify_certs):
+            self.indices = FakeIndices()
+            self.delete_calls = 0
+            self.closed = False
+            created_clients.append(self)
+
+        async def delete_by_query(self, **kwargs):
+            self.delete_calls += 1
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.AsyncElasticsearch", FakeAsyncElasticsearch)
+
+    await delete_stale_validation_documents(
+        "http://es:9200",
+        index="vsa-video-embeddings",
+        timeout_sec=7.5,
+        verify_certs=False,
+    )
+
+    fake_client = created_clients[0]
+    assert fake_client.delete_calls == 0
     assert fake_client.closed is True
 
 
