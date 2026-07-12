@@ -67,6 +67,18 @@ def _create_es_client(search_config: SearchBackendConfig) -> AsyncElasticsearch:
     )
 
 
+async def _ensure_embed_index(es_client: AsyncElasticsearch, index: str, document: dict[str, Any]) -> None:
+    vector = document.get("vector")
+    if not isinstance(vector, list) or not vector:
+        return
+    if await es_client.indices.exists(index=index):
+        return
+    await es_client.indices.create(
+        index=index,
+        mappings={"properties": {"vector": {"type": "dense_vector", "dims": len(vector)}}},
+    )
+
+
 @router.post("/search/ingest")
 async def video_search_ingest(request: VideoSearchIngestRequest) -> VideoSearchIngestResponse:
     """Submit a video for search indexing."""
@@ -76,9 +88,11 @@ async def video_search_ingest(request: VideoSearchIngestRequest) -> VideoSearchI
 
     es_client = _create_es_client(search_config)
     try:
+        document = _build_ingest_document(request.video_id, request.metadata)
+        await _ensure_embed_index(es_client, search_config.embed_index, document)
         response = await es_client.index(
             index=search_config.embed_index,
-            document=_build_ingest_document(request.video_id, request.metadata),
+            document=document,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Elasticsearch indexing failed: {exc}") from exc

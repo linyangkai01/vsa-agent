@@ -9,6 +9,7 @@ param(
         "scripts\es_ingest_smoke.py",
         "src\vsa_agent\config.py",
         "src\vsa_agent\api\routes.py",
+        "src\vsa_agent\api\video_search_ingest.py",
         "src\vsa_agent\api\original_ui_search.py",
         "src\vsa_agent\agents\search_agent.py",
         "src\vsa_agent\tools\embed_search.py",

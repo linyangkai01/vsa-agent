@@ -188,6 +188,7 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert "[switch]$DryRun" in text
     assert "[switch]$PreflightOnly" in text
     assert '"docker-compose.es.yml"' in text
+    assert '"src\\vsa_agent\\api\\video_search_ingest.py"' in text
 
 
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():
