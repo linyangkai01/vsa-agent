@@ -15,6 +15,11 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   exit 2
 fi
 
+if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then
+  echo "DASHSCOPE_API_KEY is required via environment or ignored config.local.yaml." >&2
+  exit 2
+fi
+
 export DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
 export VSA_CONDA_ENV="${VSA_CONDA_ENV:-vsa-agent}"
 export VSA_PROFILE="${VSA_PROFILE:-dashscope_remote}"

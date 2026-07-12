@@ -9,6 +9,25 @@ from vsa_agent.config import AppConfig
 from vsa_agent.config import resolve_runtime_config
 
 
+def _assert_key_guard_precedes_config_resolution(script: Path) -> None:
+    text = script.read_text(encoding="utf-8")
+    guard = 'if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then'
+
+    assert guard in text
+    assert text.index(guard) < text.index(
+        'conda run -n "${VSA_CONDA_ENV}" python -m vsa_agent config doctor'
+    )
+
+
+def test_dashscope_runners_check_key_before_config_resolution():
+    _assert_key_guard_precedes_config_resolution(
+        Path("scripts/run_live_acceptance_dashscope.sh")
+    )
+    _assert_key_guard_precedes_config_resolution(
+        Path("scripts/run_live_top_agent_video_dashscope.sh")
+    )
+
+
 def test_dashscope_live_config_defines_non_secret_llm_and_vlm_defaults(monkeypatch):
     monkeypatch.setenv("VSA_PROFILE", "dashscope_remote")
     config = AppConfig.from_yaml("config.yaml")
@@ -94,6 +113,7 @@ def test_dashscope_runner_fails_before_pytest_without_api_key():
 
     env = os.environ.copy()
     env.pop("DASHSCOPE_API_KEY", None)
+    env["VSA_LOCAL_CONFIG"] = ""
     result = subprocess.run(
         ["bash", "scripts/run_live_acceptance_dashscope.sh"],
         cwd=Path.cwd(),
@@ -115,6 +135,7 @@ def test_dashscope_top_agent_video_runner_fails_without_api_key():
 
     env = os.environ.copy()
     env.pop("DASHSCOPE_API_KEY", None)
+    env["VSA_LOCAL_CONFIG"] = ""
     result = subprocess.run(
         ["bash", "scripts/run_live_top_agent_video_dashscope.sh", "video.mp4"],
         cwd=Path.cwd(),

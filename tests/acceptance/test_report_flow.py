@@ -7,6 +7,14 @@ from vsa_agent.agents.data_models import AgentOutput
 VALIDATION_FEEDBACK = "[non_empty_response_validator] FAILED: Response is empty"
 
 
+def _heading_levels(markdown_content: str) -> list[int]:
+    return [
+        len(line) - len(line.lstrip("#"))
+        for line in markdown_content.splitlines()
+        if line.startswith("#") and line.lstrip("#").startswith(" ")
+    ]
+
+
 @pytest.mark.anyio
 async def test_single_video_report_flow_returns_markdown_side_effect():
     from vsa_agent.agents.report_agent import ReportAgentInput
@@ -17,13 +25,13 @@ async def test_single_video_report_flow_returns_markdown_side_effect():
         return {
             "query": kwargs["query"],
             "source_type": kwargs["source_type"],
-            "summary_text": "person walking near forklift",
+            "summary_text": "forklift proximity summary",
             "chunks": [],
             "events": [
                 {
                     "start_timestamp": "00:00:05",
                     "end_timestamp": "00:00:09",
-                    "description": "person walking near forklift",
+                    "description": "person walking near forklift event",
                 }
             ],
         }
@@ -36,10 +44,13 @@ async def test_single_video_report_flow_returns_markdown_side_effect():
 
     assert isinstance(result, AgentOutput)
     assert result.status == "success"
-    assert result.side_effects["markdown_content"].startswith("# 单视频分析报告")
-    assert "## 视频源" in result.side_effects["markdown_content"]
-    assert "## 事件时间线" in result.side_effects["markdown_content"]
-    assert "person walking near forklift" in result.side_effects["markdown_content"]
+    markdown = result.side_effects["markdown_content"]
+    assert _heading_levels(markdown) == [1, 2, 2, 2, 2]
+    assert "- sensor_id: video.mp4" in markdown
+    assert "生成详细报告" in markdown
+    assert "forklift proximity summary" in markdown
+    assert "person walking near forklift event" in markdown
+    assert "[00:00:05 - 00:00:09]" in markdown
 
 
 @pytest.mark.anyio
@@ -73,7 +84,9 @@ async def test_single_video_report_flow_keeps_markdown_when_postprocessing_fails
     assert result.status == "success"
     assert result.metadata["validation_passed"] is False
     assert result.metadata["validation_feedback"] == [VALIDATION_FEEDBACK]
-    assert "## 校验反馈" in result.side_effects["markdown_content"]
+    markdown = result.side_effects["markdown_content"]
+    assert _heading_levels(markdown) == [1, 2, 2, 2, 2, 2]
+    assert VALIDATION_FEEDBACK in markdown
 
 
 @pytest.mark.anyio
