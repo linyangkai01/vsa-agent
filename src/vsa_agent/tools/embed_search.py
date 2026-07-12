@@ -339,7 +339,8 @@ async def _search_real_es(
             params={"query": query, "top_k": str(top_k)},
             source_type="video_file",
         )
-        query_embedding = await _generate_query_embedding(query_input, _create_default_embed_client())
+        embed_client = None if search_config.force_mock_embedding else _create_default_embed_client()
+        query_embedding = await _generate_query_embedding(query_input, embed_client)
         if not query_embedding:
             logger.warning("Could not generate query embedding for ES search")
             return None

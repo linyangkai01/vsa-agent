@@ -251,6 +251,7 @@ async def _execute_search_with_metadata(
                 "search_agent.embed_search",
                 {"path": "embed-only", "query": decomposed.query, "results": results},
             )
+            logger.info("search_agent.embed_search path=embed-only query=%r", decomposed.query)
             if isinstance(results, SearchOutput):
                 result = results
             elif hasattr(results, "data"):
@@ -263,6 +264,7 @@ async def _execute_search_with_metadata(
                 "search_agent.embed_search",
                 {"path": "embed-only", "query": decomposed.query, "error": str(e)},
             )
+            logger.info("search_agent.embed_search path=embed-only status=error query=%r", decomposed.query)
 
     elif has_action and has_attributes:
         logger.info("Path 3: fusion search")

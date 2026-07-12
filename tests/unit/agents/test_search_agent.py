@@ -1,6 +1,7 @@
 """Tests for agents/search_agent.py."""
 
 import inspect
+import logging
 
 import pytest
 
@@ -176,6 +177,22 @@ async def test_execute_search_keeps_returning_search_output():
 
     assert isinstance(result, SearchOutput)
     assert result.data[0].description == "forklift enters aisle"
+
+
+@pytest.mark.asyncio
+async def test_execute_search_logs_embed_search_execution(caplog):
+    from vsa_agent.agents.search_agent import execute_search
+
+    async def fake_embed_search():
+        return SearchOutput(data=[])
+
+    with caplog.at_level(logging.INFO, logger="vsa_agent.agents.search_agent"):
+        await execute_search(
+            SearchAgentInput(query="forklift near worker", agent_mode=False),
+            embed_search=fake_embed_search,
+        )
+
+    assert "search_agent.embed_search" in caplog.text
 
 
 def test_execute_search_public_signature_stays_stable():

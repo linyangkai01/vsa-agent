@@ -95,10 +95,18 @@ class TestVideoSearchIngest:
                 self.verify_certs = verify_certs
                 self.index_calls = []
                 self.closed = False
+                self.created_indices = []
+                self.indices = self
                 created_clients.append(self)
 
-            async def index(self, index, document):
-                self.index_calls.append((index, document))
+            async def exists(self, index):
+                return False
+
+            async def create(self, index, mappings):
+                self.created_indices.append((index, mappings))
+
+            async def index(self, index, document, id):
+                self.index_calls.append((index, document, id))
                 return {"_id": "es-doc-1", "result": "created"}
 
             async def close(self):
@@ -150,7 +158,11 @@ class TestVideoSearchIngest:
         assert fake_client.request_timeout == 12.5
         assert fake_client.verify_certs is False
         assert fake_client.closed is True
+        assert fake_client.created_indices == [
+            ("video-embeddings", {"properties": {"vector": {"type": "dense_vector", "dims": 3}}})
+        ]
         assert fake_client.index_calls[0][0] == "video-embeddings"
+        assert fake_client.index_calls[0][2] == "video-1"
         indexed_document = fake_client.index_calls[0][1]
         assert indexed_document["video_id"] == "video-1"
         assert indexed_document["video_name"] == "risk.mp4"
@@ -169,7 +181,7 @@ class TestVideoSearchIngest:
             def __init__(self, *args, **kwargs):
                 pass
 
-            async def index(self, index, document):
+            async def index(self, index, document, id):
                 raise RuntimeError("index rejected")
 
             async def close(self):

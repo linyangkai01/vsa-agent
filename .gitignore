@@ -30,4 +30,6 @@ config.local.yaml
 
 logs/
 data/
+!frontend/original-ui/packages/nemo-agent-toolkit-ui/utils/data/
+!frontend/original-ui/packages/nemo-agent-toolkit-ui/utils/data/*.ts
 .superpowers/

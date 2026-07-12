@@ -114,6 +114,50 @@ class TestBuildEsQuery:
 
 
 class TestEmbedSearchToolWithRealEs:
+    async def test_force_mock_embedding_skips_real_embedding_client(self, monkeypatch):
+        from vsa_agent.config import AppConfig, SearchBackendConfig
+        from vsa_agent.tools import embed_search
+
+        class FakeIndices:
+            async def exists(self, index):
+                return True
+
+        class FakeES:
+            def __init__(self):
+                self.indices = FakeIndices()
+                self.search_calls = []
+
+            async def search(self, index, body):
+                self.search_calls.append((index, body))
+                return {"hits": {"hits": []}}
+
+            async def close(self):
+                pass
+
+        fake_es = FakeES()
+        monkeypatch.setattr(
+            "vsa_agent.config.get_config",
+            lambda: AppConfig(
+                search=SearchBackendConfig(
+                    enabled=True,
+                    es_endpoint="http://es:9200",
+                    force_mock_embedding=True,
+                )
+            ),
+        )
+        monkeypatch.setattr(embed_search, "_create_es_client", lambda _cfg: fake_es)
+        monkeypatch.setattr(
+            embed_search,
+            "_create_default_embed_client",
+            lambda: (_ for _ in ()).throw(AssertionError("real embedding client must not be created")),
+        )
+
+        await embed_search.embed_search_tool("forklift near worker", top_k=1)
+
+        seed = sum(ord(char) for char in "forklift near worker") % 1000
+        vector = fake_es.search_calls[0][1]["query"]["script_score"]["script"]["params"]["query_vector"]
+        assert vector == [seed * 0.001, seed * 0.002, seed * 0.003, (seed % 100) * 0.01]
+
     async def test_uses_configured_es_and_embedding_client(self, monkeypatch):
         from vsa_agent.config import AppConfig, SearchBackendConfig
         from vsa_agent.tools import embed_search

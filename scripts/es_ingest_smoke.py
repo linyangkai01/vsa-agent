@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 from typing import Any
 from urllib.request import Request
 from urllib.request import urlopen
@@ -13,7 +12,23 @@ from urllib.request import urlopen
 from elasticsearch import AsyncElasticsearch
 
 
-def sample_payload(video_id: str) -> dict[str, Any]:
+VALIDATION_VIDEO_ID = "runtime-validation-video"
+STALE_VALIDATION_DOCUMENT_QUERY = {
+    "bool": {
+        "filter": [
+            {"term": {"video_name.keyword": "runtime-validation.mp4"}},
+            {"term": {"sensor_id.keyword": "camera-runtime-1"}},
+            {"term": {"metadata.site.keyword": "runtime-yard"}},
+        ]
+    }
+}
+
+def mock_query_vector(query: str) -> list[float]:
+    seed = sum(ord(char) for char in query) % 1000
+    return [seed * 0.001, seed * 0.002, seed * 0.003, (seed % 100) * 0.01]
+
+
+def sample_payload(video_id: str, query: str = "forklift near worker") -> dict[str, Any]:
     return {
         "video_id": video_id,
         "metadata": {
@@ -23,7 +38,7 @@ def sample_payload(video_id: str) -> dict[str, Any]:
             "start_time": "2026-07-04T08:00:00Z",
             "end_time": "2026-07-04T08:00:05Z",
             "screenshot_url": "http://example.invalid/frames/runtime-validation.jpg",
-            "vector": [0.11, 0.22, 0.33],
+            "vector": mock_query_vector(query),
             "site": "runtime-yard",
         },
     }
@@ -74,6 +89,20 @@ def post_ingest(api_url: str, payload: dict[str, Any], timeout_sec: float) -> di
     return response_payload
 
 
+def post_original_ui_search(api_url: str, query: str, top_k: int, timeout_sec: float) -> dict[str, Any]:
+    request = Request(
+        f"{api_url.rstrip('/')}/api/v1/search",
+        data=json.dumps({"query": query, "top_k": top_k, "source_type": "video_file", "agent_mode": False}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise RuntimeError(f"Expected {{'data': [...]}} from /api/v1/search, got: {payload!r}")
+    return payload
+
+
 async def find_indexed_document(
     es_endpoint: str,
     index: str,
@@ -101,9 +130,29 @@ async def find_indexed_document(
     raise RuntimeError(f"Indexed document not found for video_id={video_id!r} in index={index!r}")
 
 
+async def delete_stale_validation_documents(
+    es_endpoint: str,
+    index: str,
+    timeout_sec: float,
+    verify_certs: bool,
+) -> None:
+    es = AsyncElasticsearch(es_endpoint, request_timeout=timeout_sec, verify_certs=verify_certs)
+    try:
+        if not await es.indices.exists(index=index):
+            return
+        await es.delete_by_query(
+            index=index,
+            query=STALE_VALIDATION_DOCUMENT_QUERY,
+            refresh=True,
+        )
+    finally:
+        await es.close()
+
+
 async def search_indexed_document(
     es_endpoint: str,
     index: str,
+    video_id: str,
     query: str,
     timeout_sec: float,
     verify_certs: bool,
@@ -112,9 +161,12 @@ async def search_indexed_document(
     try:
         body = {
             "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                "bool": {
+                    "must": [{"multi_match": {
+                        "query": query,
+                        "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
+                    }}],
+                    "filter": [{"term": {"video_id.keyword": video_id}}],
                 }
             },
             "size": 1,
@@ -137,8 +189,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-url", default=os.environ.get("VSA_API_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--es-endpoint", default=os.environ.get("VSA_ES_ENDPOINT"))
     parser.add_argument("--index", default=os.environ.get("VSA_ES_INDEX", "vsa-video-embeddings"))
-    parser.add_argument("--video-id", default=f"runtime-video-{int(time.time())}")
+    parser.add_argument("--video-id", default=VALIDATION_VIDEO_ID)
     parser.add_argument("--timeout-sec", type=float, default=30.0)
+    parser.add_argument("--search-query", default="forklift near worker")
     parser.add_argument("--insecure", action="store_true", help="Disable Elasticsearch TLS certificate verification.")
     args = parser.parse_args(argv)
     if not args.es_endpoint:
@@ -147,7 +200,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
-    payload = sample_payload(args.video_id)
+    await delete_stale_validation_documents(
+        args.es_endpoint,
+        index=args.index,
+        timeout_sec=args.timeout_sec,
+        verify_certs=not args.insecure,
+    )
+    payload = sample_payload(args.video_id, args.search_query)
     ingest_response = post_ingest(args.api_url, payload, timeout_sec=args.timeout_sec)
     validate_ingest_response(ingest_response, expected_video_id=args.video_id)
     document = await find_indexed_document(
@@ -161,6 +220,7 @@ async def _run(args: argparse.Namespace) -> None:
     search_hit = await search_indexed_document(
         args.es_endpoint,
         index=args.index,
+        video_id=args.video_id,
         query="forklift worker",
         timeout_sec=args.timeout_sec,
         verify_certs=not args.insecure,
@@ -169,6 +229,10 @@ async def _run(args: argparse.Namespace) -> None:
         raise RuntimeError(
             f"Search hit video_id mismatch: expected {args.video_id!r}, got {search_hit.get('video_id')!r}"
         )
+    ui_search = post_original_ui_search(args.api_url, args.search_query, 1, args.timeout_sec)
+    expected_name = payload["metadata"]["video_name"]
+    if expected_name not in {item.get("video_name") for item in ui_search["data"] if isinstance(item, dict)}:
+        raise RuntimeError(f"Original UI search did not return video_name={expected_name!r}: {ui_search!r}")
     print("PASS: Elasticsearch ingest and search smoke validation")
 
 

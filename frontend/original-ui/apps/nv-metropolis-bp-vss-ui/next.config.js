@@ -2,6 +2,9 @@
 const { configureRuntimeEnv } = require('next-runtime-env/build/configure');
 const { i18n } = require('./next-i18next.config');
 
+const internalAgentApiUrl =
+  process.env.VSA_INTERNAL_AGENT_API_URL_BASE || 'http://127.0.0.1:8000/api/v1';
+
 const nextConfig = {
   env: {
     ...configureRuntimeEnv(),
@@ -58,6 +61,14 @@ const nextConfig = {
   },
   async redirects() {
     return [];
+  },
+  async rewrites() {
+    return [
+      {
+        source: '/api/v1/:path*',
+        destination: `${internalAgentApiUrl}/:path*`,
+      },
+    ];
   },
 };
 
