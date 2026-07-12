@@ -12,6 +12,17 @@ from urllib.request import urlopen
 from elasticsearch import AsyncElasticsearch
 
 
+VALIDATION_VIDEO_ID = "runtime-validation-video"
+STALE_VALIDATION_DOCUMENT_QUERY = {
+    "bool": {
+        "filter": [
+            {"term": {"video_name.keyword": "runtime-validation.mp4"}},
+            {"term": {"sensor_id.keyword": "camera-runtime-1"}},
+            {"term": {"metadata.site.keyword": "runtime-yard"}},
+        ]
+    }
+}
+
 def mock_query_vector(query: str) -> list[float]:
     seed = sum(ord(char) for char in query) % 1000
     return [seed * 0.001, seed * 0.002, seed * 0.003, (seed % 100) * 0.01]
@@ -119,6 +130,23 @@ async def find_indexed_document(
     raise RuntimeError(f"Indexed document not found for video_id={video_id!r} in index={index!r}")
 
 
+async def delete_stale_validation_documents(
+    es_endpoint: str,
+    index: str,
+    timeout_sec: float,
+    verify_certs: bool,
+) -> None:
+    es = AsyncElasticsearch(es_endpoint, request_timeout=timeout_sec, verify_certs=verify_certs)
+    try:
+        await es.delete_by_query(
+            index=index,
+            query=STALE_VALIDATION_DOCUMENT_QUERY,
+            refresh=True,
+        )
+    finally:
+        await es.close()
+
+
 async def search_indexed_document(
     es_endpoint: str,
     index: str,
@@ -159,7 +187,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-url", default=os.environ.get("VSA_API_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--es-endpoint", default=os.environ.get("VSA_ES_ENDPOINT"))
     parser.add_argument("--index", default=os.environ.get("VSA_ES_INDEX", "vsa-video-embeddings"))
-    parser.add_argument("--video-id", default="runtime-validation-video")
+    parser.add_argument("--video-id", default=VALIDATION_VIDEO_ID)
     parser.add_argument("--timeout-sec", type=float, default=30.0)
     parser.add_argument("--search-query", default="forklift near worker")
     parser.add_argument("--insecure", action="store_true", help="Disable Elasticsearch TLS certificate verification.")
@@ -170,6 +198,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
+    await delete_stale_validation_documents(
+        args.es_endpoint,
+        index=args.index,
+        timeout_sec=args.timeout_sec,
+        verify_certs=not args.insecure,
+    )
     payload = sample_payload(args.video_id, args.search_query)
     ingest_response = post_ingest(args.api_url, payload, timeout_sec=args.timeout_sec)
     validate_ingest_response(ingest_response, expected_video_id=args.video_id)

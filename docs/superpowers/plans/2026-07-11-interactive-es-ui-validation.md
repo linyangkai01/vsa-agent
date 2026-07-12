@@ -396,7 +396,7 @@ Which approach?
 
 - [ ] 先在 API 单元测试中断言 `AsyncElasticsearch.index()` 接收 `id="video-1"`；在 smoke 参数测试中断言默认 `--video-id` 为 `runtime-validation-video`。
 - [ ] 运行两个聚焦测试，确认现有实现分别因缺少 `id` 参数和时间戳默认 ID 而失败。
-- [ ] 在 ingest API 调用中传入 `id=request.video_id`，并将 smoke 默认 ID 改为 `runtime-validation-video`。
+- [ ] 在 ingest API 调用中传入 `id=request.video_id`；将 smoke 默认 ID 改为 `runtime-validation-video`，并在写入前仅删除视频名、传感器和 `runtime-yard` 元数据均匹配的历史验证文档。
 - [ ] 运行 `python -m pytest tests/unit/api/test_video_search_ingest.py tests/unit/scripts/test_es_ingest_smoke.py -q`。
 - [ ] 提交：`fix: keep ES smoke validation idempotent`。
 

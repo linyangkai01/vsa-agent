@@ -98,10 +98,12 @@ config file passed via `VSA_CONFIG`.
 
    The ingest endpoint will use `video_id` as the Elasticsearch document ID so
    repeated submissions update the same video segment instead of accumulating
-   duplicate records. The smoke script will use a stable validation ID. The
-   original UI's stale declaration source-map comments will be removed only
-   where their referenced `.map` file is absent; no source-map compiler option,
-   runtime declaration, or dependency will change.
+   duplicate records. Before writing its stable validation ID, the smoke script
+   will delete only historical documents matching its fixed video name, sensor,
+   and `runtime-yard` metadata. The original UI's stale declaration source-map
+   comments will be removed only where their referenced `.map` file is absent;
+   no source-map compiler option, runtime declaration, or dependency will
+   change.
 
 ## Risks / Trade-offs
 

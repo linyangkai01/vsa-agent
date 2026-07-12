@@ -30,6 +30,6 @@
 
 ## 6. 运行时产物清理
 
-- [x] 6.1 让 `/api/search/ingest` 以 `video_id` 覆盖写入 ES，并让 smoke 使用固定验证 ID，避免重复启动后重复展示 `runtime-validation.mp4`。
+- [x] 6.1 让 `/api/search/ingest` 以 `video_id` 覆盖写入 ES；smoke 先删除仅匹配固定视频名、传感器和 `runtime-yard` 元数据的历史验证记录，再写入固定验证 ID，避免重复启动后重复展示 `runtime-validation.mp4`。
 - [x] 6.2 删除 map、dashboard 和 alerts 声明文件中无对应文件的 `server.d.ts.map` 引用，保留源映射编译配置、运行时声明和现有依赖不变。
 - [ ] 6.3 在 Ubuntu 重启运行栈，确认 UI 搜索只返回一个 smoke 记录，且 `ui.log` 不再包含 `failed to read input source map`。

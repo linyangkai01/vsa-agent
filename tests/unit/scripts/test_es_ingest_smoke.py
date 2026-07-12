@@ -3,6 +3,7 @@ import json
 import pytest
 
 from scripts.es_ingest_smoke import find_indexed_document
+from scripts.es_ingest_smoke import delete_stale_validation_documents
 from scripts.es_ingest_smoke import mock_query_vector
 from scripts.es_ingest_smoke import _parse_args
 from scripts.es_ingest_smoke import post_ingest
@@ -31,6 +32,53 @@ def test_default_smoke_video_id_is_stable():
     args = _parse_args(["--es-endpoint", "http://es:9200"])
 
     assert args.video_id == "runtime-validation-video"
+
+
+@pytest.mark.asyncio
+async def test_delete_stale_validation_documents_only_targets_smoke_metadata(monkeypatch):
+    created_clients = []
+
+    class FakeAsyncElasticsearch:
+        def __init__(self, endpoint, request_timeout, verify_certs):
+            self.endpoint = endpoint
+            self.request_timeout = request_timeout
+            self.verify_certs = verify_certs
+            self.delete_calls = []
+            self.closed = False
+            created_clients.append(self)
+
+        async def delete_by_query(self, index, query, refresh):
+            self.delete_calls.append((index, query, refresh))
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("scripts.es_ingest_smoke.AsyncElasticsearch", FakeAsyncElasticsearch)
+
+    await delete_stale_validation_documents(
+        "http://es:9200",
+        index="vsa-video-embeddings",
+        timeout_sec=7.5,
+        verify_certs=False,
+    )
+
+    fake_client = created_clients[0]
+    assert fake_client.delete_calls == [
+        (
+            "vsa-video-embeddings",
+            {
+                "bool": {
+                    "filter": [
+                        {"term": {"video_name.keyword": "runtime-validation.mp4"}},
+                        {"term": {"sensor_id.keyword": "camera-runtime-1"}},
+                        {"term": {"metadata.site.keyword": "runtime-yard"}},
+                    ]
+                }
+            },
+            True,
+        )
+    ]
+    assert fake_client.closed is True
 
 
 def test_validate_ingest_response_returns_result_id():
