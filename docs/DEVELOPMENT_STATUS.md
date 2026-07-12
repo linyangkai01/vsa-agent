@@ -4,12 +4,12 @@ Last updated: 2026-07-12
 
 ## Current State
 
-- Active OpenSpec change: `script-es-runtime-stack`.
-- Active branch: `codex/script-es-runtime-stack`.
-- Goal: provide an interactive Windows/Linux ES, API and original-UI launcher that verifies the original `/api/v1/search` business flow.
-- Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
-- Stack wrappers: `scripts/es-runtime-stack.ps1`, `scripts/es-runtime-stack.sh`.
-- Smoke script: `scripts/es_ingest_smoke.py`.
+- Active OpenSpec change: `production-recorded-video-ingest`.
+- Active branch: `codex/production-recorded-video-ingest`.
+- Phase: design artifacts are being reviewed before implementation planning.
+- Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
+- Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
+- Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
 
 ## Git Policy
 
@@ -54,8 +54,9 @@ Result: valid before archive.
 
 ## Active Change
 
-- `script-es-runtime-stack`: building stack commands that start ES, start FastAPI with a temporary search-enabled config, run ingest/search smoke validation, and clean up owned resources.
-- Next server validation command: `./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings`.
+- `production-recorded-video-ingest`: design confirmed; OpenSpec proposal/spec/design/tasks and the Chinese Superpowers design document are under review.
+- Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
+- No implementation code has been started for this change.
 
 ## Active Runtime Validation
 
@@ -71,4 +72,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-Finish `script-es-runtime-stack` through Comet verification, sync changed files to `Z:\vsa-agent`, then merge locally to `master` and push only `master` to origin.
+Review and approve the `production-recorded-video-ingest` design artifacts, then create the detailed Superpowers implementation plan through Comet build planning before writing code.
