@@ -20,7 +20,7 @@
 - [x] 4.1 Run focused unit/static validation for the new scripts.
 - [x] 4.2 Run OpenSpec validation for `script-es-runtime-stack`.
 - [x] 4.3 Attempt real stack validation if Docker and the runtime environment are available; otherwise record the exact blocker.
-- [ ] 4.4 Finish on the local development branch, merge locally to `master`, push only remote `master`, and archive the Comet change after verification passes.
+- [x] 4.4 Finish on the local development branch, merge locally to `master`, push only remote `master`, and archive the Comet change after verification passes.
 
 ## 8. Verification Edge Cases
 

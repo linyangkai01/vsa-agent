@@ -2,6 +2,8 @@
 comet_change: script-es-runtime-stack
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-12-script-es-runtime-stack
+status: final
 ---
 
 # ES 运行时全栈与原版前端验证设计

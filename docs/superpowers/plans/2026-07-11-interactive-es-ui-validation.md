@@ -2,6 +2,7 @@
 change: script-es-runtime-stack
 design-doc: docs/superpowers/specs/2026-07-06-script-es-runtime-stack-design.md
 base-ref: a20786b41a8827781dda08846866c1eeb7d0e999
+archived-with: 2026-07-12-script-es-runtime-stack
 ---
 
 # ES 原版前端交互验证 Implementation Plan
@@ -25,6 +26,7 @@ base-ref: a20786b41a8827781dda08846866c1eeb7d0e999
 - Windows 启动器使用 `taskkill /T /F` 清理自己启动的 API/UI 进程树；Linux 启动器使用 `setsid` 和进程组；两者在默认退出时均不停止 ES，只有显式 `StopElasticsearch` 才停止它。
 - 本地验证完成后，使用显式清单同步到 `Z:\vsa-agent`，再在 Ubuntu 服务器执行真实运行验证；不要把映射盘同步当成服务器验证成功。
 
+archived-with: 2026-07-12-script-es-runtime-stack
 ---
 
 ## File Structure
