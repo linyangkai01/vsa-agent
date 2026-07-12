@@ -1,3 +1,6 @@
+import logging
+import sys
+
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
@@ -14,6 +17,22 @@ from vsa_agent.api.rtsp_stream_api import router as rtsp_router
 from vsa_agent.api.video_delete import router as video_delete_router
 from vsa_agent.api.video_search_ingest import router as video_search_ingest_router
 
+
+def configure_vsa_runtime_logging() -> None:
+    """Send application INFO events to the launcher's stdout-backed API log."""
+    logger = logging.getLogger("vsa_agent")
+    logger.setLevel(logging.INFO)
+    if any(getattr(handler, "_vsa_runtime_handler", False) for handler in logger.handlers):
+        return
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    handler._vsa_runtime_handler = True
+    logger.addHandler(handler)
+
+
+configure_vsa_runtime_logging()
 app = FastAPI(title='vsa-agent', description='Video Safety Analysis Agent')
 app.router.routes.extend(rtsp_router.routes)
 app.router.routes.extend(video_delete_router.routes)

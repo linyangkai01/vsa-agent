@@ -108,9 +108,10 @@ config file passed via `VSA_CONFIG`.
 9. Preserve API subprocess output for runtime observability.
 
    When a Conda environment is selected, both launchers will invoke
-   `conda run --no-capture-output`. This keeps Uvicorn and application logger
-   output flowing into the existing API log files without changing logger
-   levels, request payloads, or service behavior.
+   `conda run --no-capture-output`. The API configures the `vsa_agent` logger
+   with an idempotent stdout INFO handler, so Uvicorn access lines and
+   application search events flow into the existing API log files without
+   logging result payloads or changing service behavior.
 
 ## Risks / Trade-offs
 

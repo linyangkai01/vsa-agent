@@ -36,5 +36,5 @@
 
 ## 7. API 日志可观测性
 
-- [x] 7.1 在 Windows/Linux 启动器的 Conda API 命令中启用 `--no-capture-output`，保留 Uvicorn 和应用日志到 `api.log`。
+- [x] 7.1 在 Windows/Linux 启动器的 Conda API 命令中启用 `--no-capture-output`，并为 `vsa_agent` 配置幂等 stdout INFO handler，保留 Uvicorn 和应用日志到 `api.log`。
 - [ ] 7.2 在 Ubuntu 重启运行栈并确认 `api.log` 包含 `original_ui.search.request` 和 `search_agent.embed_search`。

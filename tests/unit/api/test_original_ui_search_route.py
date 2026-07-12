@@ -1,3 +1,5 @@
+import logging
+
 from fastapi.testclient import TestClient
 
 
@@ -51,3 +53,20 @@ def test_original_ui_search_route_is_registered():
     from vsa_agent.api.routes import app
 
     assert "/api/v1/search" in {route.path for route in app.routes}
+
+
+def test_runtime_logging_writes_vsa_info_events_to_stdout(capsys):
+    from vsa_agent.api.routes import configure_vsa_runtime_logging
+
+    logger = logging.getLogger("vsa_agent")
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    try:
+        logger.handlers.clear()
+        configure_vsa_runtime_logging()
+        logger.info("original_ui.search.request query='forklift near worker'")
+
+        assert "original_ui.search.request" in capsys.readouterr().out
+    finally:
+        logger.handlers[:] = original_handlers
+        logger.setLevel(original_level)
