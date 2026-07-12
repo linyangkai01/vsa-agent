@@ -72,6 +72,7 @@ PASS: ES runtime stack validation succeeded
   api: http://127.0.0.1:8000
   es:  http://127.0.0.1:9200
   index: vsa-video-embeddings
+  ui:  http://127.0.0.1:3000
 ```
 
 Open `http://127.0.0.1:3000`, switch to Search, and search for
@@ -107,28 +108,26 @@ If the script reports Docker, port, Uvicorn, or smoke validation failures, treat
 that output as the runtime blocker and do not report ES runtime validation as
 successful.
 
-## Ubuntu Server Preflight (No Administrator Permission Required)
+## Ubuntu Single-Command Start
 
-The launcher uses files inside the repository, Docker access already available
-to the current user, and the selected Conda environment. It never uses `sudo`.
-Before the first run after synchronizing dependency declarations, install the
-project dependencies into the same environment used by the launcher:
+Run only this command on the server:
 
 ```bash
 cd /data/project/lyk/vsa-agent
-conda run -n vsa-agent python -m pip install --upgrade -e '.[dev]'
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings --conda-env vsa-agent
 ```
 
-The launcher checks `aiohttp`, `elasticsearch[async]` version 8.14 through 8.x,
-and `uvicorn` before starting Docker. If this check fails, run the command
-above; the launcher will not claim that the stack started.
+The launcher uses the repository, the current user's Docker access, and the
+selected Conda environment. It never uses `sudo`. When required, it installs
+the project's declared Python dependencies into that environment, downloads the
+repository-pinned Node runtime, and installs original-UI dependencies itself.
 
-When Node.js is absent, interactive mode downloads the repository-pinned Node
-runtime to `.deps/node` and installs original-UI dependencies without a system
-package installation. Node bootstrap, package install, and UI failures are in
-`.runtime/es-stack/ui.err.log`; FastAPI failures are in
-`.runtime/es-stack/api.err.log`. The launcher tails the relevant log when a
-child process exits before readiness.
+The terminal streams complete current-run service output with `[es]`, `[api]`,
+`[api.err]`, `[ui]`, and `[ui.err]` prefixes. The unprefixed persistent logs
+remain in `.runtime/es-stack/es.log`, `.runtime/es-stack/api.log`,
+`.runtime/es-stack/api.err.log`, `.runtime/es-stack/ui.log`, and
+`.runtime/es-stack/ui.err.log`; no separate `source`, test, or log-following
+command is required for normal startup.
 
 For API/UI ports, the launcher logs the owning PID and command, sends `TERM`,
 waits five seconds, then sends `KILL` only if the listener remains. If neither
@@ -151,8 +150,7 @@ From the Ubuntu server shell:
 
 ```bash
 cd /data/project/lyk/vsa-agent
-chmod +x ./scripts/es-runtime-stack.sh
-./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --index vsa-video-embeddings --stop-elasticsearch
+./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings --conda-env vsa-agent
 ```
 
 `Z:\vsa-agent` must be executable from the current Windows session, or the Ubuntu

@@ -82,12 +82,15 @@ API_LOG_PATH="$RUNTIME_DIR/api.log"
 API_ERR_LOG_PATH="$RUNTIME_DIR/api.err.log"
 UI_LOG_PATH="$RUNTIME_DIR/ui.log"
 UI_ERR_LOG_PATH="$RUNTIME_DIR/ui.err.log"
+ES_LOG_PATH="$RUNTIME_DIR/es.log"
 API_URL="http://127.0.0.1:${API_PORT}"
 API_HEALTH_URL="${API_URL}/health"
 UI_URL="http://127.0.0.1:${UI_PORT}"
 ES_ENDPOINT="http://127.0.0.1:${ES_PORT}"
 API_PID=""
 UI_PID=""
+LOG_STREAM_PIDS=()
+STACK_STARTED_AT=""
 
 port_listener_pids() {
   if command -v lsof >/dev/null 2>&1; then
@@ -131,16 +134,25 @@ reclaim_port() {
   wait_for_port_free "$port"
 }
 
-tail_log() {
+start_file_log_stream() {
   local label="$1" path="$2"
-  [[ -f "$path" ]] || return 0
-  echo "--- ${label}: ${path} ---" >&2
-  tail -n 100 "$path" >&2 || true
+  setsid bash -c 'tail -n 0 -F "$1" 2>&1 | sed -u "s/^/[$2] /"' bash "$path" "$label" &
+  LOG_STREAM_PIDS+=("$!")
 }
 
-report_elasticsearch_logs() {
-  echo "--- Elasticsearch logs ---" >&2
-  docker compose -f docker-compose.es.yml logs --tail=100 elasticsearch >&2 || true
+start_es_log_stream() {
+  setsid bash -c 'docker compose -f docker-compose.es.yml logs --since "$2" -f elasticsearch 2>&1 | tee -a "$1" | sed -u "s/^/[es] /"' bash "$ES_LOG_PATH" "$STACK_STARTED_AT" &
+  LOG_STREAM_PIDS+=("$!")
+}
+
+stop_log_streams() {
+  local pid
+  for pid in "${LOG_STREAM_PIDS[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -- "-$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    fi
+  done
 }
 
 cleanup() {
@@ -160,6 +172,9 @@ cleanup() {
     )
   fi
 
+  stop_log_streams
+
+  [[ -f "$ES_LOG_PATH" ]] && echo "ES log: $ES_LOG_PATH"
   [[ -f "$API_LOG_PATH" ]] && echo "API log: $API_LOG_PATH"
   [[ -f "$API_ERR_LOG_PATH" ]] && echo "API error log: $API_ERR_LOG_PATH"
   [[ -f "$UI_LOG_PATH" ]] && echo "UI log: $UI_LOG_PATH"
@@ -209,16 +224,18 @@ if (major, minor) < (8, 14) or major >= 9:
 PY
 }
 
-port_available() {
-  python -c "import socket,sys
-port=int(sys.argv[1])
-s=socket.socket()
-try:
-    s.bind(('127.0.0.1', port))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()" "$1"
+ensure_python_runtime() {
+  if verify_python_runtime; then
+    return
+  fi
+
+  echo "[setup] Installing project Python dependencies into the selected runtime..." >&2
+  if [[ -n "$CONDA_ENV" ]]; then
+    conda run -n "$CONDA_ENV" python -m pip install --upgrade -e '.[dev]'
+  else
+    python -m pip install --upgrade -e '.[dev]'
+  fi
+  verify_python_runtime
 }
 
 write_search_config() {
@@ -278,7 +295,6 @@ wait_http_health() {
   while (( SECONDS < deadline )); do
     if [[ -n "$API_PID" ]] && ! kill -0 "$API_PID" >/dev/null 2>&1; then
       echo "ERROR: FastAPI process exited before health check succeeded" >&2
-      tail_log "FastAPI error log" "$API_ERR_LOG_PATH"
       return 1
     fi
 
@@ -291,7 +307,6 @@ wait_http_health() {
   done
 
   echo "ERROR: FastAPI did not become reachable at $API_HEALTH_URL within $TIMEOUT_SEC seconds" >&2
-  tail_log "FastAPI error log" "$API_ERR_LOG_PATH"
   return 1
 }
 
@@ -300,7 +315,6 @@ wait_ui_health() {
   while (( SECONDS < deadline )); do
     if [[ -n "$UI_PID" ]] && ! kill -0 "$UI_PID" >/dev/null 2>&1; then
       echo "ERROR: Original UI process exited before readiness" >&2
-      tail_log "UI error log" "$UI_ERR_LOG_PATH"
       return 1
     fi
     if curl -fsS "$UI_URL" >/dev/null 2>&1; then
@@ -309,7 +323,6 @@ wait_ui_health() {
     sleep 2
   done
   echo "ERROR: Original UI did not become reachable at $UI_URL within $TIMEOUT_SEC seconds" >&2
-  tail_log "UI error log" "$UI_ERR_LOG_PATH"
   return 1
 }
 
@@ -320,26 +333,27 @@ require_command setsid
 if [[ -n "$CONDA_ENV" ]]; then
   require_command conda
 fi
-verify_python_runtime
 
 mkdir -p "$RUNTIME_DIR"
 cd "$REPO_ROOT"
+ensure_python_runtime
 
 for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
 export VSA_ES_PORT="$ES_PORT"
 export VSA_ES_CONTAINER_NAME="vsa-agent-es"
+STACK_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+: >"$ES_LOG_PATH"
 if ! docker compose -f docker-compose.es.yml up -d; then
   echo "ERROR: Docker Compose could not start Elasticsearch." >&2
-  report_elasticsearch_logs
   exit 1
 fi
+start_es_log_stream
 
 deadline=$((SECONDS + TIMEOUT_SEC))
 until curl -fsS "$ES_ENDPOINT" >/dev/null 2>&1; do
   if (( SECONDS >= deadline )); then
     echo "ERROR: Elasticsearch did not become reachable at $ES_ENDPOINT within $TIMEOUT_SEC seconds" >&2
-    report_elasticsearch_logs
     exit 1
   fi
   sleep 2
@@ -349,11 +363,15 @@ write_search_config
 
 export VSA_CONFIG="$CONFIG_PATH"
 export PYTHONPATH="$REPO_ROOT/src"
+: >"$API_LOG_PATH"
+: >"$API_ERR_LOG_PATH"
+start_file_log_stream "api" "$API_LOG_PATH"
+start_file_log_stream "api.err" "$API_ERR_LOG_PATH"
 
 if [[ -n "$CONDA_ENV" ]]; then
-  setsid conda run -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
+  PYTHONUNBUFFERED=1 setsid conda run -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
 else
-  setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
+  PYTHONUNBUFFERED=1 setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>"$API_ERR_LOG_PATH" &
 fi
 API_PID=$!
 
@@ -372,13 +390,16 @@ echo "  index: $INDEX"
 echo "  config: $CONFIG_PATH"
 if [[ "$SMOKE_ONLY" == "0" ]]; then
   ensure_ui_runtime
+  : >"$UI_LOG_PATH"
+  : >"$UI_ERR_LOG_PATH"
+  start_file_log_stream "ui" "$UI_LOG_PATH"
+  start_file_log_stream "ui.err" "$UI_ERR_LOG_PATH"
   NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$UI_LOG_PATH" 2>"$UI_ERR_LOG_PATH" &
   UI_PID=$!
   wait_ui_health
   echo "  ui:  $UI_URL"
   if ! wait "$UI_PID"; then
     echo "ERROR: Original UI exited after readiness" >&2
-    tail_log "UI error log" "$UI_ERR_LOG_PATH"
     exit 1
   fi
 fi

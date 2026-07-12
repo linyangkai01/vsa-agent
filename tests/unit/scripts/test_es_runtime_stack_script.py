@@ -7,6 +7,7 @@ SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 ES_COMPOSE = Path("docker-compose.es.yml")
 PYPROJECT = Path("pyproject.toml")
 GITIGNORE = Path(".gitignore")
+RUNTIME_DOC = Path("docs/superpowers/reference/es-video-search-runtime.md")
 
 
 def _script_text() -> str:
@@ -37,6 +38,16 @@ def test_original_ui_data_source_directory_is_not_ignored():
     text = GITIGNORE.read_text(encoding="utf-8")
 
     assert "!frontend/original-ui/packages/nemo-agent-toolkit-ui/utils/data/" in text
+
+
+def test_runtime_doc_uses_one_linux_launcher_command_and_describes_live_logs():
+    text = RUNTIME_DOC.read_text(encoding="utf-8")
+
+    assert "conda run -n vsa-agent python -m pip install" not in text
+    assert "source .deps/node-env.sh" not in text
+    assert "[es]" in text
+    assert "[api]" in text
+    assert "[ui]" in text
 
 
 def test_es_runtime_stack_script_exists():
@@ -168,10 +179,13 @@ def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
     text = _bash_script_text()
 
     for required in (
-        "wait_ui_health", "UI_URL=", "UI_LOG_PATH=", "UI_ERR_LOG_PATH=",
-        "Original UI process exited before readiness", "tail -n 100",
+        "wait_ui_health", "UI_URL=", "UI_LOG_PATH=", "UI_ERR_LOG_PATH=", "ES_LOG_PATH=",
+        "Original UI process exited before readiness", "start_file_log_stream", "start_es_log_stream",
+        "tail -n 0 -F", "LOG_STREAM_PIDS", "PYTHONUNBUFFERED=1",
     ):
         assert required in text
+
+    assert "tail_log" not in text
 
 
 def test_linux_stack_uses_port_discovery_fallbacks_without_killing_es_proxy():
@@ -189,11 +203,10 @@ def test_linux_stack_preflights_python_and_reports_each_service_failure():
 
     for required in (
         "verify_python_runtime",
+        "ensure_python_runtime",
+        "python -m pip install --upgrade -e '.[dev]'",
         "aiohttp",
         "elasticsearch[async]>=8.14,<9",
-        "FastAPI error log",
-        "Elasticsearch logs",
-        "docker compose -f docker-compose.es.yml logs --tail=100 elasticsearch",
         "kill -KILL",
         "Original UI exited after readiness",
     ):
