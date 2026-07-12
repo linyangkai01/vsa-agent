@@ -8,6 +8,7 @@ param(
         "scripts\es-runtime-stack.sh",
         "scripts\bootstrap_node.sh",
         "scripts\run_original_ui_vss.sh",
+        "frontend\original-ui\apps\nv-metropolis-bp-vss-ui\next.config.js",
         "scripts\es_ingest_smoke.py",
         "frontend\original-ui\packages\nemo-agent-toolkit-ui\utils\data\throttle.ts",
         "frontend\original-ui\packages\nemo-agent-toolkit-ui\__tests__\utils\throttle.test.ts",

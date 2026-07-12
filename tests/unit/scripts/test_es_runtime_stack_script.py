@@ -8,6 +8,7 @@ ES_COMPOSE = Path("docker-compose.es.yml")
 PYPROJECT = Path("pyproject.toml")
 GITIGNORE = Path(".gitignore")
 RUNTIME_DOC = Path("docs/superpowers/reference/es-video-search-runtime.md")
+VSS_NEXT_CONFIG = Path("frontend/original-ui/apps/nv-metropolis-bp-vss-ui/next.config.js")
 
 
 def _script_text() -> str:
@@ -48,6 +49,21 @@ def test_runtime_doc_uses_one_linux_launcher_command_and_describes_live_logs():
     assert "[es]" in text
     assert "[api]" in text
     assert "[ui]" in text
+    assert "ssh -L 3000:127.0.0.1:3000" in text
+    assert "same-origin" in text
+
+
+def test_stack_proxies_browser_search_requests_through_the_original_ui():
+    launcher = _bash_script_text()
+    windows_launcher = _script_text()
+    next_config = VSS_NEXT_CONFIG.read_text(encoding="utf-8")
+
+    assert 'NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1"' in launcher
+    assert 'VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1"' in launcher
+    assert '$env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"' in windows_launcher
+    assert '$env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"' in windows_launcher
+    assert "source: '/api/v1/:path*'" in next_config
+    assert "VSA_INTERNAL_AGENT_API_URL_BASE" in next_config
 
 
 def test_es_runtime_stack_script_exists():
@@ -260,6 +276,7 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"src\\vsa_agent\\api\\video_search_ingest.py"' in text
     assert '"scripts\\bootstrap_node.sh"' in text
     assert '"scripts\\run_original_ui_vss.sh"' in text
+    assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\next.config.js"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\utils\\data\\throttle.ts"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
 

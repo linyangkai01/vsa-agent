@@ -151,6 +151,7 @@ $oldVsaConfig = $env:VSA_CONFIG
 $oldPythonPath = $env:PYTHONPATH
 $oldSearchTab = $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB
 $oldAgentApiUrl = $env:NEXT_PUBLIC_AGENT_API_URL_BASE
+$oldInternalAgentApiUrl = $env:VSA_INTERNAL_AGENT_API_URL_BASE
 $oldUiPort = $env:PORT
 
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
@@ -203,7 +204,8 @@ try {
     Write-Host "  config: $configPath"
     if (-not $SmokeOnly) {
         $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = "true"
-        $env:NEXT_PUBLIC_AGENT_API_URL_BASE = "$apiUrl/api/v1"
+        $env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"
+        $env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"
         $env:PORT = "$UiPort"
         $uiProcess = Start-Process -FilePath "bash" -ArgumentList @("scripts/run_original_ui_vss.sh") -WorkingDirectory $repoRoot -RedirectStandardOutput $uiLogPath -RedirectStandardError $uiErrLogPath -PassThru
         Wait-Process -Id $uiProcess.Id
@@ -216,6 +218,7 @@ try {
     $env:PYTHONPATH = $oldPythonPath
     $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = $oldSearchTab
     $env:NEXT_PUBLIC_AGENT_API_URL_BASE = $oldAgentApiUrl
+    $env:VSA_INTERNAL_AGENT_API_URL_BASE = $oldInternalAgentApiUrl
     $env:PORT = $oldUiPort
 
     if ($StopElasticsearch) {

@@ -129,6 +129,24 @@ remain in `.runtime/es-stack/es.log`, `.runtime/es-stack/api.log`,
 `.runtime/es-stack/ui.err.log`; no separate `source`, test, or log-following
 command is required for normal startup.
 
+## Remote Browser Access
+
+When the UI runs on a password-protected server, create one SSH tunnel from
+the browser machine:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 10.157.68.44
+```
+
+Open `http://127.0.0.1:3000` locally. The browser sends VSS search requests to
+the same-origin `/api/v1` path; the original UI's Next.js server proxies that
+path to its private `127.0.0.1:8000` FastAPI process. Do not expose port 8000
+or configure a separate browser-side API tunnel for normal UI validation.
+
+For direct API troubleshooting only, a separate tunnel such as
+`ssh -L 8080:127.0.0.1:8000 10.157.68.44` can be used with
+`http://127.0.0.1:8080`; it is not used by the browser UI.
+
 For API/UI ports, the launcher logs the owning PID and command, sends `TERM`,
 waits five seconds, then sends `KILL` only if the listener remains. If neither
 `lsof` nor `fuser` is available, it fails before starting a partial stack. Port

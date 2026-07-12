@@ -394,7 +394,7 @@ if [[ "$SMOKE_ONLY" == "0" ]]; then
   : >"$UI_ERR_LOG_PATH"
   start_file_log_stream "ui" "$UI_LOG_PATH"
   start_file_log_stream "ui.err" "$UI_ERR_LOG_PATH"
-  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$UI_LOG_PATH" 2>"$UI_ERR_LOG_PATH" &
+  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$UI_LOG_PATH" 2>"$UI_ERR_LOG_PATH" &
   UI_PID=$!
   wait_ui_health
   echo "  ui:  $UI_URL"
