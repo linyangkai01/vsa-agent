@@ -94,6 +94,15 @@ config file passed via `VSA_CONFIG`.
    real embedding service. The flag defaults to false, so it does not alter
    production-style runtime behavior.
 
+8. Keep validation artifacts idempotent and build output clean.
+
+   The ingest endpoint will use `video_id` as the Elasticsearch document ID so
+   repeated submissions update the same video segment instead of accumulating
+   duplicate records. The smoke script will use a stable validation ID. The
+   original UI's stale declaration source-map comments will be removed only
+   where their referenced `.map` file is absent; no source-map compiler option,
+   runtime declaration, or dependency will change.
+
 ## Risks / Trade-offs
 
 - Docker may be unavailable locally or through the mapped drive -> the script

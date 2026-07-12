@@ -383,3 +383,34 @@ Plan complete and saved to `docs/superpowers/plans/2026-07-11-interactive-es-ui-
 2. Inline Execution - Execute tasks in this session using executing-plans, batch execution with checkpoints
 
 Which approach?
+
+## 后续修复任务：验证数据与构建日志
+
+### Task 5: 幂等的验证数据
+
+**Files:**
+- Modify: `src/vsa_agent/api/video_search_ingest.py`
+- Modify: `scripts/es_ingest_smoke.py`
+- Modify: `tests/unit/api/test_video_search_ingest.py`
+- Modify: `tests/unit/scripts/test_es_ingest_smoke.py`
+
+- [ ] 先在 API 单元测试中断言 `AsyncElasticsearch.index()` 接收 `id="video-1"`；在 smoke 参数测试中断言默认 `--video-id` 为 `runtime-validation-video`。
+- [ ] 运行两个聚焦测试，确认现有实现分别因缺少 `id` 参数和时间戳默认 ID 而失败。
+- [ ] 在 ingest API 调用中传入 `id=request.video_id`，并将 smoke 默认 ID 改为 `runtime-validation-video`。
+- [ ] 运行 `python -m pytest tests/unit/api/test_video_search_ingest.py tests/unit/scripts/test_es_ingest_smoke.py -q`。
+- [ ] 提交：`fix: keep ES smoke validation idempotent`。
+
+### Task 6: 清理失效声明源映射
+
+**Files:**
+- Modify: `frontend/original-ui/packages/nv-metropolis-bp-vss-ui/map/lib-src/server.d.ts`
+- Modify: `frontend/original-ui/packages/nv-metropolis-bp-vss-ui/dashboard/lib-src/server.d.ts`
+- Modify: `frontend/original-ui/packages/nv-metropolis-bp-vss-ui/alerts/lib-src/server.d.ts`
+- Modify: `scripts/sync-server-files.ps1`
+- Modify: `tests/unit/scripts/test_es_runtime_stack_script.py`
+
+- [ ] 先添加静态测试，要求三个文件都不包含 `sourceMappingURL=server.d.ts.map`，且同步清单包含三个文件。
+- [ ] 运行聚焦测试，确认其因现有陈旧引用和缺失同步清单失败。
+- [ ] 只删除三个 `sourceMappingURL` 注释，并将三个声明文件加入定向同步清单。
+- [ ] 运行 `python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py -q`；在服务器上重启运行栈，确认 UI 日志不再出现 `failed to read input source map`。
+- [ ] 提交：`fix: remove stale original UI declaration source maps`。

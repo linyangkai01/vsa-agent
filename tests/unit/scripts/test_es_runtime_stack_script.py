@@ -9,6 +9,11 @@ PYPROJECT = Path("pyproject.toml")
 GITIGNORE = Path(".gitignore")
 RUNTIME_DOC = Path("docs/superpowers/reference/es-video-search-runtime.md")
 VSS_NEXT_CONFIG = Path("frontend/original-ui/apps/nv-metropolis-bp-vss-ui/next.config.js")
+ORIGINAL_UI_SERVER_DECLARATIONS = (
+    Path("frontend/original-ui/packages/nv-metropolis-bp-vss-ui/map/lib-src/server.d.ts"),
+    Path("frontend/original-ui/packages/nv-metropolis-bp-vss-ui/dashboard/lib-src/server.d.ts"),
+    Path("frontend/original-ui/packages/nv-metropolis-bp-vss-ui/alerts/lib-src/server.d.ts"),
+)
 
 
 def _script_text() -> str:
@@ -64,6 +69,11 @@ def test_stack_proxies_browser_search_requests_through_the_original_ui():
     assert '$env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"' in windows_launcher
     assert "source: '/api/v1/:path*'" in next_config
     assert "VSA_INTERNAL_AGENT_API_URL_BASE" in next_config
+
+
+def test_original_ui_server_declarations_do_not_reference_missing_source_maps():
+    for declaration in ORIGINAL_UI_SERVER_DECLARATIONS:
+        assert "sourceMappingURL=server.d.ts.map" not in declaration.read_text(encoding="utf-8")
 
 
 def test_es_runtime_stack_script_exists():
@@ -274,9 +284,13 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert "[switch]$PreflightOnly" in text
     assert '"docker-compose.es.yml"' in text
     assert '"src\\vsa_agent\\api\\video_search_ingest.py"' in text
+    assert '"tests\\unit\\api\\test_video_search_ingest.py"' in text
     assert '"scripts\\bootstrap_node.sh"' in text
     assert '"scripts\\run_original_ui_vss.sh"' in text
     assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\next.config.js"' in text
+    assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\map\\lib-src\\server.d.ts"' in text
+    assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\dashboard\\lib-src\\server.d.ts"' in text
+    assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\alerts\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\utils\\data\\throttle.ts"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
 

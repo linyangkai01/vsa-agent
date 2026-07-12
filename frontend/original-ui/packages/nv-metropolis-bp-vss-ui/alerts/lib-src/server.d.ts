@@ -29,4 +29,3 @@ export declare function fetchAlertsData(): Promise<{
     maxSearchTimeLimit: string;
     mediaWithObjectsBbox: boolean;
 }>;
-//# sourceMappingURL=server.d.ts.map
