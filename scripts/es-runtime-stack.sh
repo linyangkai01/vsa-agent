@@ -186,7 +186,8 @@ wait_http_health() {
       return 1
     fi
 
-    if curl -fsS "$API_HEALTH_URL" 2>/dev/null | python -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "ok" else 1)'; then
+    health_payload=$(curl -fsS "$API_HEALTH_URL" 2>/dev/null || true)
+    if [[ -n "$health_payload" ]] && printf '%s' "$health_payload" | python -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "ok" else 1)'; then
       return 0
     fi
 

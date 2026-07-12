@@ -168,6 +168,7 @@ def test_es_runtime_stack_bash_terminates_the_owned_process_group_and_checks_hea
     assert "setsid" in text
     assert 'kill -- "-$API_PID"' in text
     assert "json.load(sys.stdin).get(\"status\") == \"ok\"" in text
+    assert "health_payload=$(curl -fsS" in text
 
 
 def test_es_runtime_stack_bash_retains_temporary_config_with_an_explicit_notice():
