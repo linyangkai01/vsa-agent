@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from collections.abc import Awaitable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,8 @@ class LocalAssetStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._cleanup_repository = cleanup_repository
+        self._publication_locks: dict[Path, threading.Lock] = {}
+        self._publication_locks_guard = threading.RLock()
 
     async def create_session(self, session: UploadSession) -> Path:
         chunks = self._session_dir(session.session_id) / "chunks"
@@ -90,6 +93,8 @@ class LocalAssetStore:
                         retryable=False,
                         message=f"chunk {ordinal} already contains different content",
                     )
+                except OSError as error:
+                    self._raise_hard_link_error(error)
         except OSError as error:
             self._raise_storage_error(error)
             raise
@@ -122,38 +127,58 @@ class LocalAssetStore:
 
         asset_id = self._validate_component(asset.asset_id, "asset_id")
         destination = self.root / "assets" / asset_id / "source" / f"original.{extension}"
-        temporary = destination.with_name(f"{destination.name}.tmp")
+        temporary: Path | None = None
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with temporary.open("wb") as output:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
                 for chunk in chunks:
                     with chunk.open("rb") as source:
                         shutil.copyfileobj(source, output)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, destination)
+            self._replace_published_file(temporary, destination)
         except OSError as error:
             self._raise_storage_error(error)
             raise
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return str(destination)
 
     async def write_atomic(self, destination: str | Path, data: bytes) -> str:
+        with self._publication_locks_guard:
+            return self._write_atomic(destination, data)
+
+    def _write_atomic(self, destination: str | Path, data: bytes) -> str:
         target = self._contained_path(destination)
-        temporary = target.with_name(f"{target.name}.tmp")
+        temporary: Path | None = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            with temporary.open("wb") as output:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
                 output.write(data)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, target)
+            self._replace_published_file(temporary, target)
         except OSError as error:
             self._raise_storage_error(error)
             raise
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return str(target)
 
     async def open_media_range(self, media_path: str | Path, start: int, end: int | None = None) -> bytes:
@@ -221,6 +246,12 @@ class LocalAssetStore:
             raise self._unsafe_path_error(path)
         return resolved
 
+    def _replace_published_file(self, temporary: Path, destination: Path) -> None:
+        with self._publication_locks_guard:
+            lock = self._publication_locks.setdefault(destination, threading.Lock())
+        with lock:
+            os.replace(temporary, destination)
+
     @staticmethod
     def _unsafe_path_error(path: object) -> RecordedVideoError:
         return RecordedVideoError(
@@ -238,3 +269,12 @@ class LocalAssetStore:
                 retryable=False,
                 message="DISK_FULL: insufficient space for recorded-video asset",
             ) from error
+
+    @classmethod
+    def _raise_hard_link_error(cls, error: OSError) -> None:
+        cls._raise_storage_error(error)
+        raise RecordedVideoError(
+            ErrorCode.CONFIGURATION,
+            retryable=False,
+            message="CONFIGURATION: local filesystem does not support required hard links",
+        ) from error

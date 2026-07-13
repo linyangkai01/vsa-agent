@@ -890,6 +890,39 @@ async def test_soft_delete_marks_asset_and_cancels_queued_work(repo: JobReposito
 
 
 @pytest.mark.asyncio
+async def test_list_expired_unreferenced_sessions_returns_only_completed_expired_uploads(
+    repo: JobRepository,
+):
+    reclaimable = _session("reclaimable", identifier="reclaimable")
+    reclaimable.expires_at = NOW - timedelta(seconds=1)
+    reclaimable.status = AssetStatus.READY
+    active = _session("active", identifier="active")
+    active.expires_at = NOW - timedelta(seconds=1)
+    incomplete = _session("incomplete", identifier="incomplete")
+    incomplete.expires_at = NOW - timedelta(seconds=1)
+    incomplete.status = AssetStatus.READY
+    unexpired = _session("unexpired", identifier="unexpired")
+    unexpired.status = AssetStatus.READY
+
+    for session in (reclaimable, active, incomplete, unexpired):
+        await repo.create_upload_session(_asset(session.asset_id), session)
+    await _record_all_chunks(repo, reclaimable)
+    await _record_all_chunks(repo, active)
+    await repo.record_chunk(incomplete.session_id, 1, "chunk-1", path="000001.part")
+    await _record_all_chunks(repo, unexpired)
+
+    candidates = await repo.list_expired_unreferenced_sessions(NOW)
+
+    assert [candidate.session_id for candidate in candidates] == [reclaimable.session_id]
+
+
+@pytest.mark.asyncio
+async def test_list_expired_unreferenced_sessions_requires_an_aware_clock(repo: JobRepository):
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.list_expired_unreferenced_sessions(NOW.replace(tzinfo=None))
+
+
+@pytest.mark.asyncio
 async def test_all_explicit_repository_clocks_reject_naive_datetimes(repo: JobRepository):
     await repo.create_upload_session(_asset(), _session())
     naive = NOW.replace(tzinfo=None)

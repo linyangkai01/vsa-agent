@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import os
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, AssetStatus, UploadSession
 from vsa_agent.recorded_video.ports import AssetStore
+from vsa_agent.recorded_video.repository import JobRepository
 
 NOW = datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
 
@@ -58,6 +60,14 @@ def _write_chunk_in_worker(
     data: bytes,
 ) -> str:
     return asyncio.run(store.write_chunk(session, 1, data))
+
+
+def _assemble_source_in_worker(store: LocalAssetStore, session: UploadSession, asset: Asset) -> str:
+    return asyncio.run(store.assemble_source(session, asset))
+
+
+def _write_atomic_in_worker(store: LocalAssetStore, destination: Path, data: bytes) -> str:
+    return asyncio.run(store.write_atomic(destination, data))
 
 
 class WindowsDiskFullError(OSError):
@@ -134,6 +144,34 @@ async def test_assemble_source_requires_all_chunks_and_atomically_publishes(
     assert not source.with_name(f"{source.name}.tmp").exists()
 
 
+async def test_concurrent_source_assembly_is_idempotent_and_leaves_no_temp_files(
+    store: LocalAssetStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session(total_chunks=1)
+    asset = _asset()
+    await store.write_chunk(session, 1, b"complete-source")
+    replace = os.replace
+    temporary_sources: list[Path] = []
+
+    def synchronized_replace(source: str | Path, destination: str | Path) -> None:
+        temporary_sources.append(Path(source))
+        replace(source, destination)
+
+    monkeypatch.setattr("vsa_agent.recorded_video.assets.os.replace", synchronized_replace)
+
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_assemble_source_in_worker, store, session, asset) for _ in range(8)),
+        return_exceptions=True,
+    )
+
+    destination = store.root / "assets" / "asset-uuid" / "source" / "original.mkv"
+    assert results == [str(destination)] * 8
+    assert len(set(temporary_sources)) == 8
+    assert destination.read_bytes() == b"complete-source"
+    assert not list(destination.parent.glob("*.tmp"))
+
+
 async def test_write_atomic_rejects_paths_outside_root_with_stable_error_code(
     store: LocalAssetStore,
     tmp_path: Path,
@@ -146,6 +184,30 @@ async def test_write_atomic_rejects_paths_outside_root_with_stable_error_code(
     assert unsafe.value.code is ErrorCode.UNSUPPORTED_MEDIA
     assert "UNSAFE_FILENAME" in str(unsafe.value)
     assert not outside.exists()
+
+
+async def test_concurrent_atomic_writes_publish_only_complete_payloads_without_temp_files(
+    store: LocalAssetStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = store.root / "assets" / "asset-uuid" / "derived.bin"
+    replace = os.replace
+    temporary_sources: list[Path] = []
+
+    def synchronized_replace(source: str | Path, target: str | Path) -> None:
+        temporary_sources.append(Path(source))
+        replace(source, target)
+
+    monkeypatch.setattr("vsa_agent.recorded_video.assets.os.replace", synchronized_replace)
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_write_atomic_in_worker, store, destination, byte * 4096) for byte in (b"a", b"b") * 4),
+        return_exceptions=True,
+    )
+
+    assert results == [str(destination)] * 8
+    assert len(set(temporary_sources)) == 8
+    assert destination.read_bytes() in {b"a" * 4096, b"b" * 4096}
+    assert not list(destination.parent.glob("*.tmp"))
 
 
 async def test_unsafe_source_extension_has_stable_error_code(store: LocalAssetStore) -> None:
@@ -241,6 +303,24 @@ async def test_disk_full_os_errors_have_explicit_permanent_error_code(
     assert "DISK_FULL" in str(disk_full.value)
 
 
+async def test_unsupported_hard_link_error_is_a_configuration_error(
+    store: LocalAssetStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    link_error = OSError(errno.EXDEV, "Invalid cross-device link")
+
+    def unsupported_link(_source: Path, _destination: Path) -> None:
+        raise link_error
+
+    monkeypatch.setattr("vsa_agent.recorded_video.assets.os.link", unsupported_link)
+
+    with pytest.raises(RecordedVideoError) as error:
+        await store.write_chunk(_session(total_chunks=1), 1, b"x")
+
+    assert error.value.code is ErrorCode.CONFIGURATION
+    assert error.value.__cause__ is link_error
+
+
 class CleanupRepository:
     def __init__(self, candidates: list[UploadSession]) -> None:
         self.candidates = candidates
@@ -285,3 +365,19 @@ async def test_cleanup_rejects_unsafe_repository_candidate_without_deleting_outs
 
     assert error.value.code is ErrorCode.CONFIGURATION
     assert outside.exists()
+
+
+async def test_cleanup_accepts_a_real_job_repository_collaborator(tmp_path: Path) -> None:
+    repository = JobRepository(tmp_path / "jobs.sqlite3", clock=lambda: NOW)
+    await repository.initialize()
+    session = _session(total_chunks=1, expires_at=NOW - timedelta(seconds=1))
+    session.status = AssetStatus.READY
+    await repository.create_upload_session(_asset(), session)
+    await repository.record_chunk(session.session_id, 1, "checksum", path="000001.part")
+
+    store = LocalAssetStore(tmp_path / "assets", cleanup_repository=repository)
+    session_dir = await store.create_session(session)
+    (session_dir / "data").write_bytes(b"expired")
+
+    assert await store.cleanup_expired_sessions(NOW) == [session.session_id]
+    assert not session_dir.exists()

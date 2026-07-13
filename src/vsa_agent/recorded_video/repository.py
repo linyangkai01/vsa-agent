@@ -345,6 +345,37 @@ class JobRepository:
                 return self._row_to_upload_session(existing)
         return session
 
+    async def list_expired_unreferenced_sessions(self, now: datetime) -> list[UploadSession]:
+        """Return expired sessions whose temporary chunks are no longer needed.
+
+        Uploading sessions remain active. Non-uploading sessions are reclaimable
+        only once every expected chunk is present; jobs reference the assembled
+        asset by ``asset_id`` rather than this temporary directory.
+        """
+        cutoff = _to_iso(_require_aware(now, "now"), "now")
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT sessions.*
+                FROM upload_sessions AS sessions
+                WHERE sessions.expires_at <= ?
+                    AND sessions.status != ?
+                    AND sessions.received_chunks = sessions.total_chunks
+                    AND (
+                        SELECT COUNT(*)
+                        FROM upload_chunks AS chunks
+                        WHERE chunks.session_id = sessions.session_id
+                    ) = sessions.total_chunks
+                ORDER BY sessions.expires_at, sessions.session_id
+                """,
+                (cutoff, AssetStatus.UPLOADING.value),
+            )
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        return [self._row_to_upload_session(row) for row in rows]
+
     async def record_chunk(
         self,
         session_id: str,
