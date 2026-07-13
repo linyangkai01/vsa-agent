@@ -14,6 +14,8 @@ class TestAppConfig:
         assert cfg.model.mode == "dev"
         assert cfg.agent.max_iterations == 15
         assert cfg.server.port == 8000
+        assert cfg.recorded_video.enabled is False
+        assert cfg.recorded_video.data_root == Path(".runtime/recorded-video")
 
     def test_from_yaml(self):
         data = {"model": {"mode": "prod", "prod": {"llm_model": "test-model"}}, "agent": {"max_iterations": 5}}

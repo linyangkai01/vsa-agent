@@ -118,6 +118,9 @@ class RuntimeResolvedConfig(BaseModel):
         return data
 
 
+ProviderRuntimeConfig = ResolvedRoleConfig
+
+
 class ConfigIssue(BaseModel):
     severity: Literal["error", "warning"] = "error"
     message: str
@@ -190,6 +193,20 @@ class SearchBackendConfig(BaseModel):
     force_mock_embedding: bool = False
 
 
+class RecordedVideoConfig(BaseModel):
+    """Runtime limits for the recorded-video ingestion pipeline."""
+
+    enabled: bool = False
+    data_root: Path = Path(".runtime/recorded-video")
+    max_upload_bytes: int = Field(10_737_418_240, gt=0)
+    allowed_extensions: set[str] = Field(default_factory=lambda: {"mp4", "mkv"})
+    segment_duration_sec: int = Field(30, gt=0)
+    representative_frames: int = Field(4, gt=0)
+    worker_concurrency: int = Field(3, ge=1, le=5)
+    lease_sec: int = Field(120, gt=0)
+    max_attempts: int = Field(3, ge=1)
+
+
 class AppConfig(BaseModel):
     active_profile: str = ""
     backends: dict[str, BackendConfig] = Field(default_factory=dict)
@@ -203,6 +220,7 @@ class AppConfig(BaseModel):
     video_understanding: VideoUnderstandingConfig = VideoUnderstandingConfig()
     lvs_video_understanding: LVSVideoUnderstandingConfig = LVSVideoUnderstandingConfig()
     search: SearchBackendConfig = SearchBackendConfig()
+    recorded_video: RecordedVideoConfig = RecordedVideoConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path = "config.yaml") -> "AppConfig":
@@ -349,3 +367,39 @@ def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostic
             issues.append(ConfigIssue(message=f"{role_name} backend '{binding.backend}' requires API key from {source}"))
 
     return ConfigDiagnostics(issues=issues)
+
+
+def validate_recorded_video_runtime(config: AppConfig) -> ConfigDiagnostics:
+    if not config.recorded_video.enabled:
+        return ConfigDiagnostics()
+    if config.search.allow_mock_fallback:
+        raise ValueError("production recorded video requires allow_mock_fallback=False")
+    if config.search.force_mock_embedding:
+        raise ValueError("production recorded video requires force_mock_embedding=False")
+
+    diagnostics = validate_runtime_config(config)
+    backends, profiles, active_profile = _runtime_sources(config)
+    if active_profile not in profiles:
+        return diagnostics
+
+    profile = profiles[active_profile]
+    if profile.embedding is None:
+        diagnostics.issues.append(ConfigIssue(message="recorded video requires an embedding provider"))
+
+    for role_name, binding in (("vlm", profile.vlm), ("embedding", profile.embedding)):
+        if binding is None or binding.backend not in backends:
+            continue
+        backend = backends[binding.backend]
+        api_key_env = backend.api_key_env
+        if not backend.api_key_required or (api_key_env and os.getenv(api_key_env, "").strip()):
+            continue
+        issue_prefix = f"{role_name} backend '{binding.backend}' requires API key"
+        generic_issue = f"{issue_prefix} from {api_key_env or 'api_key'}"
+        if api_key_env and any(issue.message == generic_issue for issue in diagnostics.issues):
+            continue
+        if not api_key_env:
+            diagnostics.issues = [issue for issue in diagnostics.issues if issue.message != generic_issue]
+        diagnostics.issues.append(
+            ConfigIssue(message=f"{issue_prefix} from api_key_env ({api_key_env or 'not configured'})")
+        )
+    return diagnostics

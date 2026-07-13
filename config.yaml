@@ -21,6 +21,9 @@ profiles:
     vlm:
       backend: dashscope
       model: qwen3-vl-flash-2025-10-15
+    embedding:
+      backend: dashscope
+      model: text-embedding-v4
   hybrid_dashscope_llm_local_vlm:
     llm:
       backend: dashscope
@@ -118,4 +121,17 @@ search:
   embed_confidence_threshold: 0.0
   request_timeout_sec: 30.0
   verify_certs: true
-  allow_mock_fallback: true
+  allow_mock_fallback: false
+  force_mock_embedding: false
+recorded_video:
+  enabled: true
+  data_root: .runtime/recorded-video
+  max_upload_bytes: 10737418240
+  allowed_extensions:
+  - mp4
+  - mkv
+  segment_duration_sec: 30
+  representative_frames: 4
+  worker_concurrency: 3
+  lease_sec: 120
+  max_attempts: 3
