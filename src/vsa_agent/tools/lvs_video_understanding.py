@@ -11,7 +11,8 @@ from vsa_agent.config import LVSVideoUnderstandingConfig, get_config
 from vsa_agent.data_models.understanding import DetectedEvent, UnderstandingResult
 from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.video_understanding import _timestamp_to_seconds, analyze_video_segment
+from vsa_agent.tools.video_understanding import analyze_video_segment
+from vsa_agent.tools.video_understanding_normalization import _timestamp_to_seconds
 
 
 def _format_seconds(value: float) -> str:
