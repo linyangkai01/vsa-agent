@@ -34,6 +34,7 @@ def _job(status: JobStatus) -> Job:
         job_id="job-1",
         asset_id="asset-1",
         status=status,
+        pipeline_version="v1",
         stage=JobStage.PROBING,
         attempt=1,
         config_snapshot={"pipeline_version": "v1"},
@@ -117,6 +118,33 @@ def test_error_codes_are_partitioned_by_retryability() -> None:
     assert not (PERMANENT_ERROR_CODES & RETRYABLE_ERROR_CODES)
 
 
+def test_recorded_video_error_rejects_retryability_that_conflicts_with_code() -> None:
+    with pytest.raises(ValueError):
+        RecordedVideoError(ErrorCode.CORRUPT_MEDIA, retryable=True)
+    with pytest.raises(ValueError):
+        RecordedVideoError(ErrorCode.MODEL_TIMEOUT, retryable=False)
+
+
+def test_job_requires_non_empty_pipeline_version_and_is_frozen() -> None:
+    with pytest.raises(ValueError):
+        Job(
+            job_id="job-1",
+            asset_id="asset-1",
+            pipeline_version="",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    job = _job(JobStatus.QUEUED)
+    with pytest.raises((TypeError, ValueError)):
+        job.status = JobStatus.RUNNING
+
+
+def test_job_transition_table_is_deeply_immutable() -> None:
+    with pytest.raises((TypeError, AttributeError)):
+        ALLOWED_JOB_TRANSITIONS[JobStatus.QUEUED].add(JobStatus.COMPLETED)
+
+
 @pytest.mark.parametrize("code", sorted(PERMANENT_ERROR_CODES, key=str))
 def test_recorded_video_error_preserves_permanent_classification(code: ErrorCode) -> None:
     error = RecordedVideoError(code, retryable=False)
@@ -192,3 +220,62 @@ def test_domain_models_expose_persistable_recorded_video_fields() -> None:
     assert upload.total_chunks == 2
     assert step.stage is JobStage.ANALYZING
     assert segment.end_offset_ms == 30_000
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: Asset(
+            asset_id="asset-1",
+            display_filename="video.mp4",
+            safe_filename="video.mp4",
+            size_bytes=1,
+            sha256="a" * 64,
+            mime_type="video/mp4",
+            source_extension="mp4",
+            timeline_origin=datetime(2026, 7, 12, 8, 30),
+            status=AssetStatus.READY,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        lambda: UploadSession(
+            session_id="session-1",
+            identifier="id",
+            asset_id="asset-1",
+            total_chunks=1,
+            filename="video.mp4",
+            temp_dir="tmp",
+            status=AssetStatus.UPLOADING,
+            expires_at=datetime(2026, 7, 12, 8, 30),
+        ),
+    ],
+)
+def test_persisted_datetimes_must_be_timezone_aware(factory) -> None:
+    with pytest.raises(ValueError):
+        factory()
+
+
+def test_persistable_models_reject_invalid_numeric_and_cross_field_values() -> None:
+    with pytest.raises(ValueError):
+        UploadSession(
+            session_id="session-1",
+            identifier="id",
+            asset_id="asset-1",
+            total_chunks=1,
+            received_chunks=2,
+            filename="video.mp4",
+            temp_dir="tmp",
+            status=AssetStatus.UPLOADING,
+            expires_at=NOW,
+        )
+    with pytest.raises(ValueError):
+        Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=0,
+            start_offset_ms=20,
+            end_offset_ms=10,
+            start_time=NOW,
+            end_time=NOW,
+        )

@@ -43,7 +43,12 @@ RETRYABLE_ERROR_CODES: frozenset[ErrorCode] = frozenset(
 class RecordedVideoError(Exception):
     def __init__(self, code: ErrorCode | str, retryable: bool, message: str | None = None) -> None:
         self.code = ErrorCode(code)
-        self.retryable = retryable
+        expected_retryable = self.code in RETRYABLE_ERROR_CODES
+        if retryable is not expected_retryable:
+            raise ValueError(
+                f"retryable={retryable} conflicts with classification for {self.code.value}"
+            )
+        self.retryable = expected_retryable
         super().__init__(message or self.code.value)
 
 

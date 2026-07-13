@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -24,7 +25,7 @@ class AssetStore(Protocol):
 
 @runtime_checkable
 class JobRepository(Protocol):
-    async def claim_due_job(self, worker_id: str) -> Job | None: ...
+    async def claim_due_job(self, owner: str, now: datetime) -> Job | None: ...
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None: ...
 

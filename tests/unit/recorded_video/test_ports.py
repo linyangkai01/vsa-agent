@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from vsa_agent.recorded_video.models import Asset, Job, JobStep, Segment, UploadSession
@@ -24,7 +26,7 @@ class FakeAssetStore:
 
 
 class FakeJobRepository:
-    async def claim_due_job(self, worker_id: str) -> Job | None:
+    async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
         return None
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
@@ -68,3 +70,14 @@ def test_projection_result_keeps_successes_and_failures_separate() -> None:
 
     assert result.indexed_ids == ["segment-1"]
     assert result.failed_ids == ["segment-2"]
+
+
+def test_claim_due_job_accepts_owner_and_explicit_clock() -> None:
+    repository = FakeJobRepository()
+    now = datetime(2026, 7, 12, 8, 30, tzinfo=UTC)
+
+    assert asyncio.run(repository.claim_due_job(owner="worker-1", now=now)) is None
+    assert (
+        asyncio.run(JobRepository.claim_due_job(repository, owner="worker-1", now=now))
+        is None
+    )

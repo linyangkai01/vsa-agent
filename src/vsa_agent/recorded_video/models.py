@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from collections.abc import Mapping
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from vsa_agent.recorded_video.errors import InvalidStateTransition
 
@@ -43,47 +44,56 @@ class Asset(BaseModel):
     asset_id: str
     display_filename: str
     safe_filename: str
-    size_bytes: int
+    size_bytes: int = Field(ge=0)
     sha256: str
     mime_type: str
     source_extension: str
-    duration_ms: int | None = None
-    width: int | None = None
-    height: int | None = None
-    timeline_origin: datetime
+    duration_ms: int | None = Field(default=None, ge=0)
+    width: int | None = Field(default=None, ge=0)
+    height: int | None = Field(default=None, ge=0)
+    timeline_origin: AwareDatetime
     status: AssetStatus
     current_job_id: str | None = None
-    created_at: datetime
-    updated_at: datetime
-    deleted_at: datetime | None = None
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    deleted_at: AwareDatetime | None = None
 
 
 class UploadSession(BaseModel):
     session_id: str
     identifier: str
     asset_id: str
-    total_chunks: int
-    received_chunks: int = 0
+    total_chunks: int = Field(gt=0)
+    received_chunks: int = Field(default=0, ge=0)
     filename: str
     temp_dir: str
     status: AssetStatus
-    expires_at: datetime
+    expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def validate_chunk_counts(self) -> UploadSession:
+        if self.received_chunks > self.total_chunks:
+            raise ValueError("received_chunks cannot exceed total_chunks")
+        return self
 
 
 class Job(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     job_id: str
     asset_id: str
+    pipeline_version: str = Field(min_length=1)
     status: JobStatus = JobStatus.QUEUED
     stage: JobStage | None = None
-    attempt: int = 0
-    next_run_at: datetime | None = None
+    attempt: int = Field(default=0, ge=0)
+    next_run_at: AwareDatetime | None = None
     lease_owner: str | None = None
-    lease_until: datetime | None = None
-    heartbeat_at: datetime | None = None
+    lease_until: AwareDatetime | None = None
+    heartbeat_at: AwareDatetime | None = None
     config_snapshot: dict[str, Any] = Field(default_factory=dict)
     last_error: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
 
 
 class JobStep(BaseModel):
@@ -93,37 +103,49 @@ class JobStep(BaseModel):
     output_manifest: str | None = None
     output_checksum: str | None = None
     model: str | None = None
-    elapsed_ms: int | None = None
+    elapsed_ms: int | None = Field(default=None, ge=0)
 
 
 class Segment(BaseModel):
     segment_id: str
     asset_id: str
-    pipeline_version: str
-    ordinal: int
-    start_offset_ms: int
-    end_offset_ms: int
-    start_time: datetime
-    end_time: datetime
+    pipeline_version: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    start_offset_ms: int = Field(ge=0)
+    end_offset_ms: int = Field(ge=0)
+    start_time: AwareDatetime
+    end_time: AwareDatetime
     description: str = ""
     thumbnail_key: str | None = None
     model: str | None = None
     prompt_version: str | None = None
 
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Segment:
+        if self.end_offset_ms < self.start_offset_ms:
+            raise ValueError("end_offset_ms cannot be earlier than start_offset_ms")
+        if self.end_time < self.start_time:
+            raise ValueError("end_time cannot be earlier than start_time")
+        return self
 
-ALLOWED_JOB_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
-    JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED},
-    JobStatus.RUNNING: {
-        JobStatus.COMPLETED,
-        JobStatus.RETRY_WAIT,
-        JobStatus.FAILED,
-        JobStatus.CANCELLED,
-    },
-    JobStatus.RETRY_WAIT: {JobStatus.QUEUED},
-    JobStatus.COMPLETED: set(),
-    JobStatus.FAILED: set(),
-    JobStatus.CANCELLED: set(),
-}
+
+ALLOWED_JOB_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = MappingProxyType(
+    {
+        JobStatus.QUEUED: frozenset({JobStatus.RUNNING, JobStatus.CANCELLED}),
+        JobStatus.RUNNING: frozenset(
+            {
+                JobStatus.COMPLETED,
+                JobStatus.RETRY_WAIT,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            }
+        ),
+        JobStatus.RETRY_WAIT: frozenset({JobStatus.QUEUED}),
+        JobStatus.COMPLETED: frozenset(),
+        JobStatus.FAILED: frozenset(),
+        JobStatus.CANCELLED: frozenset(),
+    }
+)
 
 
 def transition_job(job: Job, target: JobStatus) -> Job:
