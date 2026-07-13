@@ -2,6 +2,8 @@
 comet_change: stabilize-test-contracts
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-13-stabilize-test-contracts
+status: final
 ---
 
 # 测试收集稳定化技术设计
@@ -33,3 +35,4 @@ canonical_spec: openspec
 ## 风险控制
 
 包初始化可能改变测试内部的相对导入解析。如果目标测试或 fixture 出现导入差异，只回滚对应目录的包边界并重新评估，不通过排除目录或降低断言规避失败。
+
