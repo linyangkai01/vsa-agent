@@ -25,6 +25,10 @@ def test_dashscope_runners_share_one_runtime_preflight():
     )
     assert "resolve_runtime_config" in shared_text
     assert "VSA_RESOLVED_LLM_API_KEY" in shared_text
+    assert "config.yaml" in shared_text
+    assert "VSA_PROFILE" in shared_text
+    assert "config print" in shared_text
+    assert "DASHSCOPE_API_KEY" in shared_text
 
     for runner in RUNNERS:
         text = runner.read_text(encoding="utf-8")
@@ -32,7 +36,7 @@ def test_dashscope_runners_share_one_runtime_preflight():
         assert "vsa_dashscope_preflight" in text
         assert guard not in text
         assert "config doctor" not in text
-        assert "resolve_runtime_config" not in text
+        assert ".llm.api_key" not in text
 
 
 def test_dashscope_live_config_defines_non_secret_llm_and_vlm_defaults(monkeypatch):
@@ -52,15 +56,12 @@ def test_dashscope_runner_exists_and_is_executable_text():
 
     assert script.exists()
     text = script.read_text(encoding="utf-8")
-    assert "DASHSCOPE_API_KEY" in text
-    assert 'LIVE_API_KEY="$(' in text
+    assert 'LIVE_API_KEY="${VSA_RESOLVED_LLM_API_KEY}"' in text
     assert "DASHSCOPE_LLM_MODEL" not in text
     assert "DASHSCOPE_VLM_MODEL" not in text
     assert "VSA_LIVE_TRACE_PATH" in text
     assert "artifacts/live-traces/dashscope-live-acceptance.jsonl" in text
-    assert "config.yaml" in text
     assert "config_live_dashscope.yaml" not in text
-    assert "VSA_PROFILE" in text
     assert "LIVE_API_MODEL" in text
     assert "tests/acceptance/test_evaluator_live_api.py" in text
 
@@ -70,12 +71,8 @@ def test_dashscope_top_agent_video_runner_exists_and_configures_live_env():
 
     assert script.exists()
     text = script.read_text(encoding="utf-8")
-    assert "DASHSCOPE_API_KEY" in text
-    assert 'OPENAI_API_KEY="$(' in text
-    assert "VSA_CONFIG" in text
-    assert "config.yaml" in text
+    assert 'OPENAI_API_KEY="${VSA_RESOLVED_LLM_API_KEY}"' in text
     assert "config_live_dashscope.yaml" not in text
-    assert "VSA_PROFILE" in text
     assert "OPENAI_API_KEY" in text
     assert "python -m vsa_agent.live_video_acceptance" in text
     assert "VSA_LIVE_VIDEO_MODE" in text
