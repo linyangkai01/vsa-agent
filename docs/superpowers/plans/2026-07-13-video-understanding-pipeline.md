@@ -101,13 +101,13 @@ Run: `git add src/vsa_agent/tools/video_understanding.py src/vsa_agent/tools/vid
 - Consumes: 新纯模块与稳定 facade。
 - Produces: 路径矩阵、静态门禁和全量测试证据。
 
-- [ ] **Step 1: 运行视频路径矩阵**
+- [x] **Step 1: 运行视频路径矩阵**
 
 Run: `pytest -q tests/unit/tools/test_video_understanding_normalization.py tests/unit/tools/test_video_understanding.py tests/unit/tools/test_video_understanding_live_trace.py tests/unit/tools/test_lvs_video_understanding.py tests/unit/data_models/test_understanding_models.py tests/acceptance/test_video_understanding_flow.py`
 
 Expected: 文件、帧输入、RTSP、短视频、长视频、LVS、trace 和共享模型测试全部通过。
 
-- [ ] **Step 2: 运行仓库门禁**
+- [x] **Step 2: 运行仓库门禁**
 
 Run: `python -m compileall -q src tests`
 
@@ -119,10 +119,10 @@ Run: `pytest -q`
 
 Expected: compileall 与 Ruff 通过，全量 pytest 无失败。
 
-- [ ] **Step 3: 更新状态与任务**
+- [x] **Step 3: 更新状态与任务**
 
 记录新模块边界、保留 facade/LVS 路径和测试计数；勾选 OpenSpec 与本计划任务，并记录未授权多代理 reviewer。
 
-- [ ] **Step 4: 提交收尾**
+- [x] **Step 4: 提交收尾**
 
 Run: `git add docs/DEVELOPMENT_STATUS.md openspec/changes/refactor-video-understanding-pipeline docs/superpowers/plans/2026-07-13-video-understanding-pipeline.md && git commit -m "docs: record video understanding refactor"`
