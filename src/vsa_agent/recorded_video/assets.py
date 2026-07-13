@@ -7,6 +7,7 @@ import inspect
 import os
 import re
 import shutil
+import tempfile
 from collections.abc import Awaitable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -16,8 +17,9 @@ from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, UploadSession
 
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_SAFE_EXTENSION = re.compile(r"[A-Za-z0-9]{1,16}\Z")
+_ALLOWED_SOURCE_EXTENSIONS = frozenset({"mkv", "mp4"})
 _WINDOWS_DISK_FULL = 112
+_DISK_QUOTA_EXCEEDED = getattr(errno, "EDQUOT", 122)
 
 
 class CleanupRepository(Protocol):
@@ -57,20 +59,43 @@ class LocalAssetStore:
                 message=f"chunk ordinal {ordinal} is outside 1..{session.total_chunks}",
             )
         chunk_path = self._session_dir(session.session_id) / "chunks" / f"{ordinal:06}.part"
-        if chunk_path.exists():
-            try:
-                existing = chunk_path.read_bytes()
-            except OSError as error:
-                self._raise_storage_error(error)
-                raise
-            if existing == data:
-                return str(chunk_path)
-            raise RecordedVideoError(
-                ErrorCode.CORRUPT_MEDIA,
-                retryable=False,
-                message=f"chunk {ordinal} already contains different content",
-            )
-        return await self.write_atomic(chunk_path, data)
+        temporary: Path | None = None
+        try:
+            chunk_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=chunk_path.parent,
+                prefix=f".{chunk_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+
+            while True:
+                try:
+                    os.link(temporary, chunk_path)
+                    return str(chunk_path)
+                except FileExistsError:
+                    try:
+                        existing = chunk_path.read_bytes()
+                    except FileNotFoundError:
+                        continue
+                    if existing == data:
+                        return str(chunk_path)
+                    raise RecordedVideoError(
+                        ErrorCode.CORRUPT_MEDIA,
+                        retryable=False,
+                        message=f"chunk {ordinal} already contains different content",
+                    )
+        except OSError as error:
+            self._raise_storage_error(error)
+            raise
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     async def assemble_source(self, session: UploadSession, asset: Asset) -> str:
         if session.asset_id != asset.asset_id:
@@ -80,7 +105,7 @@ class LocalAssetStore:
                 message="upload session and asset do not match",
             )
         extension = asset.source_extension.lower().removeprefix(".")
-        if _SAFE_EXTENSION.fullmatch(extension) is None:
+        if extension not in _ALLOWED_SOURCE_EXTENSIONS:
             raise self._unsafe_path_error(asset.source_extension)
 
         chunks = [
@@ -206,9 +231,7 @@ class LocalAssetStore:
 
     @staticmethod
     def _raise_storage_error(error: OSError) -> None:
-        disk_full_errnos = {errno.ENOSPC}
-        if hasattr(errno, "EDQUOT"):
-            disk_full_errnos.add(errno.EDQUOT)
+        disk_full_errnos = {errno.ENOSPC, _DISK_QUOTA_EXCEEDED}
         if error.errno in disk_full_errnos or getattr(error, "winerror", None) == _WINDOWS_DISK_FULL:
             raise RecordedVideoError(
                 ErrorCode.DISK_FULL,

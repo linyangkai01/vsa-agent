@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,20 @@ def _asset(*, asset_id: str = "asset-uuid", extension: str = "mkv") -> Asset:
         created_at=NOW,
         updated_at=NOW,
     )
+
+
+def _write_chunk_in_worker(
+    store: LocalAssetStore,
+    session: UploadSession,
+    data: bytes,
+) -> str:
+    return asyncio.run(store.write_chunk(session, 1, data))
+
+
+class WindowsDiskFullError(OSError):
+    @property
+    def winerror(self) -> int:
+        return 112
 
 
 @pytest.fixture
@@ -144,20 +159,80 @@ async def test_unsafe_source_extension_has_stable_error_code(store: LocalAssetSt
     assert "UNSAFE_FILENAME" in str(unsafe.value)
 
 
+@pytest.mark.parametrize("extension", ["exe", "avi"])
+async def test_assemble_source_rejects_non_allowlisted_extension_without_writing_media(
+    store: LocalAssetStore,
+    extension: str,
+) -> None:
+    session = _session(total_chunks=1)
+    await store.write_chunk(session, 1, b"x")
+
+    with pytest.raises(RecordedVideoError) as unsupported:
+        await store.assemble_source(session, _asset(extension=extension))
+
+    assert unsupported.value.code is ErrorCode.UNSUPPORTED_MEDIA
+    assert not (store.root / "assets" / "asset-uuid").exists()
+
+
+async def test_concurrent_identical_chunk_writes_are_idempotent_without_temp_files(
+    store: LocalAssetStore,
+) -> None:
+    session = _session(total_chunks=1)
+
+    paths = await asyncio.gather(
+        *(asyncio.to_thread(_write_chunk_in_worker, store, session, b"same") for _ in range(8))
+    )
+
+    chunk = store.root / "uploads" / "sid" / "chunks" / "000001.part"
+    assert paths == [str(chunk)] * 8
+    assert chunk.read_bytes() == b"same"
+    assert not list(chunk.parent.glob("*.tmp"))
+
+
+async def test_concurrent_conflicting_chunk_writes_report_domain_conflict_without_temp_files(
+    store: LocalAssetStore,
+) -> None:
+    session = _session(total_chunks=1)
+
+    results = await asyncio.gather(
+        asyncio.to_thread(_write_chunk_in_worker, store, session, b"first"),
+        asyncio.to_thread(_write_chunk_in_worker, store, session, b"second"),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if isinstance(result, str)]
+    conflicts = [result for result in results if isinstance(result, RecordedVideoError)]
+    chunk = store.root / "uploads" / "sid" / "chunks" / "000001.part"
+    assert successes == [str(chunk)]
+    assert len(conflicts) == 1
+    assert conflicts[0].code is ErrorCode.CORRUPT_MEDIA
+    assert chunk.read_bytes() in {b"first", b"second"}
+    assert not list(chunk.parent.glob("*.tmp"))
+
+
 async def test_open_media_range_reads_only_requested_bytes(store: LocalAssetStore) -> None:
     path = await store.write_atomic(store.root / "assets" / "asset-uuid" / "derived.bin", b"012345")
 
     assert await store.open_media_range(path, 1, 4) == b"123"
 
 
-async def test_disk_full_os_error_has_explicit_testable_error_code(
+@pytest.mark.parametrize(
+    "storage_error",
+    [
+        OSError(errno.ENOSPC, "No space left on device"),
+        OSError(getattr(errno, "EDQUOT", 122), "Disk quota exceeded"),
+        WindowsDiskFullError("The disk is full"),
+    ],
+)
+async def test_disk_full_os_errors_have_explicit_permanent_error_code(
     store: LocalAssetStore,
     monkeypatch: pytest.MonkeyPatch,
+    storage_error: OSError,
 ) -> None:
     def no_space(_source: Path, _destination: Path) -> None:
-        raise OSError(errno.ENOSPC, "No space left on device")
+        raise storage_error
 
-    monkeypatch.setattr("vsa_agent.recorded_video.assets.os.replace", no_space)
+    monkeypatch.setattr("vsa_agent.recorded_video.assets.os.link", no_space)
 
     with pytest.raises(RecordedVideoError) as disk_full:
         await store.write_chunk(_session(total_chunks=1), 1, b"x")
