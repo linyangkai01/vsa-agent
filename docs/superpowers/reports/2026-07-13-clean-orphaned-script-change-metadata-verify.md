@@ -1,29 +1,29 @@
-# clean-orphaned-script-change-metadata Verification
+# clean-orphaned-script-change-metadata 验证报告
 
-## Scope
+## 范围
 
-The change removes the untracked active `openspec/changes/script-es-runtime-stack/` directory, which contained only stale Comet recovery metadata. The archived change remains at `openspec/changes/archive/2026-07-12-script-es-runtime-stack/`.
+本 change 删除未跟踪的活动目录 `openspec/changes/script-es-runtime-stack/`，该目录只含失效的 Comet 恢复元数据。归档 change 仍位于 `openspec/changes/archive/2026-07-12-script-es-runtime-stack/`。
 
-## Completeness
+## 完整性
 
-- `tasks.md` has 2/2 tasks checked.
-- The proposal, design, and `workflow-metadata-hygiene` delta spec match the implementation: no runtime script, application code, dependency, API, or archived artifact was changed.
-- `openspec list --json` no longer includes `script-es-runtime-stack` as an active change.
+- `tasks.md` 的 2/2 项任务均已勾选。
+- proposal、design 和 `workflow-metadata-hygiene` delta spec 与实现一致：未修改运行脚本、应用代码、依赖、API 或归档产物。
+- `openspec list --json` 不再将 `script-es-runtime-stack` 列为活动 change。
 
-## Verification
+## 验证结果
 
-| Check | Result |
+| 检查项 | 结果 |
 | --- | --- |
-| `openspec validate clean-orphaned-script-change-metadata --strict` | PASS |
-| `python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py -q` | PASS, 34 tests |
-| `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-server-files.ps1 -PreflightOnly` | PASS, 36 files |
-| Archive directory exists | PASS |
-| `sync-server-files.ps1` references only `archive\\2026-07-12-script-es-runtime-stack` | PASS |
+| `openspec validate clean-orphaned-script-change-metadata --strict` | 通过 |
+| `python -m pytest tests/unit/scripts/test_es_runtime_stack_script.py -q` | 通过，34 个测试 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-server-files.ps1 -PreflightOnly` | 通过，36 个文件 |
+| 归档目录存在 | 通过 |
+| `sync-server-files.ps1` 仅引用 `archive\\2026-07-12-script-es-runtime-stack` | 通过 |
 
-## Verification Boundary
+## 验证边界
 
-The workspace contains uncommitted, unrelated recorded-video Task 4 changes. Full-suite execution was intentionally not used for this metadata-only change because concurrent edits would make the result non-attributable. The strict OpenSpec validation, script contract test, and sync preflight cover the affected behavior directly.
+工作区同时存在未提交、无关的录播 Task 4 改动。该 metadata-only change 未运行全量测试，避免并行改动使结果无法归因。OpenSpec strict、脚本契约测试和同步 preflight 直接覆盖了本次影响范围。
 
-## Assessment
+## 结论
 
-The stale active recovery metadata is removed, the archived history remains intact, and supported runtime scripts and their server-sync references are unchanged.
+失效的活动恢复元数据已删除，归档历史保持完整，受支持的运行脚本和服务器同步引用均未变化。
