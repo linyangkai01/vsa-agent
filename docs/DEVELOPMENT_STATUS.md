@@ -1,6 +1,6 @@
 # Development Status
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Current State
 
@@ -58,6 +58,25 @@ Result: valid before archive.
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
 - Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
 - No implementation code has been started for this change.
+
+## Python Quality Program
+
+The repository-wide Python quality work is split into five ordered Comet changes. `frontend/original-ui` is excluded from code-quality refactoring.
+
+- `stabilize-test-contracts`: implementation and verification complete. The current branch already contains `tests/unit/recorded_video/__init__.py`, which gives `recorded_video/test_models.py` a package-qualified module name while `archive/test_models.py` remains distinct.
+- `enforce-python-quality-baseline`: next; clear Ruff lint and format debt in `src/` and `tests/`.
+- `consolidate-runtime-scripts`: consolidate shared script preflight logic while preserving referenced and cross-platform entry points.
+- `refactor-video-understanding-pipeline`: separate normalization from I/O orchestration while preserving public contracts.
+- `refactor-search-orchestration`: consolidate search result normalization, routing, fusion and critic stages.
+
+Test collection verification on 2026-07-13:
+
+```powershell
+pytest --collect-only -q
+pytest -q
+```
+
+Result: `763 tests collected`; `759 passed, 4 skipped, 1 warning`.
 
 ## Active Runtime Validation
 
