@@ -241,6 +241,41 @@ def test_job_config_snapshot_is_recursively_immutable_and_json_round_trips() -> 
     assert Job.model_validate(python_dump).model_dump(mode="json") == dumped
 
 
+def test_job_config_snapshot_top_level_backing_store_rejects_direct_mutation() -> None:
+    job = Job(
+        job_id="job-1",
+        asset_id="asset-1",
+        pipeline_version="v1",
+        config_snapshot={"pipeline": {"model": "vision-v1"}},
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    with pytest.raises(TypeError):
+        job.config_snapshot._values["pipeline"] = "mutated"
+
+
+def test_job_config_snapshot_nested_backing_store_rejects_direct_mutation() -> None:
+    job = Job(
+        job_id="job-1",
+        asset_id="asset-1",
+        pipeline_version="v1",
+        config_snapshot={"pipeline": {"model": "vision-v1"}},
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    with pytest.raises(TypeError):
+        job.config_snapshot["pipeline"]._values["model"] = "mutated"
+
+
+def test_job_config_snapshot_backing_store_cannot_be_rebound() -> None:
+    job = _job(JobStatus.QUEUED)
+
+    with pytest.raises(AttributeError):
+        job.config_snapshot._values = {"pipeline_version": "mutated"}
+
+
 def test_job_transition_table_is_deeply_immutable() -> None:
     with pytest.raises(TypeError):
         ALLOWED_JOB_TRANSITIONS[JobStatus.QUEUED] = frozenset()

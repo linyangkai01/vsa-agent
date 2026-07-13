@@ -57,7 +57,10 @@ class _FrozenDict(Mapping[str, Any]):
     __slots__ = ("_values",)
 
     def __init__(self, values: Mapping[str, Any]) -> None:
-        self._values = dict(values)
+        object.__setattr__(self, "_values", MappingProxyType(dict(values)))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
 
     def __getitem__(self, key: str) -> Any:
         return self._values[key]
