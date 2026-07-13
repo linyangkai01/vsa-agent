@@ -1,8 +1,8 @@
 ## 1. Characterization 测试
 
-- [ ] 1.1 为字符串、字典和既有 `UnderstandingResult` 的规范化输出补充完整结构断言。
-- [ ] 1.2 为文件、RTSP、LVS、短视频、长视频、帧输入和旧文本返回建立路径矩阵。
-- [ ] 1.3 记录当前进度事件、artifact/trace、metadata 和异常降级行为，先让边界测试覆盖现状。
+- [x] 1.1 为字符串、字典和既有 `UnderstandingResult` 的规范化输出补充完整结构断言。
+- [x] 1.2 为文件、RTSP、LVS、短视频、长视频、帧输入和旧文本返回建立路径矩阵。
+- [x] 1.3 记录当前进度事件、artifact/trace、metadata 和异常降级行为，先让边界测试覆盖现状。
 
 ## 2. 提取纯转换边界
 
