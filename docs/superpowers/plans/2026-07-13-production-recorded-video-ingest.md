@@ -139,22 +139,23 @@ async def test_only_one_worker_claims_job_and_complete_is_idempotent(repo):
 
 **Files:**
 - Create: `src/vsa_agent/recorded_video/assets.py`, `tests/unit/recorded_video/test_assets.py`
+- Modify: `src/vsa_agent/recorded_video/errors.py`, `src/vsa_agent/recorded_video/repository.py`, `tests/unit/recorded_video/test_models.py`, `tests/unit/recorded_video/test_repository.py`
 
 **Interfaces:**
 - Consumes: Task 2 的 `AssetStore` 协议。
-- Produces: `LocalAssetStore.create_session()`, `write_chunk()`, `assemble_source()`, `write_atomic()`, `open_media_range()`, `free_bytes()`, `cleanup_expired_sessions()`。
+- Produces: `LocalAssetStore.create_session()`, `write_chunk()`, `assemble_source()`, `write_atomic()`, `open_media_range()`, `free_bytes()`, `cleanup_expired_sessions()`；`JobRepository.list_expired_unreferenced_sessions(now)` 为回收提供真实、只读的“过期且无引用”候选证据。
 
-- [ ] **Step 1: 写路径穿越、重复 chunk、原子合并测试。**
+- [x] **Step 1: 写路径穿越、重复 chunk、原子合并测试。**
 ```python
 async def test_store_never_uses_user_filename_in_physical_path(store):
     await store.write_chunk("sid", 1, b"x", "../../evil.mkv")
     source = await store.assemble_source("sid", "asset-uuid", 1, "../../evil.mkv")
     assert source.is_relative_to(store.root / "assets" / "asset-uuid")
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_assets.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 UUID 布局和 fsync/rename。** chunk 写到 `uploads/{session}/chunks/{number:06}.part.tmp` 后 `os.replace`；组合写 `source/original.{ext}.tmp`，每文件 `flush+os.fsync` 后 rename；仅删除 repository 判定过期且无引用的目录。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_assets.py -q`。Expected: PASS，含磁盘不足和 unsafe filename 的明确错误码。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/assets.py tests/unit/recorded_video/test_assets.py && git commit -m "feat: add local recorded video asset store"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_assets.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 UUID 布局和 fsync/rename。** chunk 写到 `uploads/{session}/chunks/{number:06}.part.tmp` 后 `os.replace`；组合写 `source/original.{ext}.tmp`，每文件 `flush+os.fsync` 后 rename；仅删除 repository 判定过期且无引用的目录。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_assets.py tests/unit/recorded_video/test_repository.py -q`。Expected: PASS，含磁盘不足、unsafe filename、并发 source/原子写入以及仓储证明的过期无引用回收。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/assets.py tests/unit/recorded_video/test_assets.py && git commit -m "feat: add local recorded video asset store"`。
 
 ### Task 5: 三段式上传 API（OpenSpec 2.1、2.2）
 
