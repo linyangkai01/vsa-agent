@@ -33,21 +33,21 @@ base-ref: e06300d2a99dc790de4203d4e2d5de561e773bb1
 - Consumes: 现有 facade helper 行为。
 - Produces: 新模块 import、纯依赖和 facade identity 契约。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 测试从 `vsa_agent.tools.video_understanding_normalization` 导入 `_normalize_timestamp`、`_timestamp_to_seconds`、`_parse_thinking_from_content` 和 `_normalize_model_response`；断言模块没有 `cv2`、`get_config`、`write_live_trace_event`；断言 facade 对应 helper 与新模块对象相同。
 
-- [ ] **Step 2: 增加结构 characterization**
+- [x] **Step 2: 增加结构 characterization**
 
 覆盖：数值时间；PT duration；`<thinking>/<answer>`；既有 `UnderstandingResult` identity；字典默认 query/source；字符串生成文件 `video_path` 证据和 RTSP `sensor_id` 证据。
 
-- [ ] **Step 3: 验证 Red**
+- [x] **Step 3: 验证 Red**
 
 Run: `pytest -q tests/unit/tools/test_video_understanding_normalization.py`
 
 Expected: collection FAIL with `ModuleNotFoundError`，因为纯模块尚不存在。
 
-- [ ] **Step 4: 提交测试**
+- [x] **Step 4: 提交测试**
 
 Run: `git add tests/unit/tools/test_video_understanding_normalization.py && git commit -m "test: characterize video understanding normalization"`
 
