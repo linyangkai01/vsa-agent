@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from pydantic import TypeAdapter
 
 from vsa_agent.recorded_video.models import (
     Asset,
@@ -20,8 +21,12 @@ from vsa_agent.recorded_video.models import (
     JobStage,
     JobStatus,
     JobStep,
+    PipelineVersion,
     UploadSession,
 )
+
+_PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
+_STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
 
 _MIGRATION_1 = (
     """
@@ -163,6 +168,7 @@ class JobRepository:
         *,
         lease_seconds: int = 120,
         busy_timeout_ms: int = 5_000,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         if str(database_path) == ":memory:" or self.database_path.as_posix().startswith("file:"):
@@ -173,6 +179,10 @@ class JobRepository:
             raise ValueError("busy_timeout_ms must be positive")
         self.lease_seconds = lease_seconds
         self.busy_timeout_ms = busy_timeout_ms
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _now(self) -> datetime:
+        return _require_aware(self._clock(), "clock")
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -221,7 +231,7 @@ class JobRepository:
                         await connection.execute(statement)
                     await connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                        (1, _to_iso(datetime.now(UTC))),
+                        (1, _to_iso(self._now())),
                     )
 
     async def create_upload_session(self, asset: Asset, session: UploadSession) -> UploadSession:
@@ -310,7 +320,7 @@ class JobRepository:
                         session_id, chunk_number, checksum, size_bytes, path, recorded_at
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (session_id, chunk_number, checksum, size_bytes, path, _to_iso(datetime.now(UTC))),
+                    (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
                 )
                 await connection.execute(
                     """
@@ -331,7 +341,8 @@ class JobRepository:
         now: datetime | None = None,
         config_snapshot: Mapping[str, Any] | None = None,
     ) -> Job:
-        completed_at = _require_aware(now or datetime.now(UTC), "now")
+        normalized_pipeline_version = _PIPELINE_VERSION_ADAPTER.validate_python(pipeline_version)
+        completed_at = _require_aware(now or self._now(), "now")
         snapshot = dict(config_snapshot or {})
 
         async with self._connect() as connection:
@@ -339,7 +350,7 @@ class JobRepository:
                 existing = await self._fetchone(
                     connection,
                     "SELECT * FROM jobs WHERE asset_id = ? AND pipeline_version = ?",
-                    (asset_id, pipeline_version),
+                    (asset_id, normalized_pipeline_version),
                 )
                 if existing is not None:
                     return self._row_to_job(existing)
@@ -353,7 +364,7 @@ class JobRepository:
                 job = Job(
                     job_id=str(uuid.uuid4()),
                     asset_id=asset_id,
-                    pipeline_version=pipeline_version,
+                    pipeline_version=normalized_pipeline_version,
                     status=JobStatus.QUEUED,
                     next_run_at=completed_at,
                     config_snapshot=snapshot,
@@ -393,10 +404,8 @@ class JobRepository:
         lease_until = _to_iso(claimed_at + timedelta(seconds=self.lease_seconds))
         due = """
             (
-                cancel_requested = 0 AND (
-                    (status = 'queued' AND (next_run_at IS NULL OR next_run_at <= :now))
-                    OR (status = 'retry_wait' AND next_run_at IS NOT NULL AND next_run_at <= :now)
-                )
+                status = 'queued'
+                AND (next_run_at IS NULL OR next_run_at <= :now)
             )
             OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= :now)
         """
@@ -428,12 +437,25 @@ class JobRepository:
 
         async with self._connect() as connection:
             async with self._transaction(connection):
+                await connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, updated_at = ?
+                    WHERE status = ? AND next_run_at IS NOT NULL AND next_run_at <= ?
+                    """,
+                    (
+                        JobStatus.QUEUED.value,
+                        claimed_iso,
+                        JobStatus.RETRY_WAIT.value,
+                        claimed_iso,
+                    ),
+                )
                 row = await self._fetchone(connection, sql, parameters)
                 if row is None or row["status"] == JobStatus.CANCELLED.value:
                     return None
                 return self._row_to_job(row)
 
-    async def renew_lease(self, job_id: str, owner: str, now: datetime) -> Job:
+    async def renew_lease(self, job_id: str, owner: str, now: datetime, *, attempt: int) -> Job:
         renewed_at = _require_aware(now, "now")
         renewed_iso = _to_iso(renewed_at)
         lease_until = _to_iso(renewed_at + timedelta(seconds=self.lease_seconds))
@@ -446,7 +468,7 @@ class JobRepository:
                     UPDATE jobs
                     SET lease_until = ?, heartbeat_at = ?, updated_at = ?
                     WHERE job_id = ? AND status = ? AND lease_owner = ?
-                        AND lease_until > ? AND cancel_requested = 0
+                        AND attempt = ? AND lease_until > ? AND cancel_requested = 0
                     RETURNING *
                     """,
                     (
@@ -456,56 +478,77 @@ class JobRepository:
                         job_id,
                         JobStatus.RUNNING.value,
                         owner,
+                        attempt,
                         renewed_iso,
                     ),
                 )
                 if row is not None:
                     return self._row_to_job(row)
-                current = await self._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
-                if current is None:
-                    raise KeyError(f"unknown job: {job_id}")
-                if current["lease_owner"] != owner:
-                    raise PermissionError("lease owner does not match")
-                raise PermissionError("job has no active lease")
+                await self._raise_lease_error(connection, job_id, owner, attempt, renewed_at)
+                raise AssertionError("unreachable")
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
         if step.job_id != job.job_id:
             raise ValueError("job and checkpoint must refer to the same job_id")
         if job.lease_owner is None:
             raise PermissionError("checkpoint requires a lease owner")
-        checkpoint_at = datetime.now(UTC)
+        checkpoint_at = self._now()
 
         async with self._connect() as connection:
             async with self._transaction(connection):
-                current = await self._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job.job_id,))
-                if current is None:
-                    raise KeyError(f"unknown job: {job.job_id}")
-                if current["status"] != JobStatus.RUNNING.value or current["lease_owner"] != job.lease_owner:
-                    raise PermissionError("checkpoint requires the active lease owner")
-
-                await connection.execute(
-                    """
-                    INSERT INTO job_steps (
-                        job_id, stage, status, output_manifest, output_checksum, model, elapsed_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(job_id, stage) DO UPDATE SET
-                        status = excluded.status,
-                        output_manifest = excluded.output_manifest,
-                        output_checksum = excluded.output_checksum,
-                        model = excluded.model,
-                        elapsed_ms = excluded.elapsed_ms
-                    """,
-                    (
-                        step.job_id,
-                        step.stage.value,
-                        step.status.value,
-                        step.output_manifest,
-                        step.output_checksum,
-                        step.model,
-                        step.elapsed_ms,
-                    ),
+                current = await self._require_active_lease(
+                    connection,
+                    job.job_id,
+                    job.lease_owner,
+                    job.attempt,
+                    checkpoint_at,
                 )
+
+                existing = await self._fetchone(
+                    connection,
+                    "SELECT * FROM job_steps WHERE job_id = ? AND stage = ?",
+                    (step.job_id, step.stage.value),
+                )
+                incoming_values = (
+                    step.status.value,
+                    step.output_manifest,
+                    step.output_checksum,
+                    step.model,
+                    step.elapsed_ms,
+                )
+                if existing is not None:
+                    stored_values = (
+                        existing["status"],
+                        existing["output_manifest"],
+                        existing["output_checksum"],
+                        existing["model"],
+                        existing["elapsed_ms"],
+                    )
+                    if stored_values != incoming_values:
+                        raise ValueError(f"checkpoint conflict for {step.job_id}:{step.stage.value}")
+                else:
+                    current_stage = JobStage(current["stage"]) if current["stage"] else None
+                    if current_stage is not None and _STAGE_ORDER[step.stage] < _STAGE_ORDER[current_stage]:
+                        raise ValueError(f"stage regression from {current_stage.value} to {step.stage.value}")
+
+                    await connection.execute(
+                        """
+                        INSERT INTO job_steps (
+                            job_id, stage, status, output_manifest, output_checksum, model, elapsed_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            step.job_id,
+                            step.stage.value,
+                            step.status.value,
+                            step.output_manifest,
+                            step.output_checksum,
+                            step.model,
+                            step.elapsed_ms,
+                        ),
+                    )
                 if current["cancel_requested"]:
+                    persisted_stage = current["stage"] if existing is not None else step.stage.value
                     await connection.execute(
                         """
                         UPDATE jobs
@@ -513,9 +556,9 @@ class JobRepository:
                             heartbeat_at = NULL, cancel_requested = 0, updated_at = ?
                         WHERE job_id = ?
                         """,
-                        (JobStatus.CANCELLED.value, step.stage.value, _to_iso(checkpoint_at), job.job_id),
+                        (JobStatus.CANCELLED.value, persisted_stage, _to_iso(checkpoint_at), job.job_id),
                     )
-                else:
+                elif existing is None:
                     await connection.execute(
                         "UPDATE jobs SET stage = ?, updated_at = ? WHERE job_id = ?",
                         (step.stage.value, _to_iso(checkpoint_at), job.job_id),
@@ -528,10 +571,11 @@ class JobRepository:
         next_run_at: datetime,
         error: str,
         *,
+        attempt: int,
         now: datetime | None = None,
     ) -> Job:
         retry_at = _require_aware(next_run_at, "next_run_at")
-        scheduled_at = _require_aware(now or datetime.now(UTC), "now")
+        scheduled_at = _require_aware(now or self._now(), "now")
 
         async with self._connect() as connection:
             async with self._transaction(connection):
@@ -541,7 +585,8 @@ class JobRepository:
                     UPDATE jobs
                     SET status = ?, next_run_at = ?, lease_owner = NULL, lease_until = NULL,
                         heartbeat_at = NULL, last_error = ?, updated_at = ?
-                    WHERE job_id = ? AND status = ? AND lease_owner = ? AND cancel_requested = 0
+                    WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                        AND lease_until > ? AND cancel_requested = 0
                     RETURNING *
                     """,
                     (
@@ -552,11 +597,13 @@ class JobRepository:
                         job_id,
                         JobStatus.RUNNING.value,
                         owner,
+                        attempt,
+                        _to_iso(scheduled_at),
                     ),
                 )
                 if row is not None:
                     return self._row_to_job(row)
-                await self._raise_lease_error(connection, job_id, owner)
+                await self._raise_lease_error(connection, job_id, owner, attempt, scheduled_at)
                 raise AssertionError("unreachable")
 
     async def request_cancel(self, job_id: str, now: datetime) -> Job:
@@ -565,12 +612,21 @@ class JobRepository:
 
         async with self._connect() as connection:
             async with self._transaction(connection):
+                await connection.execute(
+                    "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ? AND status = ?",
+                    (
+                        JobStatus.QUEUED.value,
+                        requested_iso,
+                        job_id,
+                        JobStatus.RETRY_WAIT.value,
+                    ),
+                )
                 row = await self._fetchone(
                     connection,
                     """
                     UPDATE jobs
                     SET status = CASE
-                            WHEN status IN ('queued', 'retry_wait') THEN 'cancelled'
+                            WHEN status = 'queued' THEN 'cancelled'
                             WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
                             ELSE status
                         END,
@@ -579,17 +635,17 @@ class JobRepository:
                             ELSE 0
                         END,
                         lease_owner = CASE
-                            WHEN status IN ('queued', 'retry_wait')
+                            WHEN status = 'queued'
                                 OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
                             THEN NULL ELSE lease_owner
                         END,
                         lease_until = CASE
-                            WHEN status IN ('queued', 'retry_wait')
+                            WHEN status = 'queued'
                                 OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
                             THEN NULL ELSE lease_until
                         END,
                         heartbeat_at = CASE
-                            WHEN status IN ('queued', 'retry_wait')
+                            WHEN status = 'queued'
                                 OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
                             THEN NULL ELSE heartbeat_at
                         END,
@@ -618,10 +674,19 @@ class JobRepository:
         async with self._connect() as connection:
             async with self._transaction(connection):
                 await connection.execute(
+                    "UPDATE jobs SET status = ?, updated_at = ? WHERE asset_id = ? AND status = ?",
+                    (
+                        JobStatus.QUEUED.value,
+                        deleted_iso,
+                        asset_id,
+                        JobStatus.RETRY_WAIT.value,
+                    ),
+                )
+                await connection.execute(
                     """
                     UPDATE jobs
                     SET status = CASE
-                            WHEN status IN ('queued', 'retry_wait') THEN 'cancelled'
+                            WHEN status = 'queued' THEN 'cancelled'
                             WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
                             ELSE status
                         END,
@@ -630,22 +695,22 @@ class JobRepository:
                             ELSE cancel_requested
                         END,
                         lease_owner = CASE
-                            WHEN status IN ('queued', 'retry_wait')
+                            WHEN status = 'queued'
                                 OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
                             THEN NULL ELSE lease_owner
                         END,
                         lease_until = CASE
-                            WHEN status IN ('queued', 'retry_wait')
+                            WHEN status = 'queued'
                                 OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
                             THEN NULL ELSE lease_until
                         END,
                         heartbeat_at = CASE
-                            WHEN status IN ('queued', 'retry_wait')
+                            WHEN status = 'queued'
                                 OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
                             THEN NULL ELSE heartbeat_at
                         END,
                         updated_at = ?
-                    WHERE asset_id = ? AND status IN ('queued', 'retry_wait', 'running')
+                    WHERE asset_id = ? AND status IN ('queued', 'running')
                     """,
                     (
                         deleted_iso,
@@ -683,13 +748,39 @@ class JobRepository:
         finally:
             await cursor.close()
 
-    @staticmethod
-    async def _raise_lease_error(connection: aiosqlite.Connection, job_id: str, owner: str) -> None:
-        current = await JobRepository._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+    @classmethod
+    async def _require_active_lease(
+        cls,
+        connection: aiosqlite.Connection,
+        job_id: str,
+        owner: str,
+        attempt: int,
+        now: datetime,
+    ) -> aiosqlite.Row:
+        current = await cls._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
         if current is None:
             raise KeyError(f"unknown job: {job_id}")
         if current["lease_owner"] != owner:
             raise PermissionError("lease owner does not match")
+        if current["attempt"] != attempt:
+            raise PermissionError("job attempt does not match")
+        lease_until = _from_iso(current["lease_until"])
+        if current["status"] != JobStatus.RUNNING.value or lease_until is None or lease_until <= now:
+            raise PermissionError("job has no active lease")
+        return current
+
+    @classmethod
+    async def _raise_lease_error(
+        cls,
+        connection: aiosqlite.Connection,
+        job_id: str,
+        owner: str,
+        attempt: int,
+        now: datetime,
+    ) -> None:
+        current = await cls._require_active_lease(connection, job_id, owner, attempt, now)
+        if current["cancel_requested"]:
+            raise PermissionError("job cancellation requested")
         raise PermissionError("job has no active lease")
 
     @staticmethod
