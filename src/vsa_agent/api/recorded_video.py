@@ -103,7 +103,11 @@ async def create_recorded_video(payload: CreateRecordedVideoRequest) -> dict[str
         expires_at=now + _SESSION_TTL,
     )
     await repository.create_upload_session(asset, session)
-    await store.create_session(session)
+    try:
+        await store.create_session(session)
+    except Exception:
+        await repository.delete_upload_session(session_id, asset_id)
+        raise
     return {
         "url": f"/api/v1/vst/v1/storage/file?upload_session_id={session_id}",
         "asset_id": asset_id,
@@ -131,7 +135,7 @@ async def upload_recorded_video_chunk(
     checksum = hashlib.sha256(content).hexdigest()
     path = str(store.root / "uploads" / upload_session_id / "chunks" / f"{chunk_number:06d}.part")
     try:
-        created = await repository.reserve_upload_chunk(
+        reservation_token = await repository.reserve_upload_chunk(
             upload_session_id,
             identifier=identifier,
             chunk_number=chunk_number,
@@ -151,16 +155,20 @@ async def upload_recorded_video_chunk(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     try:
-        if created or not Path(path).is_file():
+        if reservation_token or not Path(path).is_file():
             await store.write_chunk(session, chunk_number, content)
+        if reservation_token:
+            await repository.confirm_reserved_upload_chunk(
+                upload_session_id,
+                chunk_number,
+                reservation_token,
+            )
     except Exception:
-        if created:
+        if reservation_token:
             await repository.release_reserved_upload_chunk(
                 upload_session_id,
                 chunk_number,
-                checksum,
-                size_bytes=len(content),
-                path=path,
+                reservation_token,
             )
         raise
 

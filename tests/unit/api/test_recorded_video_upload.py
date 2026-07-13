@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,77 @@ def test_chunk_protocol_rejects_invalid_chunk_number(client: TestClient) -> None
     response = _upload_chunk(client, created["url"], b"x", chunk=0, total=1)
 
     assert response.status_code == 400
+
+
+def test_create_upload_removes_database_rows_when_session_directory_creation_fails(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video
+
+    async def fail_create_session(*_args: object, **_kwargs: object) -> None:
+        raise OSError("session directory unavailable")
+
+    monkeypatch.setattr(recorded_video.LocalAssetStore, "create_session", fail_create_session)
+
+    with pytest.raises(OSError, match="session directory unavailable"):
+        client.post("/api/v1/videos", json={"filename": "yard.mp4"})
+
+    database_path = tmp_path / "recorded-video" / "recorded-video.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM upload_sessions").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM assets").fetchone() == (0,)
+
+
+def test_failed_first_chunk_write_releases_identifier_and_total_binding(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video
+
+    created = _create_upload(client, "yard.mp4")
+    original_write_chunk = recorded_video.LocalAssetStore.write_chunk
+    writes = 0
+
+    async def fail_first_write(store: object, *args: object, **kwargs: object) -> str:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise OSError("chunk write failed")
+        return await original_write_chunk(store, *args, **kwargs)
+
+    monkeypatch.setattr(recorded_video.LocalAssetStore, "write_chunk", fail_first_write)
+
+    with pytest.raises(OSError, match="chunk write failed"):
+        _upload_chunk(
+            client,
+            created["url"],
+            b"failed",
+            chunk=1,
+            total=2,
+            identifier="failed-identifier",
+            filename="yard.mp4",
+        )
+
+    database_path = tmp_path / "recorded-video" / "recorded-video.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        persisted = connection.execute(
+            "SELECT identifier, total_chunks, received_chunks FROM upload_sessions WHERE session_id = ?",
+            (created["upload_session_id"],),
+        ).fetchone()
+    assert persisted == (created["upload_session_id"], 1, 0)
+
+    retry = _upload_chunk(
+        client,
+        created["url"],
+        b"retry",
+        chunk=1,
+        total=1,
+        identifier="retry-identifier",
+        filename="yard.mp4",
+    )
+
+    assert retry.status_code == 200
+    assert retry.json()["chunkCount"] == 1

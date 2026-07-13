@@ -28,7 +28,7 @@ from vsa_agent.recorded_video.models import (
 
 _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
 _SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
 _SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
@@ -138,6 +138,15 @@ _MIGRATION_1 = (
     "CREATE UNIQUE INDEX uq_jobs_asset_pipeline ON jobs(asset_id, pipeline_version)",
     "CREATE UNIQUE INDEX uq_segments_asset_pipeline_ordinal ON segments(asset_id, pipeline_version, ordinal)",
     "CREATE INDEX ix_jobs_due ON jobs(status, next_run_at, lease_until)",
+)
+
+_MIGRATION_2 = (
+    "ALTER TABLE upload_chunks ADD COLUMN reservation_token TEXT",
+    """
+    ALTER TABLE upload_chunks
+    ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed'
+    CHECK (status IN ('reserved', 'confirmed'))
+    """,
 )
 
 
@@ -288,12 +297,13 @@ class JobRepository:
                     raise RuntimeError(
                         f"database has newer schema migration {version}; supported version is {_SCHEMA_VERSION}"
                     )
-                if version < _SCHEMA_VERSION:
-                    for statement in _MIGRATION_1:
+                migrations = {1: _MIGRATION_1, 2: _MIGRATION_2}
+                for migration_version in range(version + 1, _SCHEMA_VERSION + 1):
+                    for statement in migrations[migration_version]:
                         await connection.execute(statement)
                     await connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                        (_SCHEMA_VERSION, _to_iso(self._now())),
+                        (migration_version, _to_iso(self._now())),
                     )
 
     async def create_upload_session(self, asset: Asset, session: UploadSession) -> UploadSession:
@@ -345,6 +355,30 @@ class JobRepository:
                 return self._row_to_upload_session(existing)
         return session
 
+    async def delete_upload_session(self, session_id: str, asset_id: str) -> bool:
+        """Remove a newly-created upload session and its otherwise unreferenced asset."""
+        async with self._write_transaction() as connection:
+            cursor = await connection.execute(
+                "DELETE FROM upload_sessions WHERE session_id = ? AND asset_id = ?",
+                (session_id, asset_id),
+            )
+            try:
+                deleted = cursor.rowcount == 1
+            finally:
+                await cursor.close()
+            if deleted:
+                await connection.execute(
+                    """
+                    DELETE FROM assets
+                    WHERE asset_id = ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM upload_sessions WHERE upload_sessions.asset_id = assets.asset_id
+                        )
+                    """,
+                    (asset_id,),
+                )
+            return deleted
+
     async def list_expired_unreferenced_sessions(self, now: datetime) -> list[UploadSession]:
         """Return expired sessions whose temporary chunks are no longer needed.
 
@@ -365,6 +399,7 @@ class JobRepository:
                         SELECT COUNT(*)
                         FROM upload_chunks AS chunks
                         WHERE chunks.session_id = sessions.session_id
+                            AND chunks.status = 'confirmed'
                     ) = sessions.total_chunks
                 ORDER BY sessions.expires_at, sessions.session_id
                 """,
@@ -423,14 +458,15 @@ class JobRepository:
         size_bytes: int,
         max_upload_bytes: int,
         path: str,
-    ) -> bool:
+    ) -> str | None:
         """Atomically bind an upload and reserve durable quota for one chunk.
 
         The initial session identifier is its session id. The first chunk replaces
         that placeholder with the client-supplied nvstreamer identifier and fixes
         the initially unknown total chunk count. Recording before filesystem I/O
         makes the size limit safe across concurrent API workers; callers must
-        release a newly-created reservation when their write fails.
+        release their token-owned reservation when their write fails. A matching
+        confirmed row returns ``None`` because no new filesystem write is owned.
         """
         if not identifier:
             raise ValueError("upload identifier is required")
@@ -451,8 +487,13 @@ class JobRepository:
                 if session is None:
                     raise KeyError(f"unknown upload session: {session_id}")
 
-                is_initial_chunk = session["received_chunks"] == 0
-                if is_initial_chunk:
+                chunk_count_row = await self._fetchone(
+                    connection,
+                    "SELECT COUNT(*) AS chunk_count FROM upload_chunks WHERE session_id = ?",
+                    (session_id,),
+                )
+                is_unbound = int(chunk_count_row["chunk_count"]) == 0
+                if is_unbound:
                     await connection.execute(
                         """
                         UPDATE upload_sessions
@@ -471,9 +512,14 @@ class JobRepository:
 
                 existing = await self._fetchone(
                     connection,
-                    "SELECT checksum, size_bytes, path FROM upload_chunks WHERE session_id = ? AND chunk_number = ?",
+                    """
+                    SELECT checksum, size_bytes, path, status
+                    FROM upload_chunks
+                    WHERE session_id = ? AND chunk_number = ?
+                    """,
                     (session_id, chunk_number),
                 )
+                reservation_token = str(uuid.uuid4())
                 if existing is not None:
                     if (
                         existing["checksum"] != checksum
@@ -481,7 +527,17 @@ class JobRepository:
                         or existing["path"] != path
                     ):
                         raise ValueError("chunk key already contains different content")
-                    return False
+                    if existing["status"] == "confirmed":
+                        return None
+                    await connection.execute(
+                        """
+                        UPDATE upload_chunks
+                        SET reservation_token = ?, recorded_at = ?
+                        WHERE session_id = ? AND chunk_number = ? AND status = 'reserved'
+                        """,
+                        (reservation_token, _to_iso(self._now()), session_id, chunk_number),
+                    )
+                    return reservation_token
 
                 total_row = await self._fetchone(
                     connection,
@@ -495,59 +551,101 @@ class JobRepository:
                 await connection.execute(
                     """
                     INSERT INTO upload_chunks (
-                        session_id, chunk_number, checksum, size_bytes, path, recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        session_id, chunk_number, checksum, size_bytes, path, recorded_at,
+                        reservation_token, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved')
                     """,
-                    (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
+                    (
+                        session_id,
+                        chunk_number,
+                        checksum,
+                        size_bytes,
+                        path,
+                        _to_iso(self._now()),
+                        reservation_token,
+                    ),
                 )
-                await connection.execute(
-                    """
-                    UPDATE upload_sessions
-                    SET received_chunks = (
-                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
-                    )
-                    WHERE session_id = ?
-                    """,
-                    (session_id, session_id),
-                )
-                return True
+                return reservation_token
         except sqlite3.IntegrityError as exc:
             raise ValueError("upload identifier belongs to a different session") from exc
+
+    async def confirm_reserved_upload_chunk(
+        self,
+        session_id: str,
+        chunk_number: int,
+        reservation_token: str | None,
+    ) -> bool:
+        """Count a chunk only when the current reservation owner confirms its write."""
+        if not reservation_token:
+            return False
+        async with self._write_transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE upload_chunks
+                SET status = 'confirmed'
+                WHERE session_id = ? AND chunk_number = ?
+                    AND reservation_token = ? AND status = 'reserved'
+                """,
+                (session_id, chunk_number, reservation_token),
+            )
+            try:
+                confirmed = cursor.rowcount == 1
+            finally:
+                await cursor.close()
+            if confirmed:
+                await self._refresh_received_chunks(connection, session_id)
+            return confirmed
 
     async def release_reserved_upload_chunk(
         self,
         session_id: str,
         chunk_number: int,
-        checksum: str,
-        *,
-        size_bytes: int,
-        path: str,
+        reservation_token: str | None,
     ) -> bool:
-        """Release a reservation only when it still exactly matches a failed write."""
+        """Release a reservation only while the caller still owns its pending token."""
+        if not reservation_token:
+            return False
         async with self._write_transaction() as connection:
             cursor = await connection.execute(
                 """
                 DELETE FROM upload_chunks
-                WHERE session_id = ? AND chunk_number = ? AND checksum = ? AND size_bytes = ? AND path = ?
+                WHERE session_id = ? AND chunk_number = ?
+                    AND reservation_token = ? AND status = 'reserved'
                 """,
-                (session_id, chunk_number, checksum, size_bytes, path),
+                (session_id, chunk_number, reservation_token),
             )
             try:
                 released = cursor.rowcount == 1
             finally:
                 await cursor.close()
             if released:
+                await self._refresh_received_chunks(connection, session_id)
                 await connection.execute(
                     """
                     UPDATE upload_sessions
-                    SET received_chunks = (
-                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
-                    )
+                    SET identifier = session_id, total_chunks = 1
                     WHERE session_id = ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM upload_chunks WHERE upload_chunks.session_id = upload_sessions.session_id
+                        )
                     """,
-                    (session_id, session_id),
+                    (session_id,),
                 )
             return released
+
+    async def _refresh_received_chunks(self, connection: aiosqlite.Connection, session_id: str) -> None:
+        await connection.execute(
+            """
+            UPDATE upload_sessions
+            SET received_chunks = (
+                SELECT COUNT(*)
+                FROM upload_chunks
+                WHERE session_id = ? AND status = 'confirmed'
+            )
+            WHERE session_id = ?
+            """,
+            (session_id, session_id),
+        )
 
     async def record_chunk(
         self,
@@ -585,8 +683,9 @@ class JobRepository:
             await connection.execute(
                 """
                     INSERT INTO upload_chunks (
-                        session_id, chunk_number, checksum, size_bytes, path, recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        session_id, chunk_number, checksum, size_bytes, path, recorded_at,
+                        reservation_token, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'confirmed')
                     """,
                 (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
             )
@@ -594,7 +693,7 @@ class JobRepository:
                 """
                     UPDATE upload_sessions
                     SET received_chunks = (
-                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
+                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ? AND status = 'confirmed'
                     )
                     WHERE session_id = ?
                     """,
@@ -633,7 +732,8 @@ class JobRepository:
                 """
                     SELECT sessions.session_id
                     FROM upload_sessions AS sessions
-                    LEFT JOIN upload_chunks AS chunks ON chunks.session_id = sessions.session_id
+                    LEFT JOIN upload_chunks AS chunks
+                        ON chunks.session_id = sessions.session_id AND chunks.status = 'confirmed'
                     WHERE sessions.asset_id = ?
                     GROUP BY sessions.session_id, sessions.total_chunks
                     HAVING COUNT(chunks.upload_chunk_id) = sessions.total_chunks
