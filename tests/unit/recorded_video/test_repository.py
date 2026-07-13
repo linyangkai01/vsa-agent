@@ -306,59 +306,19 @@ async def test_equivalent_pipeline_versions_complete_once_across_repository_inst
     assert _fetch_one(repo.database_path, "SELECT COUNT(*) AS value FROM jobs")["value"] == 1
 
 
-@pytest.mark.parametrize(
-    ("secret_key", "secret_value"),
-    [
-        ("api_key", "api-key-value"),
-        ("Authorization", "Bearer private-value"),
-        ("password", "password-value"),
-        ("access_token", "token-value"),
-        ("credentials", "credential-value"),
-        ("client_secret", "secret-value"),
-    ],
-)
+@pytest.mark.parametrize("secret_key", ["openai_api_key", "providerApiKey", "api_key_v2"])
 @pytest.mark.asyncio
-async def test_complete_upload_rejects_nested_secret_keys_before_json_persistence(
+async def test_complete_upload_rejects_unlisted_composite_api_key_names_before_json_persistence(
     repo: JobRepository,
     secret_key: str,
-    secret_value: str,
 ):
     session = _session()
     await repo.create_upload_session(_asset(), session)
     await _record_all_chunks(repo, session)
-    snapshot = {"providers": [{"safe": {secret_key: secret_value}}]}
+    snapshot = {"vision": {secret_key: "private-value"}}
 
-    with pytest.raises(ValueError, match="secret-bearing config key"):
+    with pytest.raises(ValueError, match="snapshot key is not allowed"):
         await repo.complete_upload("asset", "v1", now=NOW, config_snapshot=snapshot)
-
-    connection = sqlite3.connect(repo.database_path)
-    try:
-        persisted_json = connection.execute("SELECT config_snapshot FROM jobs").fetchall()
-    finally:
-        connection.close()
-    assert persisted_json == []
-
-
-@pytest.mark.parametrize(
-    "secret_key",
-    ["API Key", "authorizationHeader"],
-)
-@pytest.mark.asyncio
-async def test_complete_upload_rejects_normalized_secret_key_variants_before_json_persistence(
-    repo: JobRepository,
-    secret_key: str,
-):
-    session = _session()
-    await repo.create_upload_session(_asset(), session)
-    await _record_all_chunks(repo, session)
-
-    with pytest.raises(ValueError, match="secret-bearing config key"):
-        await repo.complete_upload(
-            "asset",
-            "v1",
-            now=NOW,
-            config_snapshot={"provider": {secret_key: "private-value"}},
-        )
 
     connection = sqlite3.connect(repo.database_path)
     try:
@@ -372,14 +332,15 @@ async def test_complete_upload_rejects_normalized_secret_key_variants_before_jso
     ("payload_key", "payload"),
     [
         ("image", "https://example.invalid/full-frame.png"),
-        ("image_url", "https://example.invalid/full-frame.png"),
         ("payload", "data:image/png;base64,iVBORw0KGgo="),
-        ("payload", base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"image-bytes" * 8).decode()),
-        ("mediaPayload", base64.b64encode(b"\x00\x00\x00\x18ftypmp42" + b"video-bytes" * 8).decode()),
+        (
+            "input",
+            base64.b64encode(b"\x00\x00\x00\x01\x67\x64\x00\x1f\xac\xd9\x40\x50" + b"h264-bytes" * 8).decode(),
+        ),
     ],
 )
 @pytest.mark.asyncio
-async def test_complete_upload_rejects_image_and_media_payloads_before_json_persistence(
+async def test_complete_upload_rejects_unlisted_image_and_media_payloads_before_json_persistence(
     repo: JobRepository,
     payload_key: str,
     payload: str,
@@ -388,7 +349,7 @@ async def test_complete_upload_rejects_image_and_media_payloads_before_json_pers
     await repo.create_upload_session(_asset(), session)
     await _record_all_chunks(repo, session)
 
-    with pytest.raises(ValueError, match="image or media payload"):
+    with pytest.raises(ValueError, match="snapshot key is not allowed|short identifier"):
         await repo.complete_upload(
             "asset",
             "v1",
@@ -434,7 +395,7 @@ async def test_ordinary_write_paths_share_transaction_helper(repo: JobRepository
 
 @pytest.mark.asyncio
 async def test_only_one_worker_claims_a_due_job_across_repository_instances(repo: JobRepository):
-    created = await _ready_job(repo, config_snapshot={"nested": {"enabled": True}})
+    created = await _ready_job(repo, config_snapshot={"vision": {"enabled": True}})
     contender = JobRepository(repo.database_path, lease_seconds=30)
 
     first, second = await asyncio.gather(
@@ -450,7 +411,7 @@ async def test_only_one_worker_claims_a_due_job_across_repository_instances(repo
     assert claimed.lease_owner in {"worker-1", "worker-2"}
     assert claimed.heartbeat_at == NOW
     assert claimed.lease_until == NOW + timedelta(seconds=30)
-    assert claimed.model_dump(mode="json")["config_snapshot"] == {"nested": {"enabled": True}}
+    assert claimed.model_dump(mode="json")["config_snapshot"] == {"vision": {"enabled": True}}
 
 
 @pytest.mark.asyncio

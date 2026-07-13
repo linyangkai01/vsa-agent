@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
-import re
+import math
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -31,31 +29,9 @@ from vsa_agent.recorded_video.models import (
 _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
 _SCHEMA_VERSION = 1
-_SECRET_KEY_PARTS = frozenset({"authorization", "credential", "credentials", "password", "secret", "token", "tokens"})
-_MEDIA_PAYLOAD_KEYS = frozenset(
-    {
-        "audio",
-        "audiobase64",
-        "audiodata",
-        "audiopayload",
-        "audiourl",
-        "image",
-        "imagebase64",
-        "imagedata",
-        "imagepayload",
-        "imageurl",
-        "media",
-        "mediabase64",
-        "mediadata",
-        "mediapayload",
-        "mediaurl",
-        "video",
-        "videobase64",
-        "videodata",
-        "videopayload",
-        "videourl",
-    }
-)
+_SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
+_SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
+_SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
 
 _MIGRATION_1 = (
     """
@@ -189,45 +165,43 @@ def _json_snapshot(snapshot: Mapping[str, Any]) -> str:
     return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def _snapshot_key_parts(key: Any) -> tuple[str, ...]:
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key))
-    normalized = re.sub(r"[^0-9A-Za-z]+", "_", separated).strip("_").lower()
-    return tuple(part for part in normalized.split("_") if part)
+def _validate_snapshot_identifier(value: Any, path: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise ValueError(f"snapshot value must be a short identifier: {path}")
+    if value.startswith("data:") or any(char not in "._:-" and not char.isalnum() for char in value):
+        raise ValueError(f"snapshot value must be a short identifier: {path}")
 
 
-def _is_encoded_media(value: str) -> bool:
-    encoded = "".join(value.split())
-    if encoded.lower().startswith("data:"):
-        return True
-    if len(encoded) < 16:
-        return False
-    try:
-        decoded = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError):
-        return False
-    return (
-        decoded.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM"))
-        or decoded.startswith((b"II*\x00", b"MM\x00*", b"\x1aE\xdf\xa3"))
-        or decoded[:4] == b"RIFF"
-        or decoded[4:8] == b"ftyp"
-    )
+def _validate_snapshot_section(value: Any, path: str) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"snapshot section must be an object: {path}")
+    for key, item in value.items():
+        if key not in _SNAPSHOT_SECTION_FIELDS:
+            raise ValueError(f"snapshot key is not allowed: {path}.{key}")
+        if key == "model":
+            _validate_snapshot_identifier(item, f"{path}.{key}")
+        elif key == "enabled":
+            if not isinstance(item, bool):
+                raise ValueError(f"snapshot value must be boolean: {path}.{key}")
+        elif key == "thresholds":
+            if not isinstance(item, list | tuple) or len(item) > 16:
+                raise ValueError(f"snapshot thresholds must be a short list: {path}.{key}")
+            if any(isinstance(threshold, bool) or not isinstance(threshold, int | float) for threshold in item):
+                raise ValueError(f"snapshot thresholds must be numeric: {path}.{key}")
+            if any(not math.isfinite(threshold) or not 0 <= threshold <= 1 for threshold in item):
+                raise ValueError(f"snapshot thresholds must be between 0 and 1: {path}.{key}")
 
 
-def _validate_snapshot_metadata(value: Any, path: str = "config_snapshot") -> None:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            parts = _snapshot_key_parts(key)
-            canonical = "".join(parts)
-            if any(part in _SECRET_KEY_PARTS for part in parts) or canonical == "apikey":
-                raise ValueError(f"secret-bearing config key is not allowed: {path}.{key}")
-            if canonical in _MEDIA_PAYLOAD_KEYS:
-                raise ValueError(f"image or media payload is not allowed: {path}.{key}")
-            _validate_snapshot_metadata(item, f"{path}.{key}")
-    elif isinstance(value, list | tuple):
-        for index, item in enumerate(value):
-            _validate_snapshot_metadata(item, f"{path}[{index}]")
-    elif isinstance(value, str) and _is_encoded_media(value):
-        raise ValueError(f"image or media payload is not allowed: {path}")
+def _validate_snapshot_metadata(snapshot: Mapping[str, Any]) -> None:
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("config_snapshot must be an object")
+    for key, value in snapshot.items():
+        if key not in _SNAPSHOT_TOP_LEVEL_FIELDS:
+            raise ValueError(f"snapshot key is not allowed: config_snapshot.{key}")
+        if key == "pipeline_version":
+            _validate_snapshot_identifier(value, "config_snapshot.pipeline_version")
+        else:
+            _validate_snapshot_section(value, f"config_snapshot.{key}")
 
 
 class JobRepository:
