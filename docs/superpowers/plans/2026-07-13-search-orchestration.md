@@ -2,6 +2,7 @@
 change: refactor-search-orchestration
 design-doc: docs/superpowers/specs/2026-07-13-search-orchestration-design.md
 base-ref: 45f2bf7a03d741a728ac5d1149e99896e93e8b3e
+archived-with: 2026-07-13-refactor-search-orchestration
 ---
 
 # 搜索编排重构 Implementation Plan
@@ -22,6 +23,7 @@ base-ref: 45f2bf7a03d741a728ac5d1149e99896e93e8b3e
 - 纯模块不得执行外部 I/O，不得反向导入 `search.py`。
 - `frontend/original-ui` 不在范围内。
 
+archived-with: 2026-07-13-refactor-search-orchestration
 ---
 
 ### Task 1: 锁定纯搜索规则
