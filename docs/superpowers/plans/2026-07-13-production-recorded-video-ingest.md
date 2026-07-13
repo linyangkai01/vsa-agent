@@ -83,7 +83,7 @@ class RecordedVideoConfig(BaseModel):
 ### Task 2: 领域模型、状态机、错误分类和基础协议（OpenSpec 1.2、3.1）
 
 **Files:**
-- Create: `src/vsa_agent/recorded_video/models.py`, `src/vsa_agent/recorded_video/errors.py`, `src/vsa_agent/recorded_video/ports.py`, `tests/unit/recorded_video/test_models.py`, `tests/unit/recorded_video/test_ports.py`
+- Create: `src/vsa_agent/recorded_video/models.py`, `src/vsa_agent/recorded_video/errors.py`, `src/vsa_agent/recorded_video/ports.py`, `tests/unit/recorded_video/__init__.py`, `tests/unit/recorded_video/test_models.py`, `tests/unit/recorded_video/test_ports.py`
 
 **Interfaces:**
 - Produces: `AssetStatus`, `JobStatus`, `JobStage`, `Asset`, `UploadSession`, `Job`, `JobStep`, `Segment`, `RecordedVideoError(code, retryable)`；`transition_job(job, target) -> Job`；`AssetStore`、`JobRepository`、`Segmenter`、`VisionProvider`、`EmbeddingProvider`、`SearchProjectionStore`。
@@ -111,7 +111,7 @@ class SearchProjectionStore(Protocol):
 ```
 同一文件定义 `ProjectionResult(indexed_ids: list[str], failed_ids: list[str])`，并用 `Protocol` 定义其余端口的最小方法：`AssetStore.write_chunk/assemble_source`、`JobRepository.claim_due_job/checkpoint_step`、`Segmenter.plan`、`VisionProvider.describe`、`EmbeddingProvider.embed`。定义永久错误 `CORRUPT_MEDIA/UNSUPPORTED_MEDIA/FFMPEG_MISSING/CONFIGURATION/EMBEDDING_DIMENSION`，可重试错误 `MODEL_RATE_LIMIT/MODEL_TIMEOUT/MODEL_5XX/ES_TIMEOUT/ES_5XX`。
 - [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/models.py src/vsa_agent/recorded_video/errors.py src/vsa_agent/recorded_video/ports.py tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py && git commit -m "feat: define recorded video domain ports"`。
+- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/models.py src/vsa_agent/recorded_video/errors.py src/vsa_agent/recorded_video/ports.py tests/unit/recorded_video/__init__.py tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py && git commit -m "feat: define recorded video domain ports"`。
 
 ### Task 3: SQLite WAL repository 与租约（OpenSpec 1.3）
 
