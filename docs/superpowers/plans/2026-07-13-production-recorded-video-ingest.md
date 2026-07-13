@@ -123,17 +123,17 @@ class SearchProjectionStore(Protocol):
 - Consumes: Task 2 的 `JobRepository` 协议和领域模型。
 - Produces: `JobRepository.initialize()`, `create_upload_session()`, `record_chunk()`, `complete_upload()`, `claim_due_job(owner, now)`, `renew_lease()`, `checkpoint_step()`, `schedule_retry()`, `request_cancel()`, `soft_delete_asset()`。
 
-- [ ] **Step 1: 写并发 claim 与重复 complete 测试。**
+- [x] **Step 1: 写并发 claim 与重复 complete 测试。**
 ```python
 async def test_only_one_worker_claims_job_and_complete_is_idempotent(repo):
     first, second = await asyncio.gather(repo.claim_due_job("w1", NOW), repo.claim_due_job("w2", NOW))
     assert [first, second].count(None) == 1
     assert (await repo.complete_upload("asset", "v1")).job_id == (await repo.complete_upload("asset", "v1")).job_id
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_repository.py -q`。Expected: FAIL。
-- [ ] **Step 3: 建 schema/migration 和原子 claim。** 使用 `PRAGMA journal_mode=WAL`、`BEGIN IMMEDIATE`；建立 `assets/upload_sessions/upload_chunks/jobs/job_steps/segments/schema_migrations`，对 `identifier`、`(session_id,chunk_number)`、`(asset_id,pipeline_version)` 加唯一索引；claim 用 `UPDATE ... WHERE status='queued' AND next_run_at<=? RETURNING *`。
-- [ ] **Step 4: 验证 repository。** Run: `pytest tests/unit/recorded_video/test_repository.py -q`。Expected: PASS，包含租约过期回收、heartbeat、checkpoint 持久化。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/repository.py tests/unit/recorded_video/test_repository.py && git commit -m "feat: persist recorded video jobs in sqlite"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_repository.py -q`。Expected: FAIL。
+- [x] **Step 3: 建 schema/migration 和原子 claim。** 使用 `PRAGMA journal_mode=WAL`、`BEGIN IMMEDIATE`；建立 `assets/upload_sessions/upload_chunks/jobs/job_steps/segments/schema_migrations`，对 `identifier`、`(session_id,chunk_number)`、`(asset_id,pipeline_version)` 加唯一索引；claim 用 `UPDATE ... WHERE status='queued' AND next_run_at<=? RETURNING *`。
+- [x] **Step 4: 验证 repository。** Run: `pytest tests/unit/recorded_video/test_repository.py -q`。Expected: PASS，包含租约过期回收、heartbeat、checkpoint 持久化。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/repository.py tests/unit/recorded_video/test_repository.py && git commit -m "feat: persist recorded video jobs in sqlite"`。
 
 ### Task 4: 本地资产存储与安全回收（OpenSpec 1.4）
 
