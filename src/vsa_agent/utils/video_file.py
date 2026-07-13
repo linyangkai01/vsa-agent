@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from vsa_agent.utils.url_translation import is_remote_url
-from vsa_agent.utils.url_translation import normalize_local_path
+from vsa_agent.utils.url_translation import is_remote_url, normalize_local_path
 
 
 def is_local_video_candidate(path: str) -> bool:

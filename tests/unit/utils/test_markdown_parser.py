@@ -1,8 +1,6 @@
 """Tests for utils/markdown_parser.py."""
 
-from vsa_agent.utils.markdown_parser import extract_bullet_list
-from vsa_agent.utils.markdown_parser import extract_headings
-from vsa_agent.utils.markdown_parser import split_sections
+from vsa_agent.utils.markdown_parser import extract_bullet_list, extract_headings, split_sections
 
 
 def test_extract_headings_filters_by_level():

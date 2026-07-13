@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from vsa_agent.data_models.report import ReportIncident
-from vsa_agent.data_models.report import ReportSection
-from vsa_agent.data_models.report import StructuredReport
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.report import ReportIncident, ReportSection, StructuredReport
+from vsa_agent.data_models.understanding import DetectedEvent, UnderstandingResult
 from vsa_agent.tools.geolocation import summarize_geolocation
 from vsa_agent.tools.incidents import understanding_to_incidents
 from vsa_agent.video_analytics.nvschema import Incident

@@ -36,9 +36,7 @@ class VLLMModelAdapter(BaseModelAdapter):
             {"adapter": "vllm", "model": self.model_name, "base_url": self.base_url, "messages": messages},
         )
         try:
-            response = await self._invoke_with_retry(
-                lambda: self.llm.ainvoke(messages)
-            )
+            response = await self._invoke_with_retry(lambda: self.llm.ainvoke(messages))
         except Exception as exc:
             write_live_trace_event(
                 "model.invoke.error",

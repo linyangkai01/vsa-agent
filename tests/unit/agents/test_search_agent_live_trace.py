@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage
 
-
 TEST_TRACE_DIR = Path("artifacts/test-search-agent-live-trace")
 
 
@@ -19,13 +18,12 @@ def trace_dir():
 
 @pytest.mark.asyncio
 async def test_search_agent_logs_decomposition_tool_calls_and_answer(trace_dir, monkeypatch):
-    from vsa_agent.agents.search_agent import SearchAgentInput
-    from vsa_agent.agents.search_agent import execute_search_agent_flow
-    from vsa_agent.tools.search import SearchOutput
-    from vsa_agent.tools.search import SearchResult
+    from vsa_agent.agents.search_agent import SearchAgentInput, execute_search_agent_flow
+    from vsa_agent.tools.search import SearchOutput, SearchResult
 
     trace_path = trace_dir / "search.jsonl"
     monkeypatch.setenv("VSA_LIVE_TRACE_PATH", str(trace_path))
+
     async def fake_summarize_search_incidents(incidents, query):
         return "person walking near forklift"
 

@@ -1,6 +1,7 @@
 """Tests for utils/url_translation.py."""
-from vsa_agent.utils.url_translation import translate_url, is_remote_url
-from vsa_agent.utils.url_translation import normalize_local_path
+
+from vsa_agent.utils.url_translation import is_remote_url, normalize_local_path, translate_url
+
 
 class TestIsRemoteUrl:
     def test_http(self):
@@ -19,6 +20,7 @@ class TestIsRemoteUrl:
 class TestNormalizeLocalPath:
     def test_preserves_windows_drive_style(self):
         assert normalize_local_path("C:\\videos\\demo.mp4") == "C:/videos/demo.mp4"
+
 
 class TestTranslateUrl:
     def test_local_path_passthrough(self):

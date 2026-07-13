@@ -6,16 +6,12 @@ from time import perf_counter
 
 from langgraph.config import get_stream_writer
 
-from vsa_agent.agents.data_models import AgentMessageChunk
-from vsa_agent.agents.data_models import AgentMessageChunkType
-from vsa_agent.config import LVSVideoUnderstandingConfig
-from vsa_agent.config import get_config
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.agents.data_models import AgentMessageChunk, AgentMessageChunkType
+from vsa_agent.config import LVSVideoUnderstandingConfig, get_config
+from vsa_agent.data_models.understanding import DetectedEvent, UnderstandingResult
 from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.video_understanding import _timestamp_to_seconds
-from vsa_agent.tools.video_understanding import analyze_video_segment
+from vsa_agent.tools.video_understanding import _timestamp_to_seconds, analyze_video_segment
 
 
 def _format_seconds(value: float) -> str:
@@ -113,7 +109,10 @@ def split_video_into_chunks(duration_sec: float, chunk_duration_sec: int) -> lis
 
 _RISK_DIGEST_CATEGORIES = (
     ("Eye / face protection", ("eye protection", "safety goggles", "face shield", "flying sparks", "flying debris")),
-    ("PPE / visibility", ("ppe", "hard hat", "safety vest", "high-visibility", "goggles", "eye protection", "face shield")),
+    (
+        "PPE / visibility",
+        ("ppe", "hard hat", "safety vest", "high-visibility", "goggles", "eye protection", "face shield"),
+    ),
     ("Fire / hot work", ("fire", "spark", "welding", "grinding", "angle grinder", "hot")),
     ("Slip / trip / housekeeping", ("slip", "trip", "wet", "muddy", "debris", "dust", "gravel", "uneven")),
     ("Fall / work at height", ("fall", "height", "scaffold", "rebar framework", "harness", "lanyard", "guardrail")),

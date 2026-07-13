@@ -5,9 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
-
+from pydantic import BaseModel, Field
 
 REQUIRED_OUTPUT_FILES = ("manifest.json", "trace.jsonl", "qa-final.txt", "report-final.txt")
 SHARED_REQUIRED_EVENTS = (

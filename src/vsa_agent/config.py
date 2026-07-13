@@ -346,6 +346,8 @@ def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostic
             issues.append(ConfigIssue(message=f"{role_name} model is empty"))
         if backend.api_key_required and not _resolve_api_key(backend):
             source = backend.api_key_env or "api_key"
-            issues.append(ConfigIssue(message=f"{role_name} backend '{binding.backend}' requires API key from {source}"))
+            issues.append(
+                ConfigIssue(message=f"{role_name} backend '{binding.backend}' requires API key from {source}")
+            )
 
     return ConfigDiagnostics(issues=issues)

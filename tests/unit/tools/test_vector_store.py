@@ -1,5 +1,7 @@
 """Tests for tools/vector_store.py."""
-from vsa_agent.tools.vector_store import InMemoryVectorStore, get_default_embed_store, get_default_attr_store
+
+from vsa_agent.tools.vector_store import InMemoryVectorStore, get_default_attr_store, get_default_embed_store
+
 
 class TestInMemoryVectorStore:
     async def test_search_returns_empty(self):
@@ -12,8 +14,10 @@ class TestInMemoryVectorStore:
         result = await store.search_by_attributes(attributes=["person"], top_k=5)
         assert result.data == []
 
+
 class TestDefaultStores:
     def test_get_default_embed_store(self):
         assert isinstance(get_default_embed_store(), InMemoryVectorStore)
+
     def test_get_default_attr_store(self):
         assert isinstance(get_default_attr_store(), InMemoryVectorStore)

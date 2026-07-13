@@ -1,4 +1,4 @@
-﻿"""ES query builders for video analytics.
+"""ES query builders for video analytics.
 
 Mirrors NVIDIA query_builders.py — builds Elasticsearch queries
 for incident, frame, and behavior searches.
@@ -26,23 +26,23 @@ def build_incident_query(
     Returns:
         ES query dict.
     """
-    must_clauses: list[dict] = [
-        {"match": {"description": {"query": query, "fuzziness": "AUTO"}}}
-    ]
+    must_clauses: list[dict] = [{"match": {"description": {"query": query, "fuzziness": "AUTO"}}}]
 
     if filters:
         for field, value in filters.items():
             must_clauses.append({"term": {field: value}})
 
     if time_range:
-        must_clauses.append({
-            "range": {
-                "timestamp_sec": {
-                    "gte": time_range[0],
-                    "lte": time_range[1],
+        must_clauses.append(
+            {
+                "range": {
+                    "timestamp_sec": {
+                        "gte": time_range[0],
+                        "lte": time_range[1],
+                    }
                 }
             }
-        })
+        )
 
     return {
         "size": top_k,
@@ -72,12 +72,14 @@ def build_frames_query(
             "bool": {
                 "must": [
                     {"term": {"sensor_id": sensor_id}},
-                    {"range": {
-                        "timestamp_sec": {
-                            "gte": time_range[0],
-                            "lte": time_range[1],
+                    {
+                        "range": {
+                            "timestamp_sec": {
+                                "gte": time_range[0],
+                                "lte": time_range[1],
+                            }
                         }
-                    }},
+                    },
                 ]
             }
         },
@@ -108,14 +110,16 @@ def build_behavior_query(
     ]
 
     if time_range:
-        must_clauses.append({
-            "range": {
-                "timestamp_sec": {
-                    "gte": time_range[0],
-                    "lte": time_range[1],
+        must_clauses.append(
+            {
+                "range": {
+                    "timestamp_sec": {
+                        "gte": time_range[0],
+                        "lte": time_range[1],
+                    }
                 }
             }
-        })
+        )
 
     return {
         "size": top_k,

@@ -15,8 +15,7 @@ def _heading_levels(markdown_content: str) -> list[int]:
 
 @pytest.mark.anyio
 async def test_phase6_single_video_report_flow():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.tools.video_report_gen import generate_video_report
 
     async def fake_video_understanding_fn(**kwargs):
@@ -53,9 +52,11 @@ async def test_phase6_single_video_report_flow():
 
 @pytest.mark.anyio
 async def test_phase6_multi_video_report_flow():
-    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
-    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
-    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.agents.multi_report_agent import (
+        MultiReportAgentInput,
+        MultiReportSourceItem,
+        execute_multi_report_agent,
+    )
     from vsa_agent.tools.report_gen import generate_multi_report
 
     async def fake_video_understanding_fn(**kwargs):

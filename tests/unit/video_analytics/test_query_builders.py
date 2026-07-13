@@ -1,5 +1,7 @@
 """Tests for video_analytics/query_builders.py."""
-from vsa_agent.video_analytics.query_builders import build_incident_query, build_frames_query, build_behavior_query
+
+from vsa_agent.video_analytics.query_builders import build_behavior_query, build_frames_query, build_incident_query
+
 
 class TestBuildIncidentQuery:
     def test_basic(self):
@@ -11,10 +13,12 @@ class TestBuildIncidentQuery:
         query = build_incident_query(query="test", filters={"severity": "high"}, time_range=(0.0, 100.0))
         assert isinstance(query, dict)
 
+
 class TestBuildFramesQuery:
     def test_basic(self):
         query = build_frames_query(sensor_id="s1", time_range=(0.0, 100.0))
         assert isinstance(query, dict)
+
 
 class TestBuildBehaviorQuery:
     def test_basic(self):

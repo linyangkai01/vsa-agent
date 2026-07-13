@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from collections.abc import Awaitable
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -32,7 +31,7 @@ async def call_with_async_retry(
         except exceptions as exc:
             last_exc = exc
             if attempt < max_retries:
-                wait = delay * (backoff ** attempt)
+                wait = delay * (backoff**attempt)
                 logger.warning(
                     "Retry %d/%d for %s after %.1fs: %s",
                     attempt + 1,

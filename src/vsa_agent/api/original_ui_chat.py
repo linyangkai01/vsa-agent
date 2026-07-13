@@ -2,27 +2,18 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
-from collections.abc import Awaitable
-from collections.abc import Callable
-from datetime import UTC
-from datetime import datetime
+from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from vsa_agent.agents.data_models import AgentMessageChunk
-from vsa_agent.agents.data_models import AgentMessageChunkType
-from vsa_agent.agents.data_models import AgentState
+from vsa_agent.agents.data_models import AgentMessageChunk, AgentMessageChunkType, AgentState
 from vsa_agent.config import resolve_runtime_config
-from vsa_agent.observability.live_trace import live_trace_context
-from vsa_agent.observability.live_trace import write_live_json_artifact
-from vsa_agent.observability.live_trace import write_live_trace_event
-
+from vsa_agent.observability.live_trace import live_trace_context, write_live_json_artifact, write_live_trace_event
 
 ORIGINAL_UI_TRACE_ROOT_ENV = "VSA_ORIGINAL_UI_TRACE_ROOT"
 
@@ -171,7 +162,9 @@ def format_chunk_for_original_ui(chunk: AgentMessageChunk, index: int) -> list[s
         return [format_intermediate_data("Tool Call", chunk.content, index=index)]
     if chunk.type == AgentMessageChunkType.TOOL_PROGRESS:
         status = "completed" if chunk.metadata.get("status") == "completed" else "in_progress"
-        return [format_intermediate_data("Tool Progress", _format_tool_progress_payload(chunk), status=status, index=index)]
+        return [
+            format_intermediate_data("Tool Progress", _format_tool_progress_payload(chunk), status=status, index=index)
+        ]
     if chunk.type == AgentMessageChunkType.TOOL_RESULT:
         return [format_intermediate_data("Tool Result", chunk.content, status="completed", index=index)]
     if chunk.type == AgentMessageChunkType.ERROR:

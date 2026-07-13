@@ -1,25 +1,33 @@
 """Tests for tools/video_understanding.py."""
-import pytest
+
 from contextlib import asynccontextmanager
+
+import pytest
 from openai import PermissionDeniedError
 
 from vsa_agent.config import AppConfig
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
-from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.tools.video_understanding import (
-    VideoUnderstandingInput, VideoUnderstandingConfig,
+    VideoUnderstandingConfig,
+    VideoUnderstandingInput,
+    _analyze_frames,
+    _build_vlm_messages,
     _extract_frames,
-    _analyze_frames, _build_vlm_messages, _normalize_model_response,
-    _parse_thinking_from_content, _prepare_video_path, analyze_video,
+    _normalize_model_response,
+    _parse_thinking_from_content,
+    _prepare_video_path,
+    analyze_video,
     analyze_video_segment,
     video_understanding_tool,
 )
+
 
 class TestVideoUnderstandingInput:
     def test_defaults(self):
         inp = VideoUnderstandingInput()
         assert inp.max_frames == 10
+
 
 class TestVideoUnderstandingConfig:
     def test_defaults(self):
@@ -38,6 +46,7 @@ class TestVideoUnderstandingConfig:
         assert cfg.video_understanding.translated_base_dir == "C:/mounted-video-store"
         assert cfg.video_understanding.vst_sensor_source_map["camera-1"] == "rtsp://camera-1/stream"
 
+
 class TestBuildVlmMessages:
     def test_builds_messages(self):
         messages = _build_vlm_messages(["frame1"], "test query")
@@ -48,11 +57,7 @@ class TestBuildVlmMessages:
     def test_uses_shared_prompt_constants(self):
         messages = _build_vlm_messages(["frame-a"], "what happened")
         assert messages[0].content == SYSTEM_PROMPT_VIDEO_UNDERSTANDING
-        text_part = next(
-            part["text"]
-            for part in messages[1].content
-            if part["type"] == "text"
-        )
+        text_part = next(part["text"] for part in messages[1].content if part["type"] == "text")
         assert text_part == VLM_HUMAN_PROMPT_TEMPLATE.format(query="what happened")
 
 
@@ -70,7 +75,7 @@ class TestExtractFrames:
             def __init__(self, video_path):
                 self.video_path = video_path
 
-            def isOpened(self):
+            def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
                 return True
 
             def get(self, prop):
@@ -111,6 +116,7 @@ class TestExtractFrames:
         assert fps == 10.0
         assert total_frames == 50
 
+
 class TestNormalizeModelResponse:
     def test_returns_understanding_result(self):
         result = _normalize_model_response(
@@ -146,7 +152,9 @@ class TestNormalizeModelResponse:
         result = _normalize_model_response(
             query="what happened",
             source_type="video_file",
-            raw_output="<00:00:05> person walks near forklift </timestamp>\n<00:00:09> forklift turns left </timestamp>",
+            raw_output=(
+                "<00:00:05> person walks near forklift </timestamp>\n<00:00:09> forklift turns left </timestamp>"
+            ),
             prompt_used="watch carefully",
             start_timestamp="2025-01-01T10:00:00Z",
             end_timestamp="2025-01-01T10:00:10Z",
@@ -287,8 +295,8 @@ class TestResolveVideoSource:
 
     @pytest.mark.asyncio
     async def test_resolves_rtsp_sensor_without_window_falls_back_to_map_when_vst_fails(self, monkeypatch):
-        from vsa_agent.tools.video_understanding import _resolve_video_source
         from vsa_agent.integrations.vst_client import VSTClientError
+        from vsa_agent.tools.video_understanding import _resolve_video_source
 
         class FakeClient:
             async def get_video_clip(self, sensor_id, start_timestamp, end_timestamp):
@@ -312,8 +320,8 @@ class TestResolveVideoSource:
 
     @pytest.mark.asyncio
     async def test_resolves_rtsp_sensor_with_window_raises_when_vst_fails(self, monkeypatch):
-        from vsa_agent.tools.video_understanding import _resolve_video_source
         from vsa_agent.integrations.vst_client import VSTClientError
+        from vsa_agent.tools.video_understanding import _resolve_video_source
 
         class FakeClient:
             async def get_video_clip(self, sensor_id, start_timestamp, end_timestamp):
@@ -350,6 +358,7 @@ class TestResolveVideoSource:
                 end_timestamp="",
             )
 
+
 class TestParseThinkingFromContent:
     def test_no_thinking(self):
         thinking, answer = _parse_thinking_from_content("Simple answer")
@@ -366,9 +375,7 @@ class TestParseThinkingFromContent:
         assert answer == ""
 
     def test_with_explicit_thinking_and_answer_tags(self):
-        thinking, answer = _parse_thinking_from_content(
-            "<thinking>inspect</thinking><answer>worker falls</answer>"
-        )
+        thinking, answer = _parse_thinking_from_content("<thinking>inspect</thinking><answer>worker falls</answer>")
         assert thinking == "inspect"
         assert answer == "worker falls"
 
@@ -481,10 +488,8 @@ class TestAnalyzeVideoSegment:
 class TestAnalyzeFramesRetry:
     @pytest.mark.asyncio
     async def test_prefers_dashscope_vlm_model_env_when_creating_adapter(self, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import ModelConfig
-        from vsa_agent.config import ModelDevConfig
         import vsa_agent.model_adapter as model_adapter
+        from vsa_agent.config import AppConfig, ModelConfig, ModelDevConfig
 
         captured = {}
 
@@ -625,11 +630,7 @@ class TestUnifiedAnalyzeVideoFlow:
         )
 
         human_message = captured["messages"][1]
-        text_part = next(
-            part["text"]
-            for part in human_message.content
-            if part["type"] == "text"
-        )
+        text_part = next(part["text"] for part in human_message.content if part["type"] == "text")
         assert "generated prompt" in text_part
         assert "raw query" not in text_part
         assert result.chunks[0].prompt_used == "generated prompt"
@@ -650,7 +651,7 @@ class TestUnifiedAnalyzeVideoFlow:
             )
 
         class FakeCap:
-            def isOpened(self):
+            def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
                 return True
 
             def get(self, prop):
@@ -691,7 +692,7 @@ class TestUnifiedAnalyzeVideoFlow:
             )
 
         class FakeCap:
-            def isOpened(self):
+            def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
                 return True
 
             def get(self, prop):
@@ -815,7 +816,7 @@ class TestVideoUnderstandingToolCompatibility:
             )()
 
         class FakeCap:
-            def isOpened(self):
+            def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
                 return True
 
             def get(self, prop):
@@ -832,7 +833,9 @@ class TestVideoUnderstandingToolCompatibility:
         monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
         monkeypatch.setattr("vsa_agent.tools.video_understanding.cv2.VideoCapture", lambda _: FakeCap())
         monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_long_video", fake_analyze_long_video)
-        monkeypatch.setattr("vsa_agent.tools.video_understanding.summarize_understanding_result", fake_summarize_understanding_result)
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding.summarize_understanding_result", fake_summarize_understanding_result
+        )
 
         result = await video_understanding_tool(video_path="video.mp4", query="what happened")
         assert result == "phase2 long video summary"
@@ -864,7 +867,7 @@ class TestVideoUnderstandingToolCompatibility:
                 return type("ClipResult", (), {"clip_url": None, "local_path": "C:/tmp/clip.mp4"})()
 
         class FakeCap:
-            def isOpened(self):
+            def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
                 return True
 
             def get(self, prop):
@@ -881,7 +884,9 @@ class TestVideoUnderstandingToolCompatibility:
         monkeypatch.setattr("vsa_agent.tools.video_understanding.os.path.exists", lambda _: True)
         monkeypatch.setattr("vsa_agent.tools.video_understanding.cv2.VideoCapture", lambda _: FakeCap())
         monkeypatch.setattr("vsa_agent.tools.video_understanding.analyze_long_video", fake_analyze_long_video)
-        monkeypatch.setattr("vsa_agent.tools.video_understanding.summarize_understanding_result", fake_summarize_understanding_result)
+        monkeypatch.setattr(
+            "vsa_agent.tools.video_understanding.summarize_understanding_result", fake_summarize_understanding_result
+        )
 
         result = await video_understanding_tool(
             video_path="",

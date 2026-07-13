@@ -1,4 +1,4 @@
-﻿"""CosmosEmbedClient — embedding client using Cosmos / sentence-transformers.
+"""CosmosEmbedClient — embedding client using Cosmos / sentence-transformers.
 
 Provides a concrete implementation of EmbedClient using
 sentence-transformers for local embedding generation.
@@ -7,7 +7,7 @@ sentence-transformers for local embedding generation.
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
 
 from vsa_agent.embed.embed import EmbedClient
 
@@ -41,6 +41,7 @@ class CosmosEmbedClient(EmbedClient):
             return
         try:
             from sentence_transformers import SentenceTransformer
+
             self._model = SentenceTransformer(self._model_name)
             self._dimension = self._model.get_sentence_embedding_dimension()
             logger.info("Loaded embedding model: %s (dim=%d)", self._model_name, self._dimension)
@@ -80,6 +81,7 @@ class CosmosEmbedClient(EmbedClient):
         """Generate mock embeddings for testing."""
         import hashlib
         import math
+
         embeddings = []
         for i in range(count):
             h = hashlib.md5(str(i).encode()).hexdigest()

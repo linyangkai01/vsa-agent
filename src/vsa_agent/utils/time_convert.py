@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
-
+from datetime import UTC, datetime, timedelta
 
 DURATION_PATTERN = re.compile(
     r"^PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?$",
@@ -38,13 +35,13 @@ def iso8601_to_datetime(value: str) -> datetime:
         normalized = normalized[:-1] + "+00:00"
     result = datetime.fromisoformat(normalized)
     if result.tzinfo is None:
-        return result.replace(tzinfo=timezone.utc)
+        return result.replace(tzinfo=UTC)
     return result
 
 
 def datetime_to_iso8601(value: datetime) -> str:
     """Serialize datetime to ISO 8601, preferring ``Z`` for UTC."""
-    normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return normalized.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 

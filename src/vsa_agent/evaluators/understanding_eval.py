@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.evaluators.data_models import EvaluationResult
-from vsa_agent.evaluators.data_models import ExpectedEvent
-from vsa_agent.evaluators.data_models import MetricScore
+from vsa_agent.evaluators.data_models import EvaluationResult, ExpectedEvent, MetricScore
 
 
 def _normalize_text(value: str) -> str:
@@ -35,7 +33,9 @@ def _event_matches(actual_event, expected_event: ExpectedEvent) -> bool:
         if _normalize_text(term) not in actual_description:
             return False
 
-    if expected_event.start_timestamp and expected_event.start_timestamp != getattr(actual_event, "start_timestamp", None):
+    if expected_event.start_timestamp and expected_event.start_timestamp != getattr(
+        actual_event, "start_timestamp", None
+    ):
         return False
     if expected_event.end_timestamp and expected_event.end_timestamp != getattr(actual_event, "end_timestamp", None):
         return False

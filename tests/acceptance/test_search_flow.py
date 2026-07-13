@@ -5,11 +5,13 @@ import pytest
 
 class TestSearchFlow:
     async def test_query_decomposition(self):
-        from vsa_agent.tools.search import decompose_query
         from unittest.mock import AsyncMock, MagicMock
+
+        from vsa_agent.tools.search import decompose_query
+
         mock_adapter = MagicMock()
         mock_response = MagicMock()
-        mock_response.content = "{\"query\": \"person walking\"}"
+        mock_response.content = '{"query": "person walking"}'
         mock_adapter.invoke = AsyncMock(return_value=mock_response)
         result = await decompose_query("Find a person walking", model_adapter=mock_adapter)
         assert result is not None
@@ -17,11 +19,13 @@ class TestSearchFlow:
 
     async def test_embed_only_path(self):
         from vsa_agent.tools.search import search_tool
+
         result = await search_tool(query="test query")
         assert result is not None
 
     async def test_fusion_path(self):
         from vsa_agent.tools.search import search_tool
+
         result = await search_tool(query="person walking", decomposed_attributes=["person"], decomposed_has_action=True)
         assert result is not None
 
@@ -29,11 +33,8 @@ class TestSearchFlow:
     async def test_execute_search_returns_search_output_for_default_success_flow(self, monkeypatch):
         from types import SimpleNamespace
 
-        from vsa_agent.agents.search_agent import SearchAgentInput
-        from vsa_agent.agents.search_agent import execute_search
-        from vsa_agent.tools.search import DecomposedQuery
-        from vsa_agent.tools.search import SearchOutput
-        from vsa_agent.tools.search import SearchResult
+        from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+        from vsa_agent.tools.search import DecomposedQuery, SearchOutput, SearchResult
 
         async def fake_decompose_query(query, model_adapter):
             return DecomposedQuery(query=query, attributes=[], has_action=False)
@@ -71,11 +72,8 @@ class TestSearchFlow:
     async def test_execute_search_calls_critic_only_when_requested_in_fusion_flow(self, monkeypatch):
         from types import SimpleNamespace
 
-        from vsa_agent.agents.search_agent import SearchAgentInput
-        from vsa_agent.agents.search_agent import execute_search
-        from vsa_agent.tools.search import DecomposedQuery
-        from vsa_agent.tools.search import SearchOutput
-        from vsa_agent.tools.search import SearchResult
+        from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+        from vsa_agent.tools.search import DecomposedQuery, SearchOutput, SearchResult
 
         critic_calls = []
 
@@ -141,11 +139,8 @@ class TestSearchFlow:
     async def test_execute_search_skips_critic_when_disabled_in_fusion_flow(self, monkeypatch):
         from types import SimpleNamespace
 
-        from vsa_agent.agents.search_agent import SearchAgentInput
-        from vsa_agent.agents.search_agent import execute_search
-        from vsa_agent.tools.search import DecomposedQuery
-        from vsa_agent.tools.search import SearchOutput
-        from vsa_agent.tools.search import SearchResult
+        from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+        from vsa_agent.tools.search import DecomposedQuery, SearchOutput, SearchResult
 
         critic_calls = []
 
@@ -209,11 +204,8 @@ class TestSearchFlow:
     async def test_execute_search_degrades_when_critic_fails_in_fusion_flow(self, monkeypatch):
         from types import SimpleNamespace
 
-        from vsa_agent.agents.search_agent import SearchAgentInput
-        from vsa_agent.agents.search_agent import execute_search
-        from vsa_agent.tools.search import DecomposedQuery
-        from vsa_agent.tools.search import SearchOutput
-        from vsa_agent.tools.search import SearchResult
+        from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+        from vsa_agent.tools.search import DecomposedQuery, SearchOutput, SearchResult
 
         async def fake_decompose_query(query, model_adapter):
             return DecomposedQuery(query=query, attributes=["forklift"], has_action=True)
@@ -273,10 +265,8 @@ class TestSearchFlow:
     async def test_execute_search_returns_empty_search_output_for_empty_results(self, monkeypatch):
         from types import SimpleNamespace
 
-        from vsa_agent.agents.search_agent import SearchAgentInput
-        from vsa_agent.agents.search_agent import execute_search
-        from vsa_agent.tools.search import DecomposedQuery
-        from vsa_agent.tools.search import SearchOutput
+        from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+        from vsa_agent.tools.search import DecomposedQuery, SearchOutput
 
         async def fake_decompose_query(query, model_adapter):
             return DecomposedQuery(query=query, attributes=[], has_action=False)
@@ -295,14 +285,10 @@ class TestSearchFlow:
         assert isinstance(result, SearchOutput)
         assert result.data == []
 
-
-
     @pytest.mark.asyncio
     async def test_search_agent_tool_returns_text_answer_from_agent_flow(self, monkeypatch):
-        from vsa_agent.agents.search_agent import SearchAgentExecutionResult
-        from vsa_agent.agents.search_agent import search_agent_tool
-        from vsa_agent.tools.search import SearchOutput
-        from vsa_agent.tools.search import SearchResult
+        from vsa_agent.agents.search_agent import SearchAgentExecutionResult, search_agent_tool
+        from vsa_agent.tools.search import SearchOutput, SearchResult
 
         flow_calls = []
 

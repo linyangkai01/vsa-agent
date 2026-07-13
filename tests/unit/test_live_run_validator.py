@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-
 TEST_VALIDATOR_DIR = Path("artifacts/test-live-run-validator")
 
 
@@ -26,7 +25,9 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def _write_trace(path: Path, event_types: list[str]) -> None:
     path.write_text(
-        "\n".join(json.dumps({"event_type": event_type, "payload": {}}, ensure_ascii=False) for event_type in event_types)
+        "\n".join(
+            json.dumps({"event_type": event_type, "payload": {}}, ensure_ascii=False) for event_type in event_types
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -205,7 +206,10 @@ def test_validate_live_run_summarizes_model_usage_and_warns_on_repeated_graph_lv
                 },
             },
             {"event_type": "video_understanding.result", "payload": {}},
-            {"event_type": "top_agent.tool.result", "payload": {"tool_name": "video_understanding", "result_preview": "ok"}},
+            {
+                "event_type": "top_agent.tool.result",
+                "payload": {"tool_name": "video_understanding", "result_preview": "ok"},
+            },
             {"event_type": "top_agent.final", "payload": {"final_answer": "answer"}},
             {"event_type": "lvs_video_understanding.completed", "payload": {}},
             {"event_type": "lvs_video_understanding.completed", "payload": {}},

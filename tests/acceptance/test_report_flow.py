@@ -17,8 +17,7 @@ def _heading_levels(markdown_content: str) -> list[int]:
 
 @pytest.mark.anyio
 async def test_single_video_report_flow_returns_markdown_side_effect():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.tools.video_report_gen import generate_video_report
 
     async def fake_video_understanding_fn(**kwargs):
@@ -55,10 +54,8 @@ async def test_single_video_report_flow_returns_markdown_side_effect():
 
 @pytest.mark.anyio
 async def test_single_video_report_flow_keeps_markdown_when_postprocessing_fails():
-    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult
-    from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult, ValidationPipeline
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.tools.video_report_gen import generate_video_report
 
     class FailingValidationPipeline(ValidationPipeline):
@@ -91,8 +88,7 @@ async def test_single_video_report_flow_keeps_markdown_when_postprocessing_fails
 
 @pytest.mark.anyio
 async def test_single_video_report_flow_raises_when_understanding_fails():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
 
     called = {"value": False}
 

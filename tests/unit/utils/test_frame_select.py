@@ -1,5 +1,7 @@
 """Tests for utils/frame_select.py."""
-from vsa_agent.utils.frame_select import select_frame_indices, frames_for_timestamp_range
+
+from vsa_agent.utils.frame_select import frames_for_timestamp_range, select_frame_indices
+
 
 class TestSelectFrameIndices:
     def test_basic(self):
@@ -22,6 +24,7 @@ class TestSelectFrameIndices:
     def test_clamps_start_and_end(self):
         indices = select_frame_indices(total_frames=20, max_frames=4, start_frame=-3, end_frame=50)
         assert indices == [0, 6, 12, 19]
+
 
 class TestFramesForTimestampRange:
     def test_basic(self):

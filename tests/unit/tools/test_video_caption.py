@@ -68,4 +68,3 @@ async def test_video_caption_rtsp_input_sets_rtsp_source_type(monkeypatch):
     assert captured["source_type"] == "rtsp"
     assert captured["start_timestamp"] == "PT5S"
     assert captured["end_timestamp"] == "PT10S"
-

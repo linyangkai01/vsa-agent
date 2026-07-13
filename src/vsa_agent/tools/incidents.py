@@ -7,8 +7,7 @@ from typing import Any
 
 from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.tools.search import SearchOutput, SearchResult
 from vsa_agent.video_analytics.nvschema import Incident
 
 
@@ -55,7 +54,6 @@ def _search_result_to_incident(item: SearchResult, index: int) -> Incident:
     )
 
 
-
 def search_output_to_incidents(search_output: SearchOutput | list[SearchResult]) -> list[Incident]:
     results = search_output.data if isinstance(search_output, SearchOutput) else search_output
     incidents: list[Incident] = []
@@ -63,7 +61,6 @@ def search_output_to_incidents(search_output: SearchOutput | list[SearchResult])
         validated_item = item if isinstance(item, SearchResult) else SearchResult.model_validate(item)
         incidents.append(_search_result_to_incident(validated_item, index))
     return incidents
-
 
 
 def incidents_to_tagged_json(incidents: list[Incident]) -> str:
@@ -90,7 +87,9 @@ def incidents_to_tagged_json(incidents: list[Incident]) -> str:
     "incidents",
     description="Normalize understanding or search results into structured incidents.",
 )
-async def incidents_tool(*, understanding_result: dict[str, Any] | None = None, search_output: dict[str, Any] | None = None) -> str:
+async def incidents_tool(
+    *, understanding_result: dict[str, Any] | None = None, search_output: dict[str, Any] | None = None
+) -> str:
     incidents: list[Incident] = []
     if understanding_result is not None:
         incidents.extend(understanding_to_incidents(UnderstandingResult.model_validate(understanding_result)))

@@ -1,12 +1,8 @@
 import pytest
 
-from vsa_agent.data_models.report import ReportSection
-from vsa_agent.data_models.report import StructuredReport
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import EvidenceRef
-from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.tools.video_report_gen import VideoReportGenOutput
-from vsa_agent.tools.video_report_gen import generate_video_report
+from vsa_agent.data_models.report import ReportSection, StructuredReport
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, UnderstandingResult
+from vsa_agent.tools.video_report_gen import VideoReportGenOutput, generate_video_report
 
 
 @pytest.mark.anyio

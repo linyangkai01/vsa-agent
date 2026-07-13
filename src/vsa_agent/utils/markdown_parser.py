@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-
+from dataclasses import dataclass
 
 HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$", re.MULTILINE)
 BULLET_RE = re.compile(r"^\s*-\s+(?P<item>.+?)\s*$", re.MULTILINE)
@@ -37,10 +36,7 @@ def split_sections(markdown: str, heading_level: int = 2) -> list[MarkdownSectio
     if not markdown:
         return []
 
-    matches = [
-        match for match in HEADING_RE.finditer(markdown)
-        if len(match.group("hashes")) == heading_level
-    ]
+    matches = [match for match in HEADING_RE.finditer(markdown) if len(match.group("hashes")) == heading_level]
     if not matches:
         return []
 

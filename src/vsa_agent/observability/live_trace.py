@@ -3,8 +3,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,16 +132,20 @@ def _is_sensitive_key(key: str) -> bool:
         f"_{char.lower()}"
         if char.isupper()
         and index > 0
-        and (words[index - 1].islower() or (words[index - 1].isupper() and index + 1 < len(words) and words[index + 1].islower()))
+        and (
+            words[index - 1].islower()
+            or (words[index - 1].isupper() and index + 1 < len(words) and words[index + 1].islower())
+        )
         else char.lower()
         for index, char in enumerate(words)
     ).replace(" ", "_")
     parts = [part for part in normalized.split("_") if part]
     has_api_key_parts = any(
-        part == "api" and index + 1 < len(parts) and parts[index + 1] == "key"
-        for index, part in enumerate(parts)
+        part == "api" and index + 1 < len(parts) and parts[index + 1] == "key" for index, part in enumerate(parts)
     )
-    return any(part in SENSITIVE_KEY_PARTS for part in parts) or normalized in {"apikey", "api_key"} or has_api_key_parts
+    return (
+        any(part in SENSITIVE_KEY_PARTS for part in parts) or normalized in {"apikey", "api_key"} or has_api_key_parts
+    )
 
 
 def _resolve_artifact_path(base_dir: Path, name: str) -> Path:

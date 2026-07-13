@@ -1,9 +1,15 @@
 """Tests for tools/embed_search.py."""
+
 from vsa_agent.tools.embed_search import (
-    EmbedSearchResultItem, EmbedSearchOutput, QueryInput,
-    _build_es_query, _generate_query_embedding, _process_search_hit,
+    EmbedSearchOutput,
+    EmbedSearchResultItem,
+    QueryInput,
+    _build_es_query,
+    _generate_query_embedding,
+    _process_search_hit,
 )
 from vsa_agent.tools.search import SearchOutput
+
 
 class TestEmbedSearchResultItem:
     def test_defaults(self):
@@ -11,15 +17,18 @@ class TestEmbedSearchResultItem:
         assert item.video_name == ""
         assert item.similarity_score == 0.0
 
+
 class TestEmbedSearchOutput:
     def test_defaults(self):
         out = EmbedSearchOutput()
         assert out.results == []
 
+
 class TestQueryInput:
     def test_defaults(self):
         qi = QueryInput()
         assert qi.source_type == "video_file"
+
 
 class TestGenerateQueryEmbedding:
     async def test_with_query_text(self):
@@ -33,9 +42,13 @@ class TestGenerateQueryEmbedding:
         result = await _generate_query_embedding(qi)
         assert result == []
 
+
 class TestProcessSearchHit:
     async def test_basic_hit(self):
-        hit = {"_score": 1.9, "_source": {"sensor": {"id": "s1", "description": "cam1"}, "timestamp": "t1", "end": "t2"}}
+        hit = {
+            "_score": 1.9,
+            "_source": {"sensor": {"id": "s1", "description": "cam1"}, "timestamp": "t1", "end": "t2"},
+        }
         result = await _process_search_hit(hit)
         assert result is not None
         assert result.sensor_id == "s1"

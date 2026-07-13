@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 
 class VSTClientError(RuntimeError):
@@ -59,9 +57,7 @@ class VSTClient:
 
     async def _request_json(self, path: str) -> Any:
         if self._request_json_impl is None:
-            raise VSTClientError(
-                "No HTTP adapter configured for VSTClient; inject request_json for non-network use"
-            )
+            raise VSTClientError("No HTTP adapter configured for VSTClient; inject request_json for non-network use")
         return await self._request_json_impl(path)
 
     async def get_stream_info(self, sensor_id: str) -> VSTStreamInfo:
@@ -83,7 +79,11 @@ class VSTClient:
         raise VSTClientError(f"Sensor '{sensor_id}' not found in VST streams response")
 
     async def get_timeline(self, sensor_id: str) -> VSTTimeline:
-        stream_id = self._stream_resolver(sensor_id) if self._stream_resolver is not None else (await self.get_stream_info(sensor_id)).stream_id
+        stream_id = (
+            self._stream_resolver(sensor_id)
+            if self._stream_resolver is not None
+            else (await self.get_stream_info(sensor_id)).stream_id
+        )
         payload = await self._request_json("/vst/api/v1/storage/timelines")
         timeline_list = payload.get(stream_id, [])
         if not timeline_list:
@@ -105,10 +105,7 @@ class VSTClient:
         start_timestamp: str,
         end_timestamp: str,
     ) -> dict[str, Any]:
-        path = (
-            "/vst/api/v1/storage/clips"
-            f"?sensorId={sensor_id}&start={start_timestamp}&end={end_timestamp}"
-        )
+        path = f"/vst/api/v1/storage/clips?sensorId={sensor_id}&start={start_timestamp}&end={end_timestamp}"
         payload = await self._request_json(path)
         if not isinstance(payload, dict):
             raise VSTClientError(f"Clip response for sensor '{sensor_id}' is not a JSON object")
@@ -145,15 +142,11 @@ class VSTClient:
                     clip_url=clip_url,
                     local_path=local_path,
                 )
-            raise VSTClientError(
-                f"No clip source available for sensor '{sensor_id}' within requested time window"
-            )
+            raise VSTClientError(f"No clip source available for sensor '{sensor_id}' within requested time window")
 
         stream = await self.get_stream_info(sensor_id)
         clip_url = stream.rtsp_url
-        local_path = stream.metadata.get("raw", {}).get("localPath") or stream.metadata.get(
-            "raw", {}
-        ).get("local_path")
+        local_path = stream.metadata.get("raw", {}).get("localPath") or stream.metadata.get("raw", {}).get("local_path")
         if not clip_url and not local_path:
             raise VSTClientError(f"No clip source available for sensor '{sensor_id}'")
         return VSTClipResult(

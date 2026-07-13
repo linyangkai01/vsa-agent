@@ -1,4 +1,4 @@
-﻿"""Embed search tool — semantic vector search for video content.
+"""Embed search tool — semantic vector search for video content.
 
 Generates embeddings from text queries and searches Elasticsearch
 for matching video segments using KNN vector search.
@@ -8,13 +8,11 @@ Design Pattern: #10 Registry Table, #13 Search Strategy.
 
 import json
 import logging
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from elasticsearch import AsyncElasticsearch
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.config import SearchBackendConfig
 from vsa_agent.registry import register_tool
@@ -359,10 +357,7 @@ async def _search_real_es(
         import asyncio
 
         processed = await asyncio.gather(
-            *[
-                _process_search_hit(hit, search_config.embed_confidence_threshold)
-                for hit in hits
-            ]
+            *[_process_search_hit(hit, search_config.embed_confidence_threshold) for hit in hits]
         )
 
         from vsa_agent.tools.search import SearchResult
@@ -392,7 +387,7 @@ async def _search_real_es(
 @register_tool(
     "embed_search",
     description="Semantic vector search: find video segments by text description "
-                "using embedding similarity against Elasticsearch. Returns ranked SearchOutput.",
+    "using embedding similarity against Elasticsearch. Returns ranked SearchOutput.",
 )
 async def embed_search_tool(
     query: str,
@@ -428,6 +423,7 @@ async def embed_search_tool(
     # Fallback: in-memory store
     if store is None:
         from vsa_agent.tools.vector_store import get_default_store
+
         store = get_default_store()
 
     try:

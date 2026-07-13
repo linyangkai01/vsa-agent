@@ -5,10 +5,8 @@ import logging
 
 import pytest
 
-from vsa_agent.agents.search_agent import SearchAgentConfig
-from vsa_agent.agents.search_agent import SearchAgentInput
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.agents.search_agent import SearchAgentConfig, SearchAgentInput
+from vsa_agent.tools.search import SearchOutput, SearchResult
 from vsa_agent.video_analytics.nvschema import Incident
 
 
@@ -42,7 +40,7 @@ def test_to_incidents_output_delegates_to_incident_serializer(monkeypatch):
 
     def fake_incidents_to_tagged_json(incidents):
         called["incidents"] = incidents
-        return "<incidents>\n{\"incidents\": []}\n</incidents>"
+        return '<incidents>\n{"incidents": []}\n</incidents>'
 
     monkeypatch.setattr(
         "vsa_agent.agents.search_agent.search_output_to_incidents",
@@ -621,6 +619,7 @@ async def test_execute_search_agent_flow_applies_critic_for_attribute_only_path(
     assert result.metadata["decomposed_attributes"] == ["person in red vest"]
     assert result.metadata["decomposed_has_action"] is False
 
+
 @pytest.mark.asyncio
 async def test_execute_search_agent_flow_applies_critic_for_embed_only_path(monkeypatch):
     from vsa_agent.agents.search_agent import execute_search_agent_flow
@@ -686,10 +685,10 @@ async def test_execute_search_agent_flow_applies_critic_for_embed_only_path(monk
     assert result.metadata["decomposed_attributes"] == []
     assert result.metadata["decomposed_has_action"] is True
 
+
 @pytest.mark.asyncio
 async def test_search_agent_tool_returns_text_answer_from_agent_flow(monkeypatch):
-    from vsa_agent.agents.search_agent import SearchAgentExecutionResult
-    from vsa_agent.agents.search_agent import search_agent_tool
+    from vsa_agent.agents.search_agent import SearchAgentExecutionResult, search_agent_tool
 
     flow_calls = []
 

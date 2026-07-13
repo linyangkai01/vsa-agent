@@ -19,8 +19,7 @@ class TestReportAgentInput:
 
 @pytest.mark.anyio
 async def test_execute_report_agent_for_uploaded_video_path():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
 
     understanding_calls = []
     report_calls = []
@@ -64,8 +63,7 @@ async def test_execute_report_agent_for_uploaded_video_path():
 
 @pytest.mark.anyio
 async def test_execute_report_agent_for_sensor_path_uses_rtsp_source_type():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
 
     understanding_calls = []
     report_calls = []
@@ -102,8 +100,7 @@ async def test_execute_report_agent_for_sensor_path_uses_rtsp_source_type():
 
 @pytest.mark.anyio
 async def test_execute_report_agent_requires_video_path_or_sensor_id():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
 
     async def fake_video_understanding(**kwargs):
         return kwargs
@@ -121,8 +118,7 @@ async def test_execute_report_agent_requires_video_path_or_sensor_id():
 
 @pytest.mark.anyio
 async def test_default_report_agent_path_uses_unified_analyze_video(monkeypatch):
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.data_models.understanding import UnderstandingResult
 
     captured = {}
@@ -157,8 +153,7 @@ async def test_default_report_agent_path_uses_unified_analyze_video(monkeypatch)
 
 @pytest.mark.anyio
 async def test_execute_report_agent_builds_structured_report_before_rendering():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.data_models.report import StructuredReport
 
     captured = {}
@@ -193,8 +188,7 @@ async def test_execute_report_agent_builds_structured_report_before_rendering():
 
 @pytest.mark.anyio
 async def test_execute_report_agent_accepts_lax_event_dicts():
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
 
     async def fake_video_understanding(**kwargs):
         return {
@@ -230,10 +224,8 @@ async def test_execute_report_agent_accepts_lax_event_dicts():
 
 @pytest.mark.anyio
 async def test_execute_report_agent_keeps_success_status_and_exposes_validation_feedback():
-    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult
-    from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.postprocessing.pipeline import PostprocessingResult, ValidationPipeline
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.data_models.report import StructuredReport
 
     async def fake_video_understanding(**kwargs):
@@ -253,7 +245,7 @@ async def test_execute_report_agent_keeps_success_status_and_exposes_validation_
         assert isinstance(kwargs["structured_report"], StructuredReport)
         assert kwargs["structured_report"].global_validation_feedback == [VALIDATION_FEEDBACK]
         return {
-            "markdown_content": "# 单视频分析报告\n\n## 校验反馈\n- [non_empty_response_validator] FAILED: Response is empty",
+            "markdown_content": "# 单视频分析报告\n\n## 校验反馈\n- [non_empty_response_validator] FAILED: Response is empty",  # noqa: E501
             "downloads": {"markdown": {"filename": "report.md"}},
             "summary": "",
         }

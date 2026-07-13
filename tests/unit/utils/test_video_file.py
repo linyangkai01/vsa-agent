@@ -2,8 +2,7 @@
 
 import pytest
 
-from vsa_agent.utils.video_file import ensure_local_video_path
-from vsa_agent.utils.video_file import is_local_video_candidate
+from vsa_agent.utils.video_file import ensure_local_video_path, is_local_video_candidate
 
 
 def test_is_local_video_candidate_accepts_windows_and_posix_paths():

@@ -7,9 +7,11 @@ from vsa_agent.agents.data_models import AgentOutput
 
 @pytest.mark.anyio
 async def test_execute_multi_report_agent_for_multiple_sources():
-    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
-    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
-    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.agents.multi_report_agent import (
+        MultiReportAgentInput,
+        MultiReportSourceItem,
+        execute_multi_report_agent,
+    )
 
     understanding_calls = []
     report_calls = []
@@ -56,9 +58,11 @@ async def test_execute_multi_report_agent_for_multiple_sources():
 
 @pytest.mark.anyio
 async def test_default_multi_report_agent_path_uses_unified_analyze_video(monkeypatch):
-    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
-    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
-    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.agents.multi_report_agent import (
+        MultiReportAgentInput,
+        MultiReportSourceItem,
+        execute_multi_report_agent,
+    )
     from vsa_agent.data_models.understanding import UnderstandingResult
 
     calls = []
@@ -97,9 +101,11 @@ async def test_default_multi_report_agent_path_uses_unified_analyze_video(monkey
 
 @pytest.mark.anyio
 async def test_execute_multi_report_agent_builds_structured_sections_before_rendering():
-    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
-    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
-    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.agents.multi_report_agent import (
+        MultiReportAgentInput,
+        MultiReportSourceItem,
+        execute_multi_report_agent,
+    )
     from vsa_agent.data_models.report import StructuredReport
 
     captured = {}
@@ -139,9 +145,11 @@ async def test_execute_multi_report_agent_builds_structured_sections_before_rend
 
 @pytest.mark.anyio
 async def test_execute_multi_report_agent_keeps_external_section_title():
-    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
-    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
-    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.agents.multi_report_agent import (
+        MultiReportAgentInput,
+        MultiReportSourceItem,
+        execute_multi_report_agent,
+    )
 
     async def fake_video_understanding(**kwargs):
         return {

@@ -1,4 +1,4 @@
-﻿"""Utility functions for video analytics.
+"""Utility functions for video analytics.
 
 Provides time bucketing, event overlap analysis, and other helpers.
 Mirrors NVIDIA video_analytics/utils.py.

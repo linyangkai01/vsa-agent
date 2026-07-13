@@ -9,13 +9,9 @@ Design Pattern: #13 Three-Path Search Strategy.
 
 import json
 import logging
-from collections.abc import AsyncGenerator
 
-from langchain_core.messages import HumanMessage
-from langchain_core.messages import SystemMessage
-
-from pydantic import BaseModel
-from pydantic import Field
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
 from vsa_agent.registry import register_tool
 
@@ -150,7 +146,10 @@ async def execute_core_search(
                     search_results = results.data
                 elif isinstance(results, list):
                     search_results = results
-                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Attribute search returned {len(search_results)} results")
+                yield AgentMessageChunk(
+                    type=AgentMessageChunkType.THOUGHT,
+                    content=f"Attribute search returned {len(search_results)} results",
+                )
             except Exception as e:
                 logger.error("Attribute search failed: %s", e)
 
@@ -162,11 +161,16 @@ async def execute_core_search(
                     search_results = results.data
                 elif hasattr(results, "data"):
                     search_results = list(results.data)
-                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Embed search returned {len(search_results)} results")
+                yield AgentMessageChunk(
+                    type=AgentMessageChunkType.THOUGHT, content=f"Embed search returned {len(search_results)} results"
+                )
                 if search_results and config.embed_confidence_threshold > 0:
                     max_score = max(r.similarity for r in search_results)
                     if max_score < config.embed_confidence_threshold:
-                        yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Embed confidence {max_score:.3f} below threshold")
+                        yield AgentMessageChunk(
+                            type=AgentMessageChunkType.THOUGHT,
+                            content=f"Embed confidence {max_score:.3f} below threshold",
+                        )
             except Exception as e:
                 logger.error("Embed search failed: %s", e)
 
@@ -204,17 +208,28 @@ async def execute_core_search(
                     if r.video_name not in merged or r.similarity > merged[r.video_name].similarity:
                         merged[r.video_name] = r
                 search_results = sorted(merged.values(), key=lambda x: x.similarity, reverse=True)
-            yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Fusion search returned {len(search_results)} results")
+            yield AgentMessageChunk(
+                type=AgentMessageChunkType.THOUGHT, content=f"Fusion search returned {len(search_results)} results"
+            )
 
-        if should_apply_critic(
-            enable_critic=config.enable_critic,
-            use_critic=search_input.use_critic,
-            critic_agent=critic_agent,
-        ) and search_results:
+        if (
+            should_apply_critic(
+                enable_critic=config.enable_critic,
+                use_critic=search_input.use_critic,
+                critic_agent=critic_agent,
+            )
+            and search_results
+        ):
             try:
                 from vsa_agent.agents.critic_agent import CriticAgentInput, CriticAgentResult, VideoInfo
-                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Verifying {len(search_results)} results with critic")
-                search_videos = [VideoInfo(sensor_id=r.sensor_id, start_timestamp=r.start_time, end_timestamp=r.end_time) for r in search_results]
+
+                yield AgentMessageChunk(
+                    type=AgentMessageChunkType.THOUGHT, content=f"Verifying {len(search_results)} results with critic"
+                )
+                search_videos = [
+                    VideoInfo(sensor_id=r.sensor_id, start_timestamp=r.start_time, end_timestamp=r.end_time)
+                    for r in search_results
+                ]
                 critic_input = CriticAgentInput(query=search_input.query, videos=search_videos)
                 critic_output = await critic_agent(critic_input)
                 new_confirmed = 0
@@ -228,8 +243,13 @@ async def execute_core_search(
                         new_rejected += 1
                         top_k += 1
                         do_search = True
-                yield AgentMessageChunk(type=AgentMessageChunkType.THOUGHT, content=f"Critic: {new_confirmed} confirmed, {new_rejected} rejected")
-                search_results = [r for r in search_results if not any(rej.sensor_id == r.sensor_id for rej in rejected_results)]
+                yield AgentMessageChunk(
+                    type=AgentMessageChunkType.THOUGHT,
+                    content=f"Critic: {new_confirmed} confirmed, {new_rejected} rejected",
+                )
+                search_results = [
+                    r for r in search_results if not any(rej.sensor_id == r.sensor_id for rej in rejected_results)
+                ]
             except Exception as e:
                 logger.error("Critic verification failed: %s", e)
 
@@ -257,14 +277,16 @@ DECOMPOSITION_USER_TEMPLATE = """Extract structured search parameters from this 
 Available fields:
 - query: The main search description including actions AND attributes
 - attributes: List of person/object descriptions only, not just "person"
-- has_action: True if query mentions an action/event (walking, running, carrying, etc.). False if only visual attributes (what something LOOKS LIKE).
+- has_action: True if query mentions an action/event (walking, running, carrying, etc.). \
+False if only visual attributes (what something LOOKS LIKE).
 - top_k: Number of results (integer, only if explicitly mentioned like "top 5")
 - video_sources: Video names mentioned (empty list if none)
 
 Examples:
 "person walking" -> {"query": "person walking", "attributes": ["person"], "has_action": true}
 "red car" -> {"query": "red car", "has_action": false}
-"find person in blue jacket running, top 3" -> {"query": "person in blue jacket running", "attributes": ["person in blue jacket"], "has_action": true, "top_k": 3}
+"find person in blue jacket running, top 3" -> \
+{"query": "person in blue jacket running", "attributes": ["person in blue jacket"], "has_action": true, "top_k": 3}
 "forklift in warehouse" -> {"query": "forklift in warehouse", "has_action": false}
 
 User query: __USER_QUERY__"""
@@ -309,7 +331,6 @@ async def decompose_query(user_query: str, model_adapter) -> DecomposedQuery:
     except Exception as e:
         logger.warning("Failed to decompose query, using raw input: %s", e)
         return DecomposedQuery(query=user_query)
-
 
 
 # ===== Fusion Algorithms (Phase A) =====
@@ -367,19 +388,21 @@ def _apply_weighted_linear_fusion(video_data, w_embed, w_attribute):
     for video in video_data:
         fusion_score = w_embed * video["embed_score"] + w_attribute * video["normalised_attribute_score"]
         er = video["embed_result"]
-        reranked.append((
-            fusion_score,
-            SearchResult(
-                video_name=er.video_name,
-                description=er.description,
-                start_time=er.start_time,
-                end_time=er.end_time,
-                sensor_id=er.sensor_id,
-                screenshot_url=video.get("screenshot_url", ""),
-                similarity=fusion_score,
-                object_ids=video.get("object_ids", []),
-            ),
-        ))
+        reranked.append(
+            (
+                fusion_score,
+                SearchResult(
+                    video_name=er.video_name,
+                    description=er.description,
+                    start_time=er.start_time,
+                    end_time=er.end_time,
+                    sensor_id=er.sensor_id,
+                    screenshot_url=video.get("screenshot_url", ""),
+                    similarity=fusion_score,
+                    object_ids=video.get("object_ids", []),
+                ),
+            )
+        )
     reranked.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in reranked]
 
@@ -395,19 +418,21 @@ def _apply_rrf_fusion(video_data, rrf_k, rrf_w):
     for rank, video in enumerate(sorted_data, start=1):
         rrf_score = 1.0 / (rank + rrf_k) + rrf_w * video["normalised_attribute_score"]
         er = video["embed_result"]
-        reranked.append((
-            rrf_score,
-            SearchResult(
-                video_name=er.video_name,
-                description=er.description,
-                start_time=er.start_time,
-                end_time=er.end_time,
-                sensor_id=er.sensor_id,
-                screenshot_url=video.get("screenshot_url", ""),
-                similarity=rrf_score,
-                object_ids=video.get("object_ids", []),
-            ),
-        ))
+        reranked.append(
+            (
+                rrf_score,
+                SearchResult(
+                    video_name=er.video_name,
+                    description=er.description,
+                    start_time=er.start_time,
+                    end_time=er.end_time,
+                    sensor_id=er.sensor_id,
+                    screenshot_url=video.get("screenshot_url", ""),
+                    similarity=rrf_score,
+                    object_ids=video.get("object_ids", []),
+                ),
+            )
+        )
     reranked.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in reranked]
 
@@ -429,19 +454,21 @@ def _apply_rrf_fusion_with_attribute_rank(video_data, rrf_k, rrf_w):
         rank_attribute = attr_ranks[id(video)]
         rrf_score = 1.0 / (rank_embed + rrf_k) + rrf_w * (1.0 / (rank_attribute + rrf_k))
         er = video["embed_result"]
-        reranked.append((
-            rrf_score,
-            SearchResult(
-                video_name=er.video_name,
-                description=er.description,
-                start_time=er.start_time,
-                end_time=er.end_time,
-                sensor_id=er.sensor_id,
-                screenshot_url=video.get("screenshot_url", ""),
-                similarity=rrf_score,
-                object_ids=video.get("object_ids", []),
-            ),
-        ))
+        reranked.append(
+            (
+                rrf_score,
+                SearchResult(
+                    video_name=er.video_name,
+                    description=er.description,
+                    start_time=er.start_time,
+                    end_time=er.end_time,
+                    sensor_id=er.sensor_id,
+                    screenshot_url=video.get("screenshot_url", ""),
+                    similarity=rrf_score,
+                    object_ids=video.get("object_ids", []),
+                ),
+            )
+        )
     reranked.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in reranked]
 
@@ -490,13 +517,15 @@ async def fusion_search_rerank(
             else:
                 normalised_attr_score = 0.0
 
-            video_data.append({
-                "embed_result": embed_result,
-                "embed_score": embed_result.similarity,
-                "normalised_attribute_score": normalised_attr_score,
-                "screenshot_url": "",
-                "object_ids": embed_result.object_ids or [],
-            })
+            video_data.append(
+                {
+                    "embed_result": embed_result,
+                    "embed_score": embed_result.similarity,
+                    "normalised_attribute_score": normalised_attr_score,
+                    "screenshot_url": "",
+                    "object_ids": embed_result.object_ids or [],
+                }
+            )
         except Exception:
             continue
 
@@ -544,17 +573,21 @@ async def _run_attribute_only_search(
     search_results.sort(key=lambda x: x.similarity, reverse=True)
     return search_results[:top_k]
 
+
 # ===== Helper =====
 
 
 def _resolve_search_callable(tool_name: str, **kwargs):
     """Resolve a search tool from the registry when callable is not injected."""
     from vsa_agent.registry import ToolRegistry
+
     fn = ToolRegistry.get(tool_name)
     if fn is None:
         raise RuntimeError(f"Search tool '{tool_name}' is not registered.")
+
     async def _callable():
         return await fn(**kwargs)
+
     return _callable
 
 
@@ -594,8 +627,8 @@ async def _run_attribute_search(attributes: list[str], top_k: int, attr_store=No
 @register_tool(
     "search",
     description="Core video search with three-path routing: "
-                "embed-only, attribute-only, or fusion (embed + attribute rerank). "
-                "Accepts optional decomposed query parameters for path selection.",
+    "embed-only, attribute-only, or fusion (embed + attribute rerank). "
+    "Accepts optional decomposed query parameters for path selection.",
 )
 async def search_tool(
     query: str,
@@ -657,13 +690,21 @@ async def search_tool(
 
 
 async def execute_core_search_wrapper(
-    search_input, embed_search, agent_llm=None, config=None,
-    builder=None, attribute_search_fn=None, critic_agent=None,
+    search_input,
+    embed_search,
+    agent_llm=None,
+    config=None,
+    builder=None,
+    attribute_search_fn=None,
+    critic_agent=None,
 ):
     """Non-streaming wrapper: collects generator output, returns final SearchOutput."""
     async for update in execute_core_search(
-        search_input=search_input, embed_search=embed_search,
-        agent_llm=agent_llm, config=config, attribute_search_fn=attribute_search_fn,
+        search_input=search_input,
+        embed_search=embed_search,
+        agent_llm=agent_llm,
+        config=config,
+        attribute_search_fn=attribute_search_fn,
     ):
         if isinstance(update, SearchOutput):
             return update

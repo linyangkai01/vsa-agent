@@ -5,9 +5,7 @@ import pytest
 
 @pytest.mark.anyio
 async def test_generate_multi_report_calls_single_report_gen_and_template_gen():
-    from vsa_agent.tools.report_gen import MultiReportGenOutput
-    from vsa_agent.tools.report_gen import ReportSectionInput
-    from vsa_agent.tools.report_gen import generate_multi_report
+    from vsa_agent.tools.report_gen import MultiReportGenOutput, ReportSectionInput, generate_multi_report
 
     single_calls = []
     template_calls = []
@@ -56,8 +54,7 @@ async def test_generate_multi_report_calls_single_report_gen_and_template_gen():
 
 @pytest.mark.anyio
 async def test_generate_multi_report_includes_chart_payload_for_template():
-    from vsa_agent.tools.report_gen import ReportSectionInput
-    from vsa_agent.tools.report_gen import generate_multi_report
+    from vsa_agent.tools.report_gen import ReportSectionInput, generate_multi_report
 
     template_calls = []
 

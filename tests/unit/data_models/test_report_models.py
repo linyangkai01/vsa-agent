@@ -4,8 +4,7 @@ from vsa_agent.data_models.understanding import UnderstandingResult
 
 
 def test_structured_report_defaults_and_serialization():
-    from vsa_agent.data_models.report import ReportSection
-    from vsa_agent.data_models.report import StructuredReport
+    from vsa_agent.data_models.report import ReportSection, StructuredReport
 
     section = ReportSection(
         section_id="section-1",

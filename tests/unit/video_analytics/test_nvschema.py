@@ -1,5 +1,7 @@
 """Tests for video_analytics/nvschema.py."""
+
 from vsa_agent.video_analytics.nvschema import Incident, Location, Place
+
 
 class TestIncident:
     def test_defaults(self):
@@ -12,6 +14,7 @@ class TestIncident:
         assert inc.description == "Forklift accident"
         assert inc.severity == "high"
 
+
 class TestLocation:
     def test_defaults(self):
         loc = Location()
@@ -20,6 +23,7 @@ class TestLocation:
     def test_with_values(self):
         loc = Location(name="Warehouse A", coordinates=(37.7749, -122.4194))
         assert loc.name == "Warehouse A"
+
 
 class TestPlace:
     def test_defaults(self):

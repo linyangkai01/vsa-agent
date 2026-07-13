@@ -7,9 +7,11 @@ from vsa_agent.agents.data_models import AgentOutput
 
 @pytest.mark.anyio
 async def test_multi_report_flow_with_chart_blocks():
-    from vsa_agent.agents.multi_report_agent import MultiReportAgentInput
-    from vsa_agent.agents.multi_report_agent import MultiReportSourceItem
-    from vsa_agent.agents.multi_report_agent import execute_multi_report_agent
+    from vsa_agent.agents.multi_report_agent import (
+        MultiReportAgentInput,
+        MultiReportSourceItem,
+        execute_multi_report_agent,
+    )
     from vsa_agent.tools.report_gen import generate_multi_report
 
     async def fake_video_understanding_fn(**kwargs):

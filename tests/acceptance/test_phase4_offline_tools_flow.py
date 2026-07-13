@@ -2,15 +2,12 @@
 
 import pytest
 
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import EvidenceRef
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, UnderstandingResult
 
 
 @pytest.mark.anyio
 async def test_phase4_offline_flow_from_understanding_to_geolocation_summary():
-    from vsa_agent.tools.geolocation import enrich_incidents_with_location
-    from vsa_agent.tools.geolocation import summarize_geolocation
+    from vsa_agent.tools.geolocation import enrich_incidents_with_location, summarize_geolocation
     from vsa_agent.tools.incidents import understanding_to_incidents
 
     result = UnderstandingResult(
@@ -68,4 +65,3 @@ async def test_phase4_caption_wrappers_share_same_core_path(monkeypatch):
     assert calls[0]["query"] == "describe"
     assert "详细" in calls[1]["query"]
     assert "简要" in calls[2]["query"]
-

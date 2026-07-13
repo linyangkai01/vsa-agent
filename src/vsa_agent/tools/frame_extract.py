@@ -62,7 +62,9 @@ def _extract_frames(
     if not frame_indices:
         logger.warning(
             "No frames selected from %.2fs to %.2fs (step=%.2fs)",
-            start_timestamp, end_timestamp, step_size,
+            start_timestamp,
+            end_timestamp,
+            step_size,
         )
         return []
 
@@ -80,8 +82,6 @@ def _extract_frames(
     return base64_frames
 
 
-
-
 # ===== GPU Detection =====
 
 
@@ -89,10 +89,11 @@ def has_nvidia_gpu() -> bool:
     """Check for NVIDIA GPU availability. Mirrors NVIDIA has_nvidia_gpu()."""
     import shutil
     import subprocess
+
     return (
-        shutil.which("nvidia-smi") is not None
-        and subprocess.run(["nvidia-smi"], capture_output=True).returncode == 0
+        shutil.which("nvidia-smi") is not None and subprocess.run(["nvidia-smi"], capture_output=True).returncode == 0
     )
+
 
 # ===== Registered Tool =====
 
@@ -100,7 +101,7 @@ def has_nvidia_gpu() -> bool:
 @register_tool(
     "frame_extract",
     description="Extract evenly-spaced frames from a video file. Returns metadata with a frame_key reference. "
-                "Pass the frame_key to video_understanding to analyze the frames.",
+    "Pass the frame_key to video_understanding to analyze the frames.",
 )
 async def frame_extract_tool(
     video_path: str,
@@ -154,7 +155,9 @@ async def frame_extract_tool(
         if time_window <= 0:
             logger.warning(
                 "Empty time window for %s: start=%.2f end=%.2f",
-                video_path, start_timestamp, end_timestamp,
+                video_path,
+                start_timestamp,
+                end_timestamp,
             )
             return {
                 "frame_key": "",
@@ -169,17 +172,25 @@ async def frame_extract_tool(
         step_size = time_window / max_frames
 
         frames = _extract_frames(
-            cap, fps, total_frames, start_timestamp, end_timestamp, step_size,
+            cap,
+            fps,
+            total_frames,
+            start_timestamp,
+            end_timestamp,
+            step_size,
         )
 
         # Store frames in shared store, return reference key
-        frame_key = store_frames(frames, {
-            "video_path": video_path,
-            "duration_sec": duration_sec,
-            "fps": fps,
-            "frame_count": total_frames,
-            "extracted_count": len(frames),
-        })
+        frame_key = store_frames(
+            frames,
+            {
+                "video_path": video_path,
+                "duration_sec": duration_sec,
+                "fps": fps,
+                "frame_count": total_frames,
+                "extracted_count": len(frames),
+            },
+        )
 
         return {
             "frame_key": frame_key,

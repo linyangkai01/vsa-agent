@@ -1,11 +1,8 @@
 """Summary layer for dual-track video understanding output."""
 
-from langchain_core.messages import HumanMessage
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import SummaryResult
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.understanding import DetectedEvent, SummaryResult, UnderstandingResult
 from vsa_agent.registry import register_tool
 from vsa_agent.video_analytics.nvschema import Incident
 
@@ -19,7 +16,6 @@ def _parse_hhmmss(value: str) -> int | None:
     except ValueError:
         return None
     return hours * 3600 + minutes * 60 + seconds
-
 
 
 def _merge_summary_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
@@ -56,7 +52,6 @@ def _merge_summary_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
     return merged
 
 
-
 def _events_to_text(events: list[DetectedEvent]) -> str:
     merged_events = _merge_summary_events(events)
     lines = []
@@ -66,7 +61,6 @@ def _events_to_text(events: list[DetectedEvent]) -> str:
         else:
             lines.append(event.description)
     return "\n".join(line for line in lines if line)
-
 
 
 def _incident_time_window(incident: Incident) -> tuple[str, str]:

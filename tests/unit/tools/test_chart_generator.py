@@ -5,9 +5,7 @@ import pytest
 
 @pytest.mark.anyio
 async def test_generate_bar_chart_artifact_returns_chart_metadata_and_markdown_table():
-    from vsa_agent.tools.chart_generator import ChartArtifact
-    from vsa_agent.tools.chart_generator import ChartSeriesItem
-    from vsa_agent.tools.chart_generator import generate_bar_chart_artifact
+    from vsa_agent.tools.chart_generator import ChartArtifact, ChartSeriesItem, generate_bar_chart_artifact
 
     result = await generate_bar_chart_artifact(
         chart_title="事件计数统计",

@@ -4,8 +4,7 @@ from pathlib import Path
 import pytest
 
 from vsa_agent.archive.index import read_archive_index
-from vsa_agent.archive.ingest import build_record_from_live_run
-from vsa_agent.archive.ingest import ingest_live_run
+from vsa_agent.archive.ingest import build_record_from_live_run, ingest_live_run
 
 
 def _write_run(run_dir: Path) -> None:
@@ -85,9 +84,7 @@ def test_build_record_from_live_run_includes_selected_tool_result_text(tmp_path:
 
     assert "forklift crosses" in record.search_text
     assert "forklift" in record.object_ids
-    assert record.metadata["tool_result_paths"] == [
-        str(run_dir / "tool-results" / "video-understanding.json")
-    ]
+    assert record.metadata["tool_result_paths"] == [str(run_dir / "tool-results" / "video-understanding.json")]
 
 
 def test_ingest_live_run_writes_archive_index(tmp_path: Path):

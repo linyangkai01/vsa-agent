@@ -1,4 +1,4 @@
-﻿"""ES query builders — reserved for future Elasticsearch query construction.
+"""ES query builders — reserved for future Elasticsearch query construction.
 
 ⚠️ This module is intentionally empty. The data models (DecomposedQuery,
 SearchResult, SearchOutput) have been moved to agents/search_agent.py to

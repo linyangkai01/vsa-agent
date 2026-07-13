@@ -14,9 +14,8 @@ import logging
 from enum import Enum
 
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
-from pydantic import ConfigDict
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
+
 from vsa_agent.registry import register_tool
 from vsa_agent.utils.parser import extract_json_string
 
@@ -87,13 +86,14 @@ def _get_json_from_string(string: str) -> str:
     """Strip JSON from markdown code blocks. Mirrors NVIDIA get_json_from_string."""
     return extract_json_string(string)
 
+
 # ===== Registered Tool Wrapper =====
 
 
 @register_tool(
     "critic_agent",
     description="Verify search results against the original query using VLM. "
-                "Returns confirmed/rejected/unverified for each result.",
+    "Returns confirmed/rejected/unverified for each result.",
 )
 async def critic_agent_tool(
     query: str,
@@ -101,6 +101,7 @@ async def critic_agent_tool(
 ) -> str:
     """Tool wrapper: parses videos JSON, calls execute_critic, returns summary."""
     import json as _json
+
     videos_data = _json.loads(videos_json)
     videos = [
         VideoInfo(
@@ -118,7 +119,6 @@ async def critic_agent_tool(
         criteria = ", ".join(f"{k}={v}" for k, v in (vr.criteria_met or {}).items())
         lines.append(f"  {vr.video_info.sensor_id}: {status} ({criteria})")
     return "\n".join(lines)
-
 
 
 # ===== Core Verification =====
@@ -142,6 +142,7 @@ async def execute_critic(
     """
     if model_adapter is None:
         from vsa_agent.model_adapter import create_model_adapter
+
         model_adapter = create_model_adapter()
 
     video_count = min(
@@ -169,18 +170,22 @@ async def execute_critic(
                     result = CriticAgentResult.REJECTED
                     break
 
-            video_results.append(VideoResult(
-                video_info=video,
-                result=result,
-                criteria_met=criteria_dict,
-            ))
+            video_results.append(
+                VideoResult(
+                    video_info=video,
+                    result=result,
+                    criteria_met=criteria_dict,
+                )
+            )
 
         except Exception as e:
             logger.error("Critic evaluation failed: %s", e)
-            video_results.append(VideoResult(
-                video_info=video,
-                result=CriticAgentResult.UNVERIFIED,
-                criteria_met={},
-            ))
+            video_results.append(
+                VideoResult(
+                    video_info=video,
+                    result=CriticAgentResult.UNVERIFIED,
+                    criteria_met={},
+                )
+            )
 
     return CriticAgentOutput(video_results=video_results)

@@ -7,8 +7,7 @@ import pytest
 async def test_process_report_accepts_structured_report():
     from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
     from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
-    from vsa_agent.data_models.report import ReportSection
-    from vsa_agent.data_models.report import StructuredReport
+    from vsa_agent.data_models.report import ReportSection, StructuredReport
     from vsa_agent.data_models.understanding import UnderstandingResult
 
     report = StructuredReport(

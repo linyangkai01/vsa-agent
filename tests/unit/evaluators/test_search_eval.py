@@ -1,7 +1,6 @@
 from vsa_agent.evaluators.data_models import ExpectedSearchHit
 from vsa_agent.evaluators.search_eval import evaluate_search_output
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.tools.search import SearchOutput, SearchResult
 
 
 def test_evaluate_search_output_scores_top_hit_and_hit_coverage():

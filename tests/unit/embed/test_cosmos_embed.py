@@ -1,5 +1,7 @@
 """Tests for embed/cosmos_embed.py."""
+
 from vsa_agent.embed.cosmos_embed import CosmosEmbedClient
+
 
 class TestCosmosEmbedClient:
     def test_initialization(self):

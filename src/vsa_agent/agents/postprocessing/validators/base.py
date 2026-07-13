@@ -1,11 +1,9 @@
-﻿"""Base validator abstract class. Mirrors NVIDIA BaseValidator."""
+"""Base validator abstract class. Mirrors NVIDIA BaseValidator."""
 
-from abc import ABC
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 
 class ValidatorResult(BaseModel):

@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vsa_agent.config import AppConfig
-from vsa_agent.config import resolve_runtime_config
+from vsa_agent.config import AppConfig, resolve_runtime_config
 
 
 def _assert_key_guard_precedes_config_resolution(script: Path) -> None:
@@ -14,18 +13,12 @@ def _assert_key_guard_precedes_config_resolution(script: Path) -> None:
     guard = 'if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then'
 
     assert guard in text
-    assert text.index(guard) < text.index(
-        'conda run -n "${VSA_CONDA_ENV}" python -m vsa_agent config doctor'
-    )
+    assert text.index(guard) < text.index('conda run -n "${VSA_CONDA_ENV}" python -m vsa_agent config doctor')
 
 
 def test_dashscope_runners_check_key_before_config_resolution():
-    _assert_key_guard_precedes_config_resolution(
-        Path("scripts/run_live_acceptance_dashscope.sh")
-    )
-    _assert_key_guard_precedes_config_resolution(
-        Path("scripts/run_live_top_agent_video_dashscope.sh")
-    )
+    _assert_key_guard_precedes_config_resolution(Path("scripts/run_live_acceptance_dashscope.sh"))
+    _assert_key_guard_precedes_config_resolution(Path("scripts/run_live_top_agent_video_dashscope.sh"))
 
 
 def test_dashscope_live_config_defines_non_secret_llm_and_vlm_defaults(monkeypatch):
@@ -46,7 +39,7 @@ def test_dashscope_runner_exists_and_is_executable_text():
     assert script.exists()
     text = script.read_text(encoding="utf-8")
     assert "DASHSCOPE_API_KEY" in text
-    assert "LIVE_API_KEY=\"$(" in text
+    assert 'LIVE_API_KEY="$(' in text
     assert "DASHSCOPE_LLM_MODEL" not in text
     assert "DASHSCOPE_VLM_MODEL" not in text
     assert "VSA_LIVE_TRACE_PATH" in text
@@ -67,7 +60,7 @@ def test_dashscope_top_agent_video_runner_exists_and_configures_live_env():
     assert script.exists()
     text = script.read_text(encoding="utf-8")
     assert "DASHSCOPE_API_KEY" in text
-    assert "OPENAI_API_KEY=\"$(" in text
+    assert 'OPENAI_API_KEY="$(' in text
     assert "VSA_CONFIG" in text
     assert "config.yaml" in text
     assert "config_live_dashscope.yaml" not in text

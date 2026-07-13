@@ -1,14 +1,21 @@
 """Tests for agents/data_models.py."""
-from langchain_core.messages import HumanMessage, AIMessage
+
+from langchain_core.messages import HumanMessage
+
 from vsa_agent.agents.data_models import (
-    AgentDecision, AgentMessageChunkType, AgentMessageChunk,
-    AgentState, AgentOutput,
+    AgentDecision,
+    AgentMessageChunk,
+    AgentMessageChunkType,
+    AgentOutput,
+    AgentState,
 )
+
 
 class TestAgentDecision:
     def test_values(self):
         assert AgentDecision.CALL_TOOL.value == "call_tool"
         assert AgentDecision.RESPOND.value == "respond"
+
 
 class TestAgentMessageChunkType:
     def test_values(self):
@@ -18,12 +25,14 @@ class TestAgentMessageChunkType:
         assert AgentMessageChunkType.TOOL_RESULT.value == "tool_result"
         assert AgentMessageChunkType.FINAL.value == "final"
 
+
 class TestAgentMessageChunk:
     def test_defaults(self):
         chunk = AgentMessageChunk()
         assert chunk.type == AgentMessageChunkType.THOUGHT
         assert chunk.content == ""
         assert chunk.metadata == {}
+
 
 class TestAgentState:
     def test_defaults(self):
@@ -36,6 +45,7 @@ class TestAgentState:
         msg = HumanMessage(content="test query")
         state = AgentState(current_message=msg)
         assert state.current_message.content == "test query"
+
 
 class TestAgentOutput:
     def test_defaults(self):

@@ -22,4 +22,3 @@ async def test_detailed_caption_adds_detail_prompt_prefix(monkeypatch):
     assert text == "detailed caption"
     assert "详细" in captured["user_prompt"]
     assert "describe" in captured["user_prompt"]
-

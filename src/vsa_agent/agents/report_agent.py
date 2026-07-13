@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
-from typing import Awaitable
-from typing import Callable
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.agents.data_models import AgentOutput
 from vsa_agent.agents.postprocessing.pipeline import ValidationPipeline
 from vsa_agent.agents.postprocessing.validators.non_empty import NonEmptyValidator
-from vsa_agent.observability.live_trace import write_live_json_artifact
-from vsa_agent.observability.live_trace import write_live_text_artifact
-from vsa_agent.observability.live_trace import write_live_trace_event
+from vsa_agent.observability.live_trace import (
+    write_live_json_artifact,
+    write_live_text_artifact,
+    write_live_trace_event,
+)
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.report_structuring import build_single_section_report
-from vsa_agent.tools.report_structuring import normalize_understanding_result
+from vsa_agent.tools.report_structuring import build_single_section_report, normalize_understanding_result
 from vsa_agent.tools.video_understanding import analyze_video
 
 VideoUnderstandingCallable = Callable[..., Awaitable[Any]]

@@ -2,16 +2,18 @@ import json
 
 import pytest
 
-from scripts.es_ingest_smoke import find_indexed_document
-from scripts.es_ingest_smoke import delete_stale_validation_documents
-from scripts.es_ingest_smoke import mock_query_vector
-from scripts.es_ingest_smoke import _parse_args
-from scripts.es_ingest_smoke import post_ingest
-from scripts.es_ingest_smoke import post_original_ui_search
-from scripts.es_ingest_smoke import sample_payload
-from scripts.es_ingest_smoke import search_indexed_document
-from scripts.es_ingest_smoke import validate_indexed_document
-from scripts.es_ingest_smoke import validate_ingest_response
+from scripts.es_ingest_smoke import (
+    _parse_args,
+    delete_stale_validation_documents,
+    find_indexed_document,
+    mock_query_vector,
+    post_ingest,
+    post_original_ui_search,
+    sample_payload,
+    search_indexed_document,
+    validate_indexed_document,
+    validate_ingest_response,
+)
 
 
 def test_sample_payload_contains_required_metadata():
@@ -193,7 +195,9 @@ def test_post_ingest_posts_json_to_ingest_endpoint(monkeypatch):
         captured["method"] = request.get_method()
         captured["content_type"] = request.headers["Content-type"]
         captured["body"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse({"status": "ingested", "video_id": "runtime-video-1", "indexed": True, "result_id": "abc123"})
+        return FakeResponse(
+            {"status": "ingested", "video_id": "runtime-video-1", "indexed": True, "result_id": "abc123"}
+        )
 
     monkeypatch.setattr("scripts.es_ingest_smoke.urlopen", fake_urlopen)
 
@@ -255,7 +259,9 @@ async def test_find_indexed_document_refreshes_and_uses_match_fallback(monkeypat
             self.search_bodies.append((index, body))
             if "term" in body["query"]:
                 return {"hits": {"hits": []}}
-            return {"hits": {"hits": [{"_source": {"video_id": "runtime-video-1", "metadata": {"site": "runtime-yard"}}}]}}
+            return {
+                "hits": {"hits": [{"_source": {"video_id": "runtime-video-1", "metadata": {"site": "runtime-yard"}}}]}
+            }
 
         async def close(self):
             self.closed = True
@@ -363,10 +369,20 @@ async def test_search_indexed_document_uses_description_match(monkeypatch):
             {
                 "query": {
                     "bool": {
-                        "must": [{"multi_match": {
-                            "query": "forklift worker",
-                            "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
-                        }}],
+                        "must": [
+                            {
+                                "multi_match": {
+                                    "query": "forklift worker",
+                                    "fields": [
+                                        "description",
+                                        "video_name",
+                                        "sensor_id",
+                                        "metadata.description",
+                                        "metadata.site",
+                                    ],
+                                }
+                            }
+                        ],
                         "filter": [{"term": {"video_id.keyword": "runtime-video-1"}}],
                     }
                 },

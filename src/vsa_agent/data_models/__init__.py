@@ -1,5 +1,6 @@
 """Shared data models for vsa-agent."""
 
+from .report import ReportIncident, ReportSection, StructuredReport
 from .understanding import (
     DetectedEvent,
     EvidenceRef,
@@ -7,7 +8,6 @@ from .understanding import (
     SummaryResult,
     UnderstandingResult,
 )
-from .report import ReportIncident, ReportSection, StructuredReport
 from .vss import Incident, Location, MediaInfoOffset, Place
 
 __all__ = [

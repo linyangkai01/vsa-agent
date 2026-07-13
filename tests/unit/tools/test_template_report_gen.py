@@ -7,8 +7,7 @@ from vsa_agent.utils.markdown_parser import split_sections
 
 @pytest.mark.anyio
 async def test_generate_template_report_returns_markdown_with_summary_sections():
-    from vsa_agent.tools.template_report_gen import TemplateReportGenOutput
-    from vsa_agent.tools.template_report_gen import generate_template_report
+    from vsa_agent.tools.template_report_gen import TemplateReportGenOutput, generate_template_report
 
     result = await generate_template_report(
         report_title="聚合报告",

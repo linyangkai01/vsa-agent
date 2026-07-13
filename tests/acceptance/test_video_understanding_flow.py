@@ -2,8 +2,7 @@
 
 import pytest
 
-from vsa_agent.data_models.understanding import SummaryResult
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.understanding import SummaryResult, UnderstandingResult
 
 
 class TestVideoUnderstandingFlow:
@@ -55,7 +54,7 @@ class TestVideoUnderstandingFlow:
                 return type("ClipResult", (), {"clip_url": "C:/tmp/clip.mp4", "local_path": None})()
 
         class FakeCap:
-            def isOpened(self):
+            def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
                 return True
 
             def get(self, prop):

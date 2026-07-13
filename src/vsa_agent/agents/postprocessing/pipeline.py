@@ -1,9 +1,8 @@
-﻿"""Validation pipeline — runs validators in sequence. Mirrors NVIDIA PostprocessingNode."""
+"""Validation pipeline — runs validators in sequence. Mirrors NVIDIA PostprocessingNode."""
 
 import logging
 
 from pydantic import BaseModel
-from pydantic import Field
 
 from vsa_agent.agents.postprocessing.validators.base import BaseValidator
 
@@ -50,4 +49,3 @@ class ValidationPipeline:
                     report.global_validation_feedback.append(feedback)
                 return result
         return PostprocessingResult(passed=True)
-

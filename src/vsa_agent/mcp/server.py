@@ -3,24 +3,27 @@ from langchain_core.messages import HumanMessage
 
 from vsa_agent.agents.data_models import AgentState
 
-mcp = FastMCP('vsa-agent')
+mcp = FastMCP("vsa-agent")
 
 
 @mcp.tool()
 async def echo(message: str) -> str:
     """Echo back the input message."""
     from vsa_agent.registry import ToolRegistry
-    fn = ToolRegistry.get('echo')
+
+    fn = ToolRegistry.get("echo")
     if fn:
         return await fn(message)
-    return f'Echo: {message}'
+    return f"Echo: {message}"
 
 
 @mcp.tool()
 async def list_tools() -> str:
     """List all available tools in the VSA agent."""
-    from vsa_agent.registry import ToolRegistry
     import json
+
+    from vsa_agent.registry import ToolRegistry
+
     tools = ToolRegistry.list_tools()
     return json.dumps(tools, indent=2)
 
@@ -33,8 +36,8 @@ async def chat(query: str) -> str:
     graph = await build_graph()
     state = AgentState(current_message=HumanMessage(content=query))
     result = await graph.ainvoke(state)
-    return result.get('final_answer', 'No response')
+    return result.get("final_answer", "No response")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     mcp.run()

@@ -4,9 +4,7 @@ import asyncio
 
 import pytest
 
-from vsa_agent.utils.time_measure import TimeMeasureResult
-from vsa_agent.utils.time_measure import async_measure_time
-from vsa_agent.utils.time_measure import measure_time
+from vsa_agent.utils.time_measure import TimeMeasureResult, async_measure_time, measure_time
 
 
 def test_measure_time_returns_elapsed_result():

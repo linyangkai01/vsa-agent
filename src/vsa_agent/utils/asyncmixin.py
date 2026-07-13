@@ -1,4 +1,4 @@
-﻿"""AsyncMixin base class for async resource management.
+"""AsyncMixin base class for async resource management.
 
 Provides lifecycle hooks for async initialization and cleanup.
 Mirrors NVIDIA AsyncMixin pattern.
@@ -48,7 +48,7 @@ class AsyncMixin:
         await self.async_close()
 
     @classmethod
-    async def create(cls, *args: Any, **kwargs: Any) -> "AsyncMixin":
+    async def create(cls, *args: Any, **kwargs: Any) -> AsyncMixin:
         """Factory method: create and async-initialize an instance.
 
         Args:
@@ -62,7 +62,7 @@ class AsyncMixin:
         await instance.async_init()
         return instance
 
-    async def __aenter__(self) -> "AsyncMixin":
+    async def __aenter__(self) -> AsyncMixin:
         if not self._async_initialized:
             await self.async_init()
         return self

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.registry import register_tool
 

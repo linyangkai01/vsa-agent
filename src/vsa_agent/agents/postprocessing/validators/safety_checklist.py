@@ -1,9 +1,8 @@
-﻿"""Safety report checklist validator."""
+"""Safety report checklist validator."""
 
 from typing import Any
 
-from vsa_agent.agents.postprocessing.validators.base import BaseValidator
-from vsa_agent.agents.postprocessing.validators.base import ValidatorResult
+from vsa_agent.agents.postprocessing.validators.base import BaseValidator, ValidatorResult
 
 SAFETY_KEYWORDS = ["hard hat", "safety", "PPE", "violation", "helmet", "red zone", "forklift"]
 
@@ -19,8 +18,8 @@ class SafetyChecklistValidator(BaseValidator):
         found = [kw for kw in SAFETY_KEYWORDS if kw.lower() in output.lower()]
         if not found:
             return ValidatorResult(
-                name=self.name, passed=False,
+                name=self.name,
+                passed=False,
                 issues=["No safety keywords found in output"],
             )
         return ValidatorResult(name=self.name, passed=True)
-

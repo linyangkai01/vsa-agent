@@ -1,4 +1,4 @@
-﻿"""Reasoning utilities for VLM interactions.
+"""Reasoning utilities for VLM interactions.
 
 Provides thinking_tag formatting and keyword argument binding
 for models with reasoning capabilities.
@@ -33,8 +33,12 @@ def bind_reasoning_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         Filtered kwargs with reasoning parameters.
     """
     reasoning_keys = {
-        "reasoning_effort", "max_tokens", "temperature",
-        "top_p", "stop", "filter_thinking",
+        "reasoning_effort",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "stop",
+        "filter_thinking",
     }
     return {k: v for k, v in kwargs.items() if k in reasoning_keys}
 

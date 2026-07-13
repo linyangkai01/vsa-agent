@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from vsa_agent.evaluators.data_models import EvaluationResult
-from vsa_agent.evaluators.data_models import ExpectedSearchHit
-from vsa_agent.evaluators.data_models import MetricScore
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.evaluators.data_models import EvaluationResult, ExpectedSearchHit, MetricScore
+from vsa_agent.tools.search import SearchOutput, SearchResult
 
 
 def _normalize_text(value: str) -> str:

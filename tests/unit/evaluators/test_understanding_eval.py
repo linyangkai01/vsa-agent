@@ -1,9 +1,5 @@
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import EvidenceRef
-from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.evaluators.data_models import EvaluationResult
-from vsa_agent.evaluators.data_models import ExpectedEvent
-from vsa_agent.evaluators.data_models import MetricScore
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, UnderstandingResult
+from vsa_agent.evaluators.data_models import EvaluationResult, ExpectedEvent, MetricScore
 from vsa_agent.evaluators.understanding_eval import evaluate_understanding_result
 
 
