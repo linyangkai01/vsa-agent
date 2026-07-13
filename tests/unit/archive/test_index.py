@@ -1,7 +1,6 @@
 from pathlib import Path
 
-from vsa_agent.archive.index import read_archive_index
-from vsa_agent.archive.index import upsert_archive_records
+from vsa_agent.archive.index import read_archive_index, upsert_archive_records
 from vsa_agent.archive.models import ArchiveRecord
 
 
@@ -34,8 +33,7 @@ def test_upsert_archive_records_replaces_duplicate_record_id(tmp_path: Path):
 def test_read_archive_index_skips_invalid_jsonl_lines(tmp_path: Path):
     index_path = tmp_path / "index.jsonl"
     index_path.write_text(
-        '{"record_id":"run-1","video_name":"a.mp4","description":"person","search_text":"person"}\n'
-        'not-json\n',
+        '{"record_id":"run-1","video_name":"a.mp4","description":"person","search_text":"person"}\nnot-json\n',
         encoding="utf-8",
     )
 

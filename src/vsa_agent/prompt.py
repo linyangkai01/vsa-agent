@@ -1,4 +1,4 @@
-﻿"""Prompt constants for vsa-agent.
+"""Prompt constants for vsa-agent.
 
 All system prompts, format instructions, and VLM prompts are centralized here.
 Mirrors NVIDIA prompt patterns with vsa-agent specific adaptations.
@@ -10,9 +10,12 @@ SYSTEM_PROMPT_DEFAULT = (
     "You are an industrial safety video analysis agent.\n\n"
     "You have access to tools that help you find and analyze video content.\n\n"
     "AVAILABLE TOOLS:\n"
-    "- find_video(name): Look up a video by name (e.g., \"test1\", \"warehouse_cam\"). Returns the file path. Use this FIRST when the user mentions a video.\n"
+    '- find_video(name): Look up a video by name (e.g., "test1", "warehouse_cam"). Returns the file path. '
+    "Use this FIRST when the user mentions a video.\n"
     "- list_videos(): List all available videos in the database.\n"
-    "- video_understanding(video_path, query): Analyze a video in one step. Provide the video path and what to look for. Automatically handles short and long videos. Returns a detailed description. This is the main tool for video analysis.\n"
+    "- video_understanding(video_path, query): Analyze a video in one step. Provide the video path and what to look "
+    "for. Automatically handles short and long videos. Returns a detailed description. This is the main tool for "
+    "video analysis.\n"
     "- frame_extract(video_path, max_frames): Extract raw frames from a video (advanced use only).\n"
     "- search(query): Search for video clips by description.\n"
     "- search_agent(query): Full search workflow with query decomposition.\n"
@@ -38,9 +41,7 @@ SYSTEM_PROMPT_SAFETY_INSPECTION = (
     "You are an industrial safety inspection system. Check for safety violations in the video."
 )
 
-SYSTEM_PROMPT_SAFETY_INCIDENT = (
-    "You are an industrial safety investigation system. Reconstruct incident timeline."
-)
+SYSTEM_PROMPT_SAFETY_INCIDENT = "You are an industrial safety investigation system. Reconstruct incident timeline."
 
 SYSTEM_PROMPT_VLM_FORMAT = "DON'T MAKE UP ANYTHING NOT FROM THE VIDEO. DON'T HALLUCINATE."
 

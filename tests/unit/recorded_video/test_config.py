@@ -142,9 +142,7 @@ def test_production_recorded_video_reports_missing_provider_credentials(monkeypa
 def test_production_recorded_video_rejects_inline_only_provider_credentials(monkeypatch):
     monkeypatch.delenv("PROVIDER_API_KEY", raising=False)
 
-    diagnostics = validate_recorded_video_runtime(
-        production_config(api_key_env=None, api_key="inline-secret")
-    )
+    diagnostics = validate_recorded_video_runtime(production_config(api_key_env=None, api_key="inline-secret"))
 
     assert diagnostics.ok is False
     assert any("api_key_env" in issue.message for issue in diagnostics.issues)
@@ -155,16 +153,13 @@ def test_production_recorded_video_points_missing_credentials_to_api_key_env():
 
     assert any("api_key_env (not configured)" in issue.message for issue in diagnostics.issues)
     assert not any(
-        issue.message.startswith(("vlm backend", "embedding backend"))
-        and issue.message.endswith("from api_key")
+        issue.message.startswith(("vlm backend", "embedding backend")) and issue.message.endswith("from api_key")
         for issue in diagnostics.issues
     )
 
 
 def test_production_recorded_video_allows_provider_that_does_not_require_credentials():
-    diagnostics = validate_recorded_video_runtime(
-        production_config(api_key_env=None, api_key_required=False)
-    )
+    diagnostics = validate_recorded_video_runtime(production_config(api_key_env=None, api_key_required=False))
 
     assert diagnostics.ok is True
 
@@ -181,9 +176,7 @@ def test_production_recorded_video_accepts_resolvable_providers(monkeypatch):
     "invalid_llm",
     ["binding_backend", "base_url", "model", "credential"],
 )
-def test_recorded_video_ignores_invalid_llm_when_required_roles_are_valid(
-    monkeypatch, invalid_llm
-):
+def test_recorded_video_ignores_invalid_llm_when_required_roles_are_valid(monkeypatch, invalid_llm):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     config = AppConfig(
         active_profile="production",

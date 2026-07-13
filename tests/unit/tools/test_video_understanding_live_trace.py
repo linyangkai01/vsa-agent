@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-
 TEST_TRACE_DIR = Path("artifacts/test-video-understanding-live-trace")
 
 
@@ -32,7 +31,7 @@ def test_extract_frames_logs_metadata_without_base64_payloads(trace_dir, monkeyp
             self.path = path
             self.frame_idx = 0
 
-        def isOpened(self):
+        def isOpened(self):  # noqa: N802 - mirrors the OpenCV protocol
             return True
 
         def get(self, prop):

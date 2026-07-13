@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-
 TEST_TRACE_DIR = Path("artifacts/test-report-agent-live-trace")
 
 
@@ -18,8 +17,7 @@ def trace_dir():
 
 @pytest.mark.asyncio
 async def test_report_agent_logs_understanding_and_report_artifacts(trace_dir, monkeypatch):
-    from vsa_agent.agents.report_agent import ReportAgentInput
-    from vsa_agent.agents.report_agent import execute_report_agent
+    from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.data_models.understanding import UnderstandingResult
 
     trace_path = trace_dir / "trace.jsonl"

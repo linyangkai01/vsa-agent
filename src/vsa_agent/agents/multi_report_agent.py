@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
-from typing import Awaitable
-from typing import Callable
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.agents.data_models import AgentOutput
 from vsa_agent.data_models.report import StructuredReport
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.report_gen import ReportSectionInput
-from vsa_agent.tools.report_structuring import build_single_section_report
-from vsa_agent.tools.report_structuring import normalize_understanding_result
+from vsa_agent.tools.report_structuring import build_single_section_report, normalize_understanding_result
 from vsa_agent.tools.video_understanding import analyze_video
 
 VideoUnderstandingCallable = Callable[..., Awaitable[Any]]
@@ -88,9 +85,7 @@ async def execute_multi_report_agent(
                 section_title=section_title,
                 sensor_id=source_name,
                 user_query=report_input.query,
-                understanding_result=(
-                    understanding if isinstance(understanding, dict) else understanding.model_dump()
-                ),
+                understanding_result=(understanding if isinstance(understanding, dict) else understanding.model_dump()),
             )
         )
         structured_sections.append(

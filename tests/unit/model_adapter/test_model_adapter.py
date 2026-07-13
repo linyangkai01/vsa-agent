@@ -1,25 +1,18 @@
 """Tests for model_adapter/."""
 
 import os
-from unittest.mock import MagicMock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from openai import AuthenticationError
-from openai import PermissionDeniedError
 import pytest
-from langchain_core.messages import AIMessage
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from openai import AuthenticationError, PermissionDeniedError
 
 
 class TestModelAdapterFactory:
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_factory_returns_adapter(self, chat_openai_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import BackendConfig
-        from vsa_agent.config import ProfileConfig
-        from vsa_agent.config import RoleBindingConfig
-        from vsa_agent.model_adapter import BaseModelAdapter
-        from vsa_agent.model_adapter import create_model_adapter
+        from vsa_agent.config import AppConfig, BackendConfig, ProfileConfig, RoleBindingConfig
+        from vsa_agent.model_adapter import BaseModelAdapter, create_model_adapter
 
         chat_openai_cls.return_value = MagicMock()
         monkeypatch.setattr(
@@ -48,12 +41,8 @@ class TestModelAdapterFactory:
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_factory_with_model_name(self, chat_openai_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import BackendConfig
-        from vsa_agent.config import ProfileConfig
-        from vsa_agent.config import RoleBindingConfig
-        from vsa_agent.model_adapter import BaseModelAdapter
-        from vsa_agent.model_adapter import create_model_adapter
+        from vsa_agent.config import AppConfig, BackendConfig, ProfileConfig, RoleBindingConfig
+        from vsa_agent.model_adapter import BaseModelAdapter, create_model_adapter
 
         chat_openai_cls.return_value = MagicMock()
         monkeypatch.setattr(
@@ -82,11 +71,8 @@ class TestModelAdapterFactory:
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
     def test_factory_resolves_role_specific_backends(self, vllm_chat_cls, openai_chat_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import BackendConfig
-        from vsa_agent.config import ProfileConfig
-        from vsa_agent.config import RoleBindingConfig
         import vsa_agent.model_adapter as model_adapter
+        from vsa_agent.config import AppConfig, BackendConfig, ProfileConfig, RoleBindingConfig
 
         openai_chat_cls.return_value = MagicMock()
         vllm_chat_cls.return_value = MagicMock()
@@ -138,9 +124,7 @@ class TestOpenAIModelAdapter:
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_explicit_runtime_overrides_take_precedence(self, chat_openai_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import ModelConfig
-        from vsa_agent.config import ModelDevConfig
+        from vsa_agent.config import AppConfig, ModelConfig, ModelDevConfig
         from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
 
         chat_openai_cls.return_value = MagicMock()
@@ -173,9 +157,7 @@ class TestOpenAIModelAdapter:
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_blank_api_key_is_treated_as_unset(self, chat_openai_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import ModelConfig
-        from vsa_agent.config import ModelDevConfig
+        from vsa_agent.config import AppConfig, ModelConfig, ModelDevConfig
         from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
 
         chat_openai_cls.return_value = MagicMock()
@@ -202,9 +184,7 @@ class TestOpenAIModelAdapter:
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_runtime_blank_api_key_is_treated_as_unset(self, chat_openai_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import ModelConfig
-        from vsa_agent.config import ModelDevConfig
+        from vsa_agent.config import AppConfig, ModelConfig, ModelDevConfig
         from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
 
         chat_openai_cls.return_value = MagicMock()
@@ -317,9 +297,7 @@ class TestVLLMModelAdapter:
 
     @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
     def test_bind_tools_delegates_to_underlying_llm(self, chat_openai_cls, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import ModelConfig
-        from vsa_agent.config import ModelProdConfig
+        from vsa_agent.config import AppConfig, ModelConfig, ModelProdConfig
         from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
 
         llm = MagicMock()

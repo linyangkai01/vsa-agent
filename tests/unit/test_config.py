@@ -1,12 +1,15 @@
 """Tests for config.py."""
+
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import pytest
+from pathlib import Path
+
 import yaml
+
 from vsa_agent.config import AppConfig, ModelConfig, PromptsConfig, get_config, reset_config_cache
+
 
 class TestAppConfig:
     def test_default_construction(self):
@@ -28,15 +31,18 @@ class TestAppConfig:
         finally:
             os.unlink(path)
 
+
 class TestModelConfig:
     def test_dev_defaults(self):
         cfg = ModelConfig()
         assert cfg.dev.llm_model == "gpt-4o"
 
+
 class TestPromptsConfig:
     def test_defaults_empty(self):
         p = PromptsConfig()
         assert p.default_system == ""
+
 
 class TestGetConfig:
     def test_returns_appconfig(self):
@@ -136,11 +142,7 @@ class TestRuntimeConfig:
         assert runtime.llm.model == "gpt-4o"
 
     def test_resolves_mixed_profile_roles_from_backends_and_env(self, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import BackendConfig
-        from vsa_agent.config import ProfileConfig
-        from vsa_agent.config import RoleBindingConfig
-        from vsa_agent.config import resolve_runtime_config
+        from vsa_agent.config import AppConfig, BackendConfig, ProfileConfig, RoleBindingConfig, resolve_runtime_config
 
         monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
         monkeypatch.delenv("VSA_PROFILE", raising=False)
@@ -179,11 +181,7 @@ class TestRuntimeConfig:
         assert runtime.embedding.model == "text-embedding-v4"
 
     def test_runtime_config_redacts_secret_values(self, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import BackendConfig
-        from vsa_agent.config import ProfileConfig
-        from vsa_agent.config import RoleBindingConfig
-        from vsa_agent.config import resolve_runtime_config
+        from vsa_agent.config import AppConfig, BackendConfig, ProfileConfig, RoleBindingConfig, resolve_runtime_config
 
         monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
         monkeypatch.delenv("VSA_PROFILE", raising=False)
@@ -211,11 +209,7 @@ class TestRuntimeConfig:
         assert redacted["llm"]["model"] == "qwen3.7-plus"
 
     def test_doctor_reports_missing_required_api_key(self, monkeypatch):
-        from vsa_agent.config import AppConfig
-        from vsa_agent.config import BackendConfig
-        from vsa_agent.config import ProfileConfig
-        from vsa_agent.config import RoleBindingConfig
-        from vsa_agent.config import validate_runtime_config
+        from vsa_agent.config import AppConfig, BackendConfig, ProfileConfig, RoleBindingConfig, validate_runtime_config
 
         monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
         monkeypatch.delenv("VSA_PROFILE", raising=False)

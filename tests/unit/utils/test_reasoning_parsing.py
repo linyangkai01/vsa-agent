@@ -1,15 +1,18 @@
 """Tests for utils/reasoning_parsing.py."""
+
 from vsa_agent.utils.reasoning_parsing import (
+    ReasoningResult,
     parse_content_blocks,
     parse_reasoning_content,
-    ReasoningResult,
 )
+
 
 class TestReasoningResult:
     def test_defaults(self):
         r = ReasoningResult()
         assert r.answer == ""
         assert r.has_reasoning is False
+
 
 class TestParseReasoningContent:
     def test_no_reasoning(self):
@@ -37,9 +40,7 @@ class TestParseReasoningContent:
 
 class TestParseContentBlocks:
     def test_splits_thinking_and_answer_blocks(self):
-        result = parse_content_blocks(
-            "<thinking>first</thinking><answer>second</answer>"
-        )
+        result = parse_content_blocks("<thinking>first</thinking><answer>second</answer>")
         assert result == [
             {"type": "thinking", "content": "first"},
             {"type": "answer", "content": "second"},

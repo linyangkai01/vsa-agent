@@ -1,4 +1,4 @@
-﻿"""Mock video database - maps video names to local file paths.
+"""Mock video database - maps video names to local file paths.
 
 In production, this would query a real video database (Elasticsearch, Milvus, etc.)
 to find videos by name, sensor ID, time range, etc.
@@ -6,8 +6,8 @@ to find videos by name, sensor ID, time range, etc.
 For now, it provides a simple name-to-path mapping for local video files.
 """
 
-import os
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 

@@ -32,10 +32,7 @@ def select_frame_indices(
         return [start_frame]
 
     step = (window - 1) / (max_frames - 1)
-    return [
-        min(end_frame - 1, start_frame + math.floor(index * step))
-        for index in range(max_frames)
-    ]
+    return [min(end_frame - 1, start_frame + math.floor(index * step)) for index in range(max_frames)]
 
 
 def frames_for_timestamp_range(

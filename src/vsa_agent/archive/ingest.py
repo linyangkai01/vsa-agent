@@ -5,8 +5,7 @@ import re
 from pathlib import Path
 
 from vsa_agent.archive.index import upsert_archive_records
-from vsa_agent.archive.models import ArchiveRecord
-from vsa_agent.archive.models import build_record_id
+from vsa_agent.archive.models import ArchiveRecord, build_record_id
 
 KNOWN_TAGS = (
     "person",
@@ -81,9 +80,7 @@ def build_record_from_live_run(run_dir: str | Path) -> ArchiveRecord:
     sensor_id = Path(video_name).stem or video_name
     run_id = str(manifest.get("run_id") or path.name)
     search_text = "\n\n".join(
-        part
-        for part in [qa_text, report_text, *tool_result_texts, json.dumps(manifest, ensure_ascii=False)]
-        if part
+        part for part in [qa_text, report_text, *tool_result_texts, json.dumps(manifest, ensure_ascii=False)] if part
     )
 
     return ArchiveRecord(

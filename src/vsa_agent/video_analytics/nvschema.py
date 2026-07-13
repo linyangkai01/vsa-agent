@@ -1,4 +1,4 @@
-﻿"""NVIDIA VSS schema data models for video analytics.
+"""NVIDIA VSS schema data models for video analytics.
 
 Mirrors NVIDIA nvschema.py — defines Incident, Location, Place data models
 for structured video analysis output.
@@ -13,6 +13,7 @@ from typing import Any
 @dataclass
 class Location:
     """Location information for a video event."""
+
     name: str = ""
     description: str = ""
     coordinates: tuple[float, float] | None = None  # (lat, lon)
@@ -23,6 +24,7 @@ class Location:
 @dataclass
 class Place:
     """Place information — a specific area within a location."""
+
     name: str = ""
     description: str = ""
     location: Location | None = None
@@ -35,6 +37,7 @@ class Incident:
 
     Mirrors NVIDIA Incident data model with full schema alignment.
     """
+
     id: str = ""
     timestamp_sec: float = 0.0
     duration_sec: float = 0.0

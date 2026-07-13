@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from vsa_agent.data_models.report import ReportSection
-from vsa_agent.data_models.report import StructuredReport
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.report import ReportSection, StructuredReport
+from vsa_agent.data_models.understanding import DetectedEvent, UnderstandingResult
 from vsa_agent.registry import register_tool
 
 

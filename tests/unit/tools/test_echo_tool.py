@@ -1,5 +1,7 @@
 """Tests for tools/echo_tool.py."""
+
 from vsa_agent.tools.echo_tool import echo_tool
+
 
 class TestEchoTool:
     async def test_echo_message(self):

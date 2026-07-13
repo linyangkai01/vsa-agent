@@ -5,16 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from vsa_agent.agents.data_models import AgentMessageChunk
-from vsa_agent.agents.data_models import AgentMessageChunkType
-from vsa_agent.api.original_ui_chat import OriginalUIChatRequest
-from vsa_agent.api.original_ui_chat import extract_latest_user_text
-from vsa_agent.api.original_ui_chat import format_chunk_for_original_ui
-from vsa_agent.api.original_ui_chat import format_done
-from vsa_agent.api.original_ui_chat import format_intermediate_data
-from vsa_agent.api.original_ui_chat import format_openai_delta
-from vsa_agent.api.original_ui_chat import inject_configured_video_context
-from vsa_agent.api.original_ui_chat import stream_original_ui_chat
+from vsa_agent.agents.data_models import AgentMessageChunk, AgentMessageChunkType
+from vsa_agent.api.original_ui_chat import (
+    OriginalUIChatRequest,
+    extract_latest_user_text,
+    format_chunk_for_original_ui,
+    format_done,
+    format_intermediate_data,
+    format_openai_delta,
+    inject_configured_video_context,
+    stream_original_ui_chat,
+)
 
 
 def test_extract_latest_user_text_uses_last_user_message():

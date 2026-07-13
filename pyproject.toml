@@ -35,6 +35,8 @@ dev = [
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]

@@ -2,11 +2,8 @@
 
 import json
 
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import EvidenceRef
-from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, UnderstandingResult
+from vsa_agent.tools.search import SearchOutput, SearchResult
 
 
 def test_understanding_to_incidents_maps_events_to_nvschema():

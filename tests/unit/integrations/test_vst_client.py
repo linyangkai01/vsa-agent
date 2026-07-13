@@ -15,13 +15,7 @@ async def test_get_stream_info_parses_stream_payload():
 
     async def fake_request_json(path: str):
         assert path == "/vst/api/v1/sensor/streams"
-        return [
-            {
-                "stream-123": [
-                    raw_item
-                ]
-            }
-        ]
+        return [{"stream-123": [raw_item]}]
 
     client = VSTClient(external_url="http://localhost:30888", request_json=fake_request_json)
     result = await client.get_stream_info("camera-1")
@@ -120,8 +114,7 @@ async def test_get_video_clip_falls_back_to_stream_when_clip_lookup_fails():
 
 @pytest.mark.anyio
 async def test_get_video_clip_raises_when_time_window_clip_lookup_fails():
-    from vsa_agent.integrations.vst_client import VSTClient
-    from vsa_agent.integrations.vst_client import VSTClientError
+    from vsa_agent.integrations.vst_client import VSTClient, VSTClientError
 
     async def fake_request_json(path: str):
         if path == "/vst/api/v1/storage/clips?sensorId=camera-1&start=2025-01-01T10:05:00Z&end=2025-01-01T10:05:30Z":
@@ -141,8 +134,7 @@ async def test_get_video_clip_raises_when_time_window_clip_lookup_fails():
 
 @pytest.mark.anyio
 async def test_get_video_clip_raises_without_clip_url_or_local_path():
-    from vsa_agent.integrations.vst_client import VSTClient
-    from vsa_agent.integrations.vst_client import VSTClientError
+    from vsa_agent.integrations.vst_client import VSTClient, VSTClientError
 
     async def fake_request_json(path: str):
         if path == "/vst/api/v1/storage/clips?sensorId=camera-1&start=2025-01-01T10:05:00Z&end=2025-01-01T10:05:30Z":
@@ -160,8 +152,7 @@ async def test_get_video_clip_raises_without_clip_url_or_local_path():
 
 @pytest.mark.anyio
 async def test_get_stream_info_raises_for_missing_sensor():
-    from vsa_agent.integrations.vst_client import VSTClient
-    from vsa_agent.integrations.vst_client import VSTClientError
+    from vsa_agent.integrations.vst_client import VSTClient, VSTClientError
 
     async def fake_request_json(path: str):
         return [{"stream-123": [{"name": "camera-2", "url": "rtsp://camera-2/stream"}]}]
@@ -173,8 +164,7 @@ async def test_get_stream_info_raises_for_missing_sensor():
 
 @pytest.mark.anyio
 async def test_get_timeline_raises_for_missing_bounds():
-    from vsa_agent.integrations.vst_client import VSTClient
-    from vsa_agent.integrations.vst_client import VSTClientError
+    from vsa_agent.integrations.vst_client import VSTClient, VSTClientError
 
     async def fake_request_json(path: str):
         return {"stream-123": [{}]}
@@ -190,8 +180,7 @@ async def test_get_timeline_raises_for_missing_bounds():
 
 @pytest.mark.anyio
 async def test_request_json_raises_clear_error_without_transport():
-    from vsa_agent.integrations.vst_client import VSTClient
-    from vsa_agent.integrations.vst_client import VSTClientError
+    from vsa_agent.integrations.vst_client import VSTClient, VSTClientError
 
     client = VSTClient(external_url="http://localhost:30888")
     with pytest.raises(VSTClientError, match="inject request_json"):

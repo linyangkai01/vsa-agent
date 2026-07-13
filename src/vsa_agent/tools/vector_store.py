@@ -1,4 +1,4 @@
-﻿"""Simple in-memory vector store for search tools.
+"""Simple in-memory vector store for search tools.
 
 Provides placeholder embed and attribute stores for development.
 In production, these would be backed by Elasticsearch (see NVIDIA original).
@@ -24,8 +24,7 @@ class InMemoryVectorStore:
 
     async def search_by_attributes(self, attributes: list[str], top_k: int = 5) -> SearchOutput:
         """Search by visual attributes."""
-        logger.info("InMemoryVectorStore.search_by_attributes: attrs=%s, top_k=%d (empty store)",
-                     attributes, top_k)
+        logger.info("InMemoryVectorStore.search_by_attributes: attrs=%s, top_k=%d (empty store)", attributes, top_k)
         return SearchOutput(data=[])
 
 

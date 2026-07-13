@@ -1,4 +1,4 @@
-﻿"""Video analytics tool functions.
+"""Video analytics tool functions.
 
 Provides high-level video analysis operations using the
 video_analytics layer. Mirrors NVIDIA video_analytics/tools.py.
@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from vsa_agent.video_analytics.nvschema import Incident, Location
-from vsa_agent.video_analytics.utils import create_time_buckets, check_event_overlap
+from vsa_agent.video_analytics.nvschema import Incident
+from vsa_agent.video_analytics.utils import check_event_overlap, create_time_buckets
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,8 @@ async def analyze_incident_timeline(
 
     for bucket_start, bucket_end in buckets:
         bucket_incidents = [
-            inc for inc in sorted_incidents
+            inc
+            for inc in sorted_incidents
             if check_event_overlap(
                 (inc.timestamp_sec, inc.timestamp_sec + inc.duration_sec),
                 (bucket_start, bucket_end),
@@ -48,21 +49,23 @@ async def analyze_incident_timeline(
         ]
 
         if bucket_incidents:
-            results.append({
-                "time_range": (bucket_start, bucket_end),
-                "incident_count": len(bucket_incidents),
-                "severity_distribution": _count_severities(bucket_incidents),
-                "incidents": [
-                    {
-                        "id": inc.id,
-                        "description": inc.description,
-                        "severity": inc.severity,
-                        "category": inc.category,
-                        "confidence": inc.confidence,
-                    }
-                    for inc in bucket_incidents
-                ],
-            })
+            results.append(
+                {
+                    "time_range": (bucket_start, bucket_end),
+                    "incident_count": len(bucket_incidents),
+                    "severity_distribution": _count_severities(bucket_incidents),
+                    "incidents": [
+                        {
+                            "id": inc.id,
+                            "description": inc.description,
+                            "severity": inc.severity,
+                            "category": inc.category,
+                            "confidence": inc.confidence,
+                        }
+                        for inc in bucket_incidents
+                    ],
+                }
+            )
 
     return results
 
@@ -98,9 +101,7 @@ async def summarize_incidents(
     if not incidents:
         return "No incidents detected."
 
-    top_incidents = sorted(
-        incidents, key=lambda i: i.confidence, reverse=True
-    )[:max_incidents]
+    top_incidents = sorted(incidents, key=lambda i: i.confidence, reverse=True)[:max_incidents]
 
     lines = [f"Found {len(incidents)} incidents (showing top {len(top_incidents)}):", ""]
     for i, inc in enumerate(top_incidents, 1):

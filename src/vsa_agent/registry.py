@@ -1,19 +1,21 @@
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable, Any
 
 _TOOLS: dict[str, Callable] = {}
 
-def register_tool(name: str, description: str = ''):
+
+def register_tool(name: str, description: str = ""):
     def decorator(func: Callable) -> Callable:
         _TOOLS[name] = func
         func._tool_name = name
         func._tool_description = description
         return func
+
     return decorator
 
 
 @contextmanager
-def temporary_tool_override(name: str, func: Callable, description: str = ''):
+def temporary_tool_override(name: str, func: Callable, description: str = ""):
     original = _TOOLS.get(name)
     original_description = getattr(original, "_tool_description", "") if original else ""
     _TOOLS[name] = func
@@ -32,11 +34,14 @@ def temporary_tool_override(name: str, func: Callable, description: str = ''):
 
 _loaded = False
 
+
 def _ensure_loaded():
     global _loaded
     if not _loaded:
-        from vsa_agent.config import get_config
         import importlib
+
+        from vsa_agent.config import get_config
+
         cfg = get_config()
         for module_path in cfg.tools.enabled_modules:
             importlib.import_module(module_path)
@@ -57,5 +62,4 @@ class ToolRegistry:
     @classmethod
     def list_tools(cls) -> list[dict[str, str]]:
         _ensure_loaded()
-        return [{'name': n, 'description': getattr(f, '_tool_description', '')}
-                for n, f in _TOOLS.items()]
+        return [{"name": n, "description": getattr(f, "_tool_description", "")} for n, f in _TOOLS.items()]

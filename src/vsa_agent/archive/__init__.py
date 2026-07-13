@@ -1,7 +1,5 @@
-from vsa_agent.archive.ingest import build_record_from_live_run
-from vsa_agent.archive.ingest import ingest_live_run
-from vsa_agent.archive.models import ArchiveRecord
-from vsa_agent.archive.models import build_record_id
+from vsa_agent.archive.ingest import build_record_from_live_run, ingest_live_run
+from vsa_agent.archive.models import ArchiveRecord, build_record_id
 from vsa_agent.archive.search import LocalArchiveSearchStore
 
 __all__ = [

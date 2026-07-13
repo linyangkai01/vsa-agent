@@ -4,10 +4,8 @@ import logging
 
 from fastapi import APIRouter
 
-from vsa_agent.agents.search_agent import SearchAgentInput
-from vsa_agent.agents.search_agent import execute_search
-from vsa_agent.tools.search import SearchInput
-from vsa_agent.tools.search import SearchOutput
+from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+from vsa_agent.tools.search import SearchInput, SearchOutput
 
 logger = logging.getLogger(__name__)
 

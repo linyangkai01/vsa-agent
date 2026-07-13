@@ -1,8 +1,9 @@
 """Tests for utils/retry.py."""
+
 import pytest
 
-from vsa_agent.utils.retry import async_retry
-from vsa_agent.utils.retry import call_with_async_retry
+from vsa_agent.utils.retry import async_retry, call_with_async_retry
+
 
 class TestAsyncRetry:
     @pytest.mark.asyncio

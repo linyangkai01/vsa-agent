@@ -3,16 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from vsa_agent.archive.ingest import ingest_live_run
 from vsa_agent.archive.search import LocalArchiveSearchStore
-from vsa_agent.config import AppConfig
-from vsa_agent.config import resolve_runtime_config
-from vsa_agent.config import validate_runtime_config
-from vsa_agent.live_run_validator import format_validation_result
-from vsa_agent.live_run_validator import validate_live_run
+from vsa_agent.config import AppConfig, resolve_runtime_config, validate_runtime_config
+from vsa_agent.live_run_validator import format_validation_result, validate_live_run
 
 
 def _load_config(path: str) -> AppConfig:

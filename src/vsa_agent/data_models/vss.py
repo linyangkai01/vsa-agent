@@ -6,13 +6,10 @@ The canonical Location/Place/Incident models live in that module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import dataclass, field
 from typing import Any
 
-from vsa_agent.video_analytics.nvschema import Incident
-from vsa_agent.video_analytics.nvschema import Location
-from vsa_agent.video_analytics.nvschema import Place
+from vsa_agent.video_analytics.nvschema import Incident, Location, Place
 
 
 @dataclass
@@ -50,7 +47,7 @@ class MediaInfoOffset:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "MediaInfoOffset":
+    def from_dict(cls, payload: dict[str, Any]) -> MediaInfoOffset:
         """Rehydrate from a serialized payload."""
         return cls(**payload)
 

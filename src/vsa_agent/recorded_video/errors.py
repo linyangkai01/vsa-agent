@@ -45,9 +45,7 @@ class RecordedVideoError(Exception):
         self.code = ErrorCode(code)
         expected_retryable = self.code in RETRYABLE_ERROR_CODES
         if retryable is not expected_retryable:
-            raise ValueError(
-                f"retryable={retryable} conflicts with classification for {self.code.value}"
-            )
+            raise ValueError(f"retryable={retryable} conflicts with classification for {self.code.value}")
         self.retryable = expected_retryable
         super().__init__(message or self.code.value)
 

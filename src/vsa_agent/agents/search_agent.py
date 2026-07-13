@@ -9,22 +9,21 @@ decompose_query + execute_core_search from tools/search.py.
 
 import json
 import logging
-
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from vsa_agent.registry import register_tool
 from vsa_agent.observability.live_trace import write_live_trace_event
-from vsa_agent.tools.incidents import incidents_to_tagged_json
-from vsa_agent.tools.incidents import search_output_to_incidents
-from vsa_agent.tools.search import DecomposedQuery
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
-from vsa_agent.tools.search import _resolve_search_callable
-from vsa_agent.tools.search import decompose_query
-from vsa_agent.tools.search import should_apply_critic
+from vsa_agent.registry import register_tool
+from vsa_agent.tools.incidents import incidents_to_tagged_json, search_output_to_incidents
+from vsa_agent.tools.search import (
+    DecomposedQuery,
+    SearchOutput,
+    SearchResult,
+    _resolve_search_callable,
+    decompose_query,
+    should_apply_critic,
+)
 from vsa_agent.tools.vss_summarize import summarize_search_incidents
 from vsa_agent.video_analytics.nvschema import Incident
 
@@ -42,7 +41,9 @@ class SearchAgentInput(BaseModel):
 
     query: str = Field(description="Natural language search query")
     agent_mode: bool = Field(default=True, description="Enable LLM query decomposition")
-    use_attribute_search: bool | None = Field(default=None, description="Enable fusion reranking with attribute search (overrides config if provided)")
+    use_attribute_search: bool | None = Field(
+        default=None, description="Enable fusion reranking with attribute search (overrides config if provided)"
+    )
     max_results: int = Field(default=5, description="Maximum number of results to return")
     top_k: int | None = Field(default=None, description="Override top_k for embed search")
     start_time: str | None = Field(default=None, description="Start time filter (ISO format)")
@@ -115,7 +116,7 @@ def _to_incidents_output(search_output) -> str:
 @register_tool(
     "search_agent",
     description="Search for video clips matching a description. "
-                "Three-path routing: embed-only, attribute-only, or fusion.",
+    "Three-path routing: embed-only, attribute-only, or fusion.",
 )
 async def search_agent_tool(
     query: str,
@@ -151,6 +152,7 @@ async def _run_search_critic(
     critic_fn = critic_agent
     if critic_fn is None:
         from vsa_agent.registry import ToolRegistry
+
         critic_fn = ToolRegistry.get("critic_agent")
 
     if not should_apply_critic(

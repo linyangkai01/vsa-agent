@@ -1,4 +1,4 @@
-﻿"""Video upload URL endpoint — returns a presigned URL for video upload.
+"""Video upload URL endpoint — returns a presigned URL for video upload.
 
 Mirrors NVIDIA api/video_upload_url.py pattern.
 """

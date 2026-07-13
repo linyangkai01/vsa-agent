@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
 SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
@@ -192,9 +191,15 @@ def test_es_runtime_stack_bash_generates_temporary_search_config():
 def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
     text = _script_text()
     for required in (
-        "Get-NetTCPConnection", "Win32_Process", "taskkill.exe", "Wait-PortFree",
-        "run_original_ui_vss.sh", "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
-        "NEXT_PUBLIC_AGENT_API_URL_BASE", "$uiProcess", "SmokeOnly",
+        "Get-NetTCPConnection",
+        "Win32_Process",
+        "taskkill.exe",
+        "Wait-PortFree",
+        "run_original_ui_vss.sh",
+        "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
+        "NEXT_PUBLIC_AGENT_API_URL_BASE",
+        "$uiProcess",
+        "SmokeOnly",
     ):
         assert required in text
 
@@ -216,9 +221,14 @@ def test_windows_stack_waits_for_ui_readiness_and_reports_failures():
 def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
     text = _bash_script_text()
     for required in (
-        "port_listener_pids", "kill -TERM", "wait_for_port_free",
-        "run_original_ui_vss.sh", "UI_PID", "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
-        "NEXT_PUBLIC_AGENT_API_URL_BASE", "SMOKE_ONLY",
+        "port_listener_pids",
+        "kill -TERM",
+        "wait_for_port_free",
+        "run_original_ui_vss.sh",
+        "UI_PID",
+        "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
+        "NEXT_PUBLIC_AGENT_API_URL_BASE",
+        "SMOKE_ONLY",
     ):
         assert required in text
 
@@ -227,9 +237,17 @@ def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
     text = _bash_script_text()
 
     for required in (
-        "wait_ui_health", "UI_URL=", "UI_LOG_PATH=", "UI_ERR_LOG_PATH=", "ES_LOG_PATH=",
-        "Original UI process exited before readiness", "start_file_log_stream", "start_es_log_stream",
-        "tail -n 0 -F", "LOG_STREAM_PIDS", "PYTHONUNBUFFERED=1",
+        "wait_ui_health",
+        "UI_URL=",
+        "UI_LOG_PATH=",
+        "UI_ERR_LOG_PATH=",
+        "ES_LOG_PATH=",
+        "Original UI process exited before readiness",
+        "start_file_log_stream",
+        "start_es_log_stream",
+        "tail -n 0 -F",
+        "LOG_STREAM_PIDS",
+        "PYTHONUNBUFFERED=1",
     ):
         assert required in text
 
@@ -265,7 +283,7 @@ def test_linux_stack_bootstraps_node_and_ui_dependencies_before_starting_ui():
     text = _bash_script_text()
 
     assert 'bash "$SCRIPT_DIR/bootstrap_node.sh"' in text
-    assert 'npm run ui:install' in text
+    assert "npm run ui:install" in text
     assert "config.yaml" in text
 
 
@@ -283,7 +301,7 @@ def test_es_runtime_stack_bash_terminates_the_owned_process_group_and_checks_hea
 
     assert "setsid" in text
     assert 'kill -- "-$API_PID"' in text
-    assert "json.load(sys.stdin).get(\"status\") == \"ok\"" in text
+    assert 'json.load(sys.stdin).get("status") == "ok"' in text
     assert "health_payload=$(curl -fsS" in text
 
 

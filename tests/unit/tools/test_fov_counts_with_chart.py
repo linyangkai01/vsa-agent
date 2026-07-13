@@ -5,8 +5,7 @@ import pytest
 
 @pytest.mark.anyio
 async def test_build_event_count_chart_counts_events_by_label():
-    from vsa_agent.tools.fov_counts_with_chart import CountWithChartResult
-    from vsa_agent.tools.fov_counts_with_chart import build_event_count_chart
+    from vsa_agent.tools.fov_counts_with_chart import CountWithChartResult, build_event_count_chart
 
     chart_calls = []
 

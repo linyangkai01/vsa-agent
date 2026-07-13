@@ -4,12 +4,10 @@ import logging
 from typing import Any
 
 from elasticsearch import AsyncElasticsearch
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.registry import register_tool
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.tools.search import SearchOutput, SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +30,9 @@ class AttributeSearchInput(BaseModel):
     min_similarity: float = Field(default=0.3, description="Minimum cosine similarity threshold")
     fuse_multi_attribute: bool = Field(
         default=True,
-        description="If True, keep only videos matched across attributes. If False, append matches from each attribute.",
+        description=(
+            "If True, keep only videos matched across attributes. If False, append matches from each attribute."
+        ),
     )
     exclude_videos: list[dict[str, str]] = Field(default_factory=list, description="Videos to exclude")
 
@@ -146,7 +146,9 @@ def _deduplicate_by_object(results: list[AttributeSearchResult]) -> list[Attribu
     merged: dict[tuple[str, str], AttributeSearchResult] = {}
     for result in results:
         key = (result.metadata.sensor_id, result.metadata.object_id)
-        score = result.metadata.frame_score if result.metadata.frame_score is not None else result.metadata.behavior_score
+        score = (
+            result.metadata.frame_score if result.metadata.frame_score is not None else result.metadata.behavior_score
+        )
         existing = merged.get(key)
         if existing is None:
             merged[key] = result

@@ -7,7 +7,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from vsa_agent.agents.data_models import AgentState
 
-
 TEST_TRACE_DIR = Path("artifacts/test-top-agent-live-trace")
 
 

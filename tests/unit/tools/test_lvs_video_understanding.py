@@ -7,8 +7,7 @@ import pytest
 
 from vsa_agent.agents.data_models import AgentMessageChunkType
 from vsa_agent.config import AppConfig
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.understanding import DetectedEvent, UnderstandingResult
 
 
 def test_split_video_into_chunks():

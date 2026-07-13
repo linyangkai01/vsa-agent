@@ -5,9 +5,17 @@ from pydantic import ValidationError
 
 from vsa_agent.data_models import (
     DetectedEvent as ExportedDetectedEvent,
+)
+from vsa_agent.data_models import (
     EvidenceRef as ExportedEvidenceRef,
+)
+from vsa_agent.data_models import (
     ObservationChunk as ExportedObservationChunk,
+)
+from vsa_agent.data_models import (
     SummaryResult as ExportedSummaryResult,
+)
+from vsa_agent.data_models import (
     UnderstandingResult as ExportedUnderstandingResult,
 )
 from vsa_agent.data_models.understanding import (
@@ -416,8 +424,6 @@ def test_evidence_ref_rejects_whitespace_only_source_identifiers(payload, expect
         ),
     ],
 )
-def test_understanding_models_reject_whitespace_only_identifier_fields(
-    model_class, payload, expected_message
-):
+def test_understanding_models_reject_whitespace_only_identifier_fields(model_class, payload, expected_message):
     with pytest.raises(ValidationError, match=expected_message):
         model_class(**payload)

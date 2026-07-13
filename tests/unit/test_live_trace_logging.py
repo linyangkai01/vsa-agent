@@ -3,9 +3,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
-from langchain_core.messages import HumanMessage
-
+from langchain_core.messages import AIMessage, HumanMessage
 
 TEST_TRACE_DIR = Path("artifacts/test-live-trace")
 
@@ -105,8 +103,7 @@ def test_live_trace_event_is_noop_when_path_is_not_configured(trace_dir, monkeyp
 
 
 def test_live_trace_context_writes_jsonl_without_environment(trace_dir, monkeypatch):
-    from vsa_agent.observability.live_trace import live_trace_context
-    from vsa_agent.observability.live_trace import write_live_trace_event
+    from vsa_agent.observability.live_trace import live_trace_context, write_live_trace_event
 
     monkeypatch.delenv("VSA_LIVE_TRACE_PATH", raising=False)
     trace_path = trace_dir / "context" / "trace.jsonl"
@@ -120,8 +117,7 @@ def test_live_trace_context_writes_jsonl_without_environment(trace_dir, monkeypa
 
 
 def test_live_trace_context_restores_previous_environment(trace_dir, monkeypatch):
-    from vsa_agent.observability.live_trace import live_trace_context
-    from vsa_agent.observability.live_trace import write_live_trace_event
+    from vsa_agent.observability.live_trace import live_trace_context, write_live_trace_event
 
     env_trace_path = trace_dir / "env.jsonl"
     context_trace_path = trace_dir / "context.jsonl"
@@ -137,8 +133,7 @@ def test_live_trace_context_restores_previous_environment(trace_dir, monkeypatch
 
 
 def test_live_trace_writes_text_and_json_artifacts(trace_dir, monkeypatch):
-    from vsa_agent.observability.live_trace import write_live_json_artifact
-    from vsa_agent.observability.live_trace import write_live_text_artifact
+    from vsa_agent.observability.live_trace import write_live_json_artifact, write_live_text_artifact
 
     artifact_dir = trace_dir / "artifacts"
     monkeypatch.setenv("VSA_LIVE_ARTIFACT_DIR", str(artifact_dir))
@@ -153,8 +148,7 @@ def test_live_trace_writes_text_and_json_artifacts(trace_dir, monkeypatch):
 
 
 def test_live_artifact_writers_do_not_overwrite_existing_files(trace_dir, monkeypatch):
-    from vsa_agent.observability.live_trace import write_live_json_artifact
-    from vsa_agent.observability.live_trace import write_live_text_artifact
+    from vsa_agent.observability.live_trace import write_live_json_artifact, write_live_text_artifact
 
     artifact_dir = trace_dir / "artifacts"
     monkeypatch.setenv("VSA_LIVE_ARTIFACT_DIR", str(artifact_dir))

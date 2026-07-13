@@ -64,7 +64,7 @@ Result: valid before archive.
 The repository-wide Python quality work is split into five ordered Comet changes. `frontend/original-ui` is excluded from code-quality refactoring.
 
 - `stabilize-test-contracts`: implementation and verification complete. The current branch already contains `tests/unit/recorded_video/__init__.py`, which gives `recorded_video/test_models.py` a package-qualified module name while `archive/test_models.py` remains distinct.
-- `enforce-python-quality-baseline`: next; clear Ruff lint and format debt in `src/` and `tests/`.
+- `enforce-python-quality-baseline`: implementation complete; Ruff lint and format debt is cleared in `src/` and `tests/`.
 - `consolidate-runtime-scripts`: consolidate shared script preflight logic while preserving referenced and cross-platform entry points.
 - `refactor-video-understanding-pipeline`: separate normalization from I/O orchestration while preserving public contracts.
 - `refactor-search-orchestration`: consolidate search result normalization, routing, fusion and critic stages.
@@ -77,6 +77,17 @@ pytest -q
 ```
 
 Result: `763 tests collected`; `759 passed, 4 skipped, 1 warning`.
+
+Python quality baseline verification on 2026-07-13:
+
+```powershell
+python -m compileall -q src tests
+ruff check src tests
+ruff format --check src tests
+pytest -q
+```
+
+Result: compileall passed; Ruff reported zero lint issues; all 235 files were already formatted; `759 passed, 4 skipped, 1 warning`. The warning is the existing Starlette `httpx` deprecation from the installed environment.
 
 ## Active Runtime Validation
 

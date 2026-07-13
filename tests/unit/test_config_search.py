@@ -1,5 +1,4 @@
-from vsa_agent.config import AppConfig
-from vsa_agent.config import SearchBackendConfig
+from vsa_agent.config import AppConfig, SearchBackendConfig
 
 
 def test_search_backend_config_defaults_to_disabled():

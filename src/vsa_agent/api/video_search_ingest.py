@@ -3,13 +3,10 @@
 from typing import Any
 
 from elasticsearch import AsyncElasticsearch
-from fastapi import APIRouter
-from fastapi import HTTPException
-from pydantic import BaseModel
-from pydantic import Field
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
-from vsa_agent.config import SearchBackendConfig
-from vsa_agent.config import get_config
+from vsa_agent.config import SearchBackendConfig, get_config
 
 router = APIRouter(prefix="/api", tags=["search"])
 

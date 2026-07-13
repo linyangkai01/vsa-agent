@@ -1,4 +1,4 @@
-﻿"""EmbedClient abstract base class.
+"""EmbedClient abstract base class.
 
 Mirrors NVIDIA EmbedClient pattern for video/text embedding.
 """
@@ -6,7 +6,7 @@ Mirrors NVIDIA EmbedClient pattern for video/text embedding.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Sequence
+from collections.abc import Sequence
 
 
 class EmbedClient(ABC):

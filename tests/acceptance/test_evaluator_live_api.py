@@ -3,9 +3,7 @@ import os
 import pytest
 
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.evaluators import ExpectedSearchHit
-from vsa_agent.evaluators import evaluate_search_output
-from vsa_agent.evaluators import evaluate_understanding_result
+from vsa_agent.evaluators import ExpectedSearchHit, evaluate_search_output, evaluate_understanding_result
 
 
 def should_run_live_api_validation() -> bool:
@@ -88,8 +86,8 @@ async def test_live_api_understanding_quality():
     if not should_run_live_api_validation():
         pytest.skip("LIVE_API_KEY or OPENAI_API_KEY not configured for live API validation")
 
-    from vsa_agent.tools.vss_summarize import summarize_understanding_result
     from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+    from vsa_agent.tools.vss_summarize import summarize_understanding_result
 
     actual = UnderstandingResult(
         query="what happened",
@@ -119,11 +117,9 @@ async def test_live_api_search_agent_query_decomposition_quality():
     if not should_run_live_api_validation():
         pytest.skip("LIVE_API_KEY or OPENAI_API_KEY not configured for live API validation")
 
-    from vsa_agent.agents.search_agent import SearchAgentInput
-    from vsa_agent.agents.search_agent import execute_search_agent_flow
+    from vsa_agent.agents.search_agent import SearchAgentInput, execute_search_agent_flow
     from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
-    from vsa_agent.tools.search import SearchOutput
-    from vsa_agent.tools.search import SearchResult
+    from vsa_agent.tools.search import SearchOutput, SearchResult
 
     async def fake_embed_search():
         return SearchOutput(

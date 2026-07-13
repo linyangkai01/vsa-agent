@@ -1,9 +1,7 @@
 """Tests for data_models/vss.py."""
 
-from vsa_agent.data_models import Incident
-from vsa_agent.data_models import Location
-from vsa_agent.data_models import MediaInfoOffset
-from vsa_agent.data_models import Place
+from vsa_agent.data_models import Incident, Location, MediaInfoOffset, Place
+
 
 class TestMediaInfoOffset:
     def test_defaults(self):
@@ -35,6 +33,7 @@ class TestMediaInfoOffset:
         )
         restored = MediaInfoOffset.from_dict(m.to_dict())
         assert restored == m
+
 
 class TestIncident:
     def test_defaults(self):

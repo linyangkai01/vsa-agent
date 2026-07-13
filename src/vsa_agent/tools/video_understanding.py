@@ -8,33 +8,25 @@ import os
 import re
 from typing import Any
 
-from langchain_core.messages import HumanMessage
-from langchain_core.messages import SystemMessage
-from openai import AuthenticationError
-from openai import PermissionDeniedError
-from pydantic import BaseModel
-from pydantic import Field
+from langchain_core.messages import HumanMessage, SystemMessage
+from openai import AuthenticationError, PermissionDeniedError
+from pydantic import BaseModel, Field
 
-from vsa_agent.config import VideoUnderstandingConfig
-from vsa_agent.config import get_config
-from vsa_agent.data_models.understanding import EvidenceRef
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import ObservationChunk
-from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
-from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.config import VideoUnderstandingConfig, get_config
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, ObservationChunk, UnderstandingResult
+from vsa_agent.observability.live_trace import (
+    write_live_binary_artifact,
+    write_live_json_artifact,
+    write_live_text_artifact,
+    write_live_trace_event,
+)
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
-from vsa_agent.observability.live_trace import write_live_binary_artifact
-from vsa_agent.observability.live_trace import write_live_json_artifact
-from vsa_agent.observability.live_trace import write_live_text_artifact
-from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.utils.frame_select import frames_for_timestamp_range
 from vsa_agent.utils.reasoning_parsing import parse_reasoning_content
+from vsa_agent.utils.time_convert import format_timestamp, parse_iso8601_duration
 from vsa_agent.utils.time_measure import async_measure_time
-from vsa_agent.utils.time_convert import format_timestamp
-from vsa_agent.utils.time_convert import parse_iso8601_duration
-from vsa_agent.utils.url_translation import is_remote_url
-from vsa_agent.utils.url_translation import translate_url
+from vsa_agent.utils.url_translation import is_remote_url, translate_url
 from vsa_agent.utils.video_file import ensure_local_video_path
 
 try:
@@ -89,7 +81,7 @@ def _normalize_timestamp(
     if value is None:
         return ""
 
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         seconds = float(value)
     else:
         text = str(value).strip()
@@ -122,7 +114,7 @@ def _timestamp_to_seconds(value: str | int | float | None) -> float | None:
     """
     if value is None:
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
 
     text = str(value).strip()
@@ -261,10 +253,7 @@ def _parse_thinking_from_content(content: str) -> tuple[str | None, str]:
 
 def _build_vlm_messages(frames, query, system_prompt=None):
     """Build VLM messages from frames and query. Independent, testable function."""
-    image_parts = [
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}}
-        for frame in frames
-    ]
+    image_parts = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}} for frame in frames]
     human_prompt_parts = [
         {"type": "text", "text": VLM_HUMAN_PROMPT_TEMPLATE.format(query=query)},
         *image_parts,
@@ -416,9 +405,7 @@ def _prepare_video_path(
     if config.source_mode == "translated" or is_remote_url(video_path):
         translated = translate_url(video_path, target_base=config.translated_base_dir)
         if source_type == "rtsp" and (
-            translated.startswith("rtsp://")
-            or translated.startswith("http://")
-            or translated.startswith("https://")
+            translated.startswith("rtsp://") or translated.startswith("http://") or translated.startswith("https://")
         ):
             return translated
         return ensure_local_video_path(translated)
@@ -456,6 +443,7 @@ async def _resolve_video_source(
 ) -> str:
     """Resolve the concrete analyzable source from explicit path or sensor mapping."""
     from vsa_agent.integrations.vst_client import VSTClientError
+
     has_time_window = bool(str(start_timestamp or "").strip() or str(end_timestamp or "").strip())
 
     if video_path:
@@ -559,9 +547,7 @@ async def analyze_video_segment(
             end_timestamp=end_timestamp,
         )
         resolved_video_path = (
-            _prepare_video_path(source_candidate, tool_config, source_type=source_type)
-            if source_candidate
-            else None
+            _prepare_video_path(source_candidate, tool_config, source_type=source_type) if source_candidate else None
         )
         if not resolved_video_path:
             raise ValueError("Either 'video_path' or 'frames' must be provided")
@@ -582,8 +568,7 @@ async def analyze_video_segment(
         model_adapter,
         config=tool_config,
     )
-    thinking, parsed_answer = _parse_thinking_from_content(raw_output)
-    normalized_output = parsed_answer if tool_config.filter_thinking else raw_output
+    thinking, _ = _parse_thinking_from_content(raw_output)
 
     raw_artifact_path = write_live_text_artifact("tool-results/video-understanding-raw.txt", raw_output)
     write_live_trace_event(

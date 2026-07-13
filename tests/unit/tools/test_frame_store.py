@@ -1,5 +1,7 @@
 """Tests for tools/frame_store.py."""
-from vsa_agent.tools.frame_store import store_frames, get_frames, get_metadata, clear_key, clear_all
+
+from vsa_agent.tools.frame_store import clear_all, clear_key, get_frames, get_metadata, store_frames
+
 
 class TestFrameStore:
     def test_store_and_retrieve(self):

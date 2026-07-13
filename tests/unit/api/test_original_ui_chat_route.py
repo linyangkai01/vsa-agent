@@ -3,8 +3,7 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi.testclient import TestClient
 
-from vsa_agent.agents.data_models import AgentMessageChunk
-from vsa_agent.agents.data_models import AgentMessageChunkType
+from vsa_agent.agents.data_models import AgentMessageChunk, AgentMessageChunkType
 from vsa_agent.api import original_ui_chat
 from vsa_agent.api.routes import app
 

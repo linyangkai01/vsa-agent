@@ -25,7 +25,7 @@ class EvidenceRef(SharedContractModel):
     end_timestamp: str | None = None
 
     @model_validator(mode="after")
-    def validate_source_specific_fields(self) -> "EvidenceRef":
+    def validate_source_specific_fields(self) -> EvidenceRef:
         if self.source_type == "video_file":
             if self._is_blank(self.video_path):
                 raise ValueError("video_path is required when source_type is video_file")
@@ -51,7 +51,7 @@ class ObservationChunk(SharedContractModel):
     evidence: EvidenceRef
 
     @model_validator(mode="after")
-    def validate_chunk_id(self) -> "ObservationChunk":
+    def validate_chunk_id(self) -> ObservationChunk:
         if self._is_blank(self.chunk_id):
             raise ValueError("chunk_id must not be blank")
         return self
@@ -70,7 +70,7 @@ class DetectedEvent(SharedContractModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_event_id(self) -> "DetectedEvent":
+    def validate_event_id(self) -> DetectedEvent:
         if self._is_blank(self.event_id):
             raise ValueError("event_id must not be blank")
         return self
@@ -85,13 +85,13 @@ class UnderstandingResult(SharedContractModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_query(self) -> "UnderstandingResult":
+    def validate_query(self) -> UnderstandingResult:
         if self._is_blank(self.query):
             raise ValueError("query must not be blank")
         return self
 
     @model_validator(mode="after")
-    def validate_nested_source_types(self) -> "UnderstandingResult":
+    def validate_nested_source_types(self) -> UnderstandingResult:
         for chunk in self.chunks:
             if chunk.evidence.source_type != self.source_type:
                 raise ValueError("chunks evidence source_type must match UnderstandingResult.source_type")
@@ -109,13 +109,13 @@ class SummaryResult(SharedContractModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_query(self) -> "SummaryResult":
+    def validate_query(self) -> SummaryResult:
         if self._is_blank(self.query):
             raise ValueError("query must not be blank")
         return self
 
     @model_validator(mode="after")
-    def validate_query_match(self) -> "SummaryResult":
+    def validate_query_match(self) -> SummaryResult:
         if self.query != self.structured_output.query:
             raise ValueError("query must match structured_output.query")
         return self

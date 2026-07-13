@@ -1,10 +1,9 @@
-﻿"""URL validation validator."""
+"""URL validation validator."""
 
 import re
 from typing import Any
 
-from vsa_agent.agents.postprocessing.validators.base import BaseValidator
-from vsa_agent.agents.postprocessing.validators.base import ValidatorResult
+from vsa_agent.agents.postprocessing.validators.base import BaseValidator, ValidatorResult
 
 
 class URLValidator(BaseValidator):
@@ -20,8 +19,8 @@ class URLValidator(BaseValidator):
         invalid = [u for u in urls if not u.startswith(("http://", "https://"))]
         if invalid:
             return ValidatorResult(
-                name=self.name, passed=False,
+                name=self.name,
+                passed=False,
                 issues=[f"Invalid URLs: {invalid}"],
             )
         return ValidatorResult(name=self.name, passed=True)
-

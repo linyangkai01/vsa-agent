@@ -1,7 +1,6 @@
 """Tests for tools/geolocation.py."""
 
-from vsa_agent.video_analytics.nvschema import Incident
-from vsa_agent.video_analytics.nvschema import Location
+from vsa_agent.video_analytics.nvschema import Incident, Location
 
 
 def test_enrich_incidents_with_default_location_and_zone():
@@ -72,4 +71,3 @@ def test_summarize_geolocation_groups_by_zone():
     assert "loading_dock" in summary
     assert "gate" in summary
     assert "2" in summary
-

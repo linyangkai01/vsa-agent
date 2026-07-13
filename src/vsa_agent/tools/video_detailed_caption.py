@@ -25,4 +25,3 @@ async def video_detailed_caption_tool(
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
     )
-

@@ -4,9 +4,7 @@ import json
 
 import pytest
 
-from vsa_agent.utils.parser import extract_fenced_block
-from vsa_agent.utils.parser import extract_json_string
-from vsa_agent.utils.parser import parse_json_payload
+from vsa_agent.utils.parser import extract_fenced_block, extract_json_string, parse_json_payload
 
 
 def test_extract_fenced_block_prefers_matching_language():

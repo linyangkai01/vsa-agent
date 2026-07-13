@@ -18,20 +18,14 @@ def _build_summary_lines(report_sections: list[dict]) -> str:
     if not report_sections:
         return "- 无分事件内容"
 
-    return "\n".join(
-        f"- {section['section_title']}: {section['summary']}"
-        for section in report_sections
-    )
+    return "\n".join(f"- {section['section_title']}: {section['summary']}" for section in report_sections)
 
 
 def _build_count_lines(counts: dict[str, int]) -> str:
     if not counts:
         return "- 无统计数据"
 
-    return "\n".join(
-        f"- {label}: {count}"
-        for label, count in sorted(counts.items())
-    )
+    return "\n".join(f"- {label}: {count}" for label, count in sorted(counts.items()))
 
 
 @register_tool(
@@ -49,8 +43,7 @@ async def generate_template_report(
     counts_text = _build_count_lines(counts or {})
     chart_table = (chart or {}).get("markdown_table", "- 无图表数据")
     detail_blocks = "\n\n".join(
-        f"### {section['section_title']}\n\n{section['markdown_content']}"
-        for section in report_sections
+        f"### {section['section_title']}\n\n{section['markdown_content']}" for section in report_sections
     )
     markdown_content = (
         f"# {report_title}\n\n"

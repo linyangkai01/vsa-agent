@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class MetricScore(BaseModel):
@@ -28,7 +26,7 @@ class EvaluationResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def populate_passed(self) -> "EvaluationResult":
+    def populate_passed(self) -> EvaluationResult:
         if self.passed is None:
             self.passed = all(metric.passed for metric in self.metrics) if self.metrics else self.score >= 1.0
         return self

@@ -2,11 +2,8 @@
 
 import pytest
 
-from vsa_agent.data_models.understanding import SummaryResult
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.tools.search import SearchOutput
-from vsa_agent.tools.search import SearchResult
+from vsa_agent.data_models.understanding import DetectedEvent, SummaryResult, UnderstandingResult
+from vsa_agent.tools.search import SearchOutput, SearchResult
 
 
 @pytest.mark.anyio

@@ -1,9 +1,8 @@
-﻿"""Non-empty response validator. Mirrors NVIDIA NonEmptyResponseValidator."""
+"""Non-empty response validator. Mirrors NVIDIA NonEmptyResponseValidator."""
 
 from typing import Any
 
-from vsa_agent.agents.postprocessing.validators.base import BaseValidator
-from vsa_agent.agents.postprocessing.validators.base import ValidatorResult
+from vsa_agent.agents.postprocessing.validators.base import BaseValidator, ValidatorResult
 
 
 class NonEmptyValidator(BaseValidator):
@@ -14,8 +13,8 @@ class NonEmptyValidator(BaseValidator):
     async def validate(self, output: str, **kwargs: Any) -> ValidatorResult:
         if not output or not output.strip():
             return ValidatorResult(
-                name=self.name, passed=False,
+                name=self.name,
+                passed=False,
                 issues=["Response is empty"],
             )
         return ValidatorResult(name=self.name, passed=True)
-

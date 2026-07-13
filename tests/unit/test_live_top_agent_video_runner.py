@@ -1,14 +1,12 @@
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import HumanMessage
-from vsa_agent.agents.data_models import AgentOutput
-from vsa_agent.agents.data_models import AgentState
-from vsa_agent.data_models.understanding import UnderstandingResult
 
+from vsa_agent.agents.data_models import AgentOutput, AgentState
+from vsa_agent.data_models.understanding import UnderstandingResult
 
 TEST_RUNNER_DIR = Path("artifacts/test-live-top-agent-video-runner")
 
@@ -145,6 +143,7 @@ async def test_live_video_runner_reused_report_tool_does_not_reanalyze_video(run
 @pytest.mark.asyncio
 async def test_live_video_runner_qa_graph_uses_lightweight_report_placeholder(runner_dir, monkeypatch):
     from langchain_core.messages import ToolMessage
+
     from vsa_agent.live_video_acceptance import _run_graph_video_acceptance
     from vsa_agent.registry import ToolRegistry
 
@@ -168,6 +167,7 @@ async def test_live_video_runner_qa_graph_uses_lightweight_report_placeholder(ru
 
     video_path = runner_dir / "video.mp4"
     video_path.write_bytes(b"fake")
+
     async def fake_build_graph():
         return FakeGraph()
 
@@ -349,9 +349,7 @@ async def test_live_video_runner_rejects_non_markdown_report_answer(runner_dir, 
     async def fake_execute_report_agent(report_input, video_understanding_fn=None):
         return AgentOutput(
             status="success",
-            side_effects={
-                "markdown_content": "Now that I have the understanding, I'll generate a Markdown report."
-            },
+            side_effects={"markdown_content": "Now that I have the understanding, I'll generate a Markdown report."},
         )
 
     monkeypatch.setattr(

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from contextlib import contextmanager
-from dataclasses import dataclass
 import time
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 
 
 @dataclass

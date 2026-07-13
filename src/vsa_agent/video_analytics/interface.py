@@ -1,4 +1,4 @@
-﻿"""VideoAnalyticsInterface abstract base class.
+"""VideoAnalyticsInterface abstract base class.
 
 Mirrors NVIDIA interface.py — defines the contract for video analytics backends.
 """

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from vsa_agent.registry import register_tool
-from vsa_agent.utils.time_convert import format_timestamp
-from vsa_agent.utils.time_convert import frames_to_seconds
+from vsa_agent.utils.time_convert import format_timestamp, frames_to_seconds
 
 
 def frame_indices_to_timestamps(

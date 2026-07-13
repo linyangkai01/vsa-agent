@@ -1,4 +1,4 @@
-﻿"""Parse VLM reasoning content (thinking/answer separation).
+"""Parse VLM reasoning content (thinking/answer separation).
 
 Handles structured reasoning output from models that support
 chain-of-thought or thinking tags.
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 @dataclass
 class ReasoningResult:
     """Parsed reasoning result with separated thinking and answer."""
+
     thinking: str = ""
     answer: str = ""
     has_reasoning: bool = False
@@ -43,7 +44,7 @@ def parse_reasoning_content(content: str) -> ReasoningResult:
         # Check for  response separator
         resp_idx = rest.find(" response")
         if resp_idx >= 0:
-            after_response = rest[resp_idx + len(" response"):].strip()
+            after_response = rest[resp_idx + len(" response") :].strip()
             # Check for <answer> tag in the response part
             answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", after_response, re.DOTALL)
             if answer_match:

@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.registry import register_tool
 
@@ -19,8 +18,7 @@ class CountWithChartResult(BaseModel):
 
 
 async def _default_chart_generator_fn(**kwargs):
-    from vsa_agent.tools.chart_generator import ChartSeriesItem
-    from vsa_agent.tools.chart_generator import generate_bar_chart_artifact
+    from vsa_agent.tools.chart_generator import ChartSeriesItem, generate_bar_chart_artifact
 
     series = [ChartSeriesItem(**item) for item in kwargs["series"]]
     result = await generate_bar_chart_artifact(

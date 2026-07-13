@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.video_understanding import analyze_video
@@ -40,4 +39,3 @@ async def video_caption_tool(
         end_timestamp=end_timestamp or None,
     )
     return result.summary_text
-

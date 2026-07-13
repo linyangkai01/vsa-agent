@@ -1,11 +1,13 @@
 """Tests for tools/attribute_search.py."""
-import pytest
 
 from vsa_agent.tools.attribute_search import (
-    AttributeSearchInput, AttributeSearchResult, AttributeSearchMetadata,
+    AttributeSearchInput,
+    AttributeSearchMetadata,
+    AttributeSearchResult,
     search_by_attributes,
 )
 from vsa_agent.tools.search import SearchResult
+
 
 class TestAttributeSearchInput:
     def test_required_fields(self):
@@ -13,10 +15,12 @@ class TestAttributeSearchInput:
         assert inp.query == "person in red shirt"
         assert inp.top_k == 1
 
+
 class TestAttributeSearchMetadata:
     def test_required_fields(self):
         meta = AttributeSearchMetadata(sensor_id="s1", object_id="obj1")
         assert meta.sensor_id == "s1"
+
 
 class TestAttributeSearchResult:
     def test_required_fields(self):
@@ -24,17 +28,24 @@ class TestAttributeSearchResult:
         result = AttributeSearchResult(metadata=meta)
         assert result.metadata.sensor_id == "s1"
 
+
 class TestSearchByAttributes:
     async def test_returns_list(self):
         result = await search_by_attributes(query_text="person in red shirt")
         assert isinstance(result, list)
 
+
 class TestDeduplicateByVideoName:
     def test_deduplicates(self):
         from vsa_agent.tools.attribute_search import _deduplicate_by_video_name
+
         results = [
-            SearchResult(video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.9),
-            SearchResult(video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.7),
+            SearchResult(
+                video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.9
+            ),
+            SearchResult(
+                video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.7
+            ),
         ]
         deduped = _deduplicate_by_video_name(results)
         assert len(deduped) == 1
@@ -44,6 +55,7 @@ class TestDeduplicateByVideoName:
 class TestDeduplicateByObject:
     def test_keeps_highest_object_score(self):
         from vsa_agent.tools.attribute_search import _deduplicate_by_object
+
         low = AttributeSearchResult(
             metadata=AttributeSearchMetadata(
                 sensor_id="s1",
@@ -68,13 +80,20 @@ class TestDeduplicateByObject:
 class TestMultiAttributeMerge:
     def test_fuse_multi_attribute_requires_all_attributes(self):
         from vsa_agent.tools.attribute_search import _fuse_multi_attribute
+
         grouped = {
             "attr1": [
-                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o1", video_name="v1")),
+                AttributeSearchResult(
+                    metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o1", video_name="v1")
+                ),
             ],
             "attr2": [
-                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o2", video_name="v1")),
-                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s2", object_id="o3", video_name="v2")),
+                AttributeSearchResult(
+                    metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o2", video_name="v1")
+                ),
+                AttributeSearchResult(
+                    metadata=AttributeSearchMetadata(sensor_id="s2", object_id="o3", video_name="v2")
+                ),
             ],
         }
         fused = _fuse_multi_attribute(["attr1", "attr2"], grouped)
@@ -83,10 +102,15 @@ class TestMultiAttributeMerge:
 
     def test_fuse_multi_attribute_does_not_confuse_two_objects_from_one_attribute(self):
         from vsa_agent.tools.attribute_search import _fuse_multi_attribute
+
         grouped = {
             "attr1": [
-                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o1", video_name="v1")),
-                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o2", video_name="v1")),
+                AttributeSearchResult(
+                    metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o1", video_name="v1")
+                ),
+                AttributeSearchResult(
+                    metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o2", video_name="v1")
+                ),
             ],
             "attr2": [],
         }
@@ -95,9 +119,14 @@ class TestMultiAttributeMerge:
 
     def test_append_multi_attribute_returns_union(self):
         from vsa_agent.tools.attribute_search import _append_multi_attribute
+
         grouped = {
-            "attr1": [AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o1", video_name="v1"))],
-            "attr2": [AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s2", object_id="o2", video_name="v2"))],
+            "attr1": [
+                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s1", object_id="o1", video_name="v1"))
+            ],
+            "attr2": [
+                AttributeSearchResult(metadata=AttributeSearchMetadata(sensor_id="s2", object_id="o2", video_name="v2"))
+            ],
         }
         appended = _append_multi_attribute(["attr1", "attr2"], grouped)
         assert len(appended) == 2

@@ -2,8 +2,7 @@
 
 from typing import Any
 
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
-from vsa_agent.prompt import VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
 
 _DEFAULT_INTENT_GUIDANCE = (
@@ -42,15 +41,8 @@ async def generate_understanding_prompt(
 ) -> str:
     """Generate a deterministic prompt for downstream video understanding."""
     intent_key = (intent or "").strip().lower()
-    guidance = (
-        _ROOT_CAUSE_INTENT_GUIDANCE
-        if intent_key == "root_cause"
-        else _DEFAULT_INTENT_GUIDANCE
-    )
+    guidance = _ROOT_CAUSE_INTENT_GUIDANCE if intent_key == "root_cause" else _DEFAULT_INTENT_GUIDANCE
 
     return (
-        f"{SYSTEM_PROMPT_VIDEO_UNDERSTANDING}\n\n"
-        f"{guidance}\n\n"
-        f"{_build_user_section(query)}"
-        f"{_format_context(context)}"
+        f"{SYSTEM_PROMPT_VIDEO_UNDERSTANDING}\n\n{guidance}\n\n{_build_user_section(query)}{_format_context(context)}"
     )

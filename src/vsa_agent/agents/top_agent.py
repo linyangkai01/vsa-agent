@@ -1,26 +1,24 @@
-import logging
 import inspect
 import json
+import logging
 from typing import get_type_hints
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field, create_model
-from langgraph.config import get_stream_writer
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import BaseModel, Field, create_model
 
 from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType, AgentState
 from vsa_agent.config import get_config
-from vsa_agent.observability.live_trace import write_live_text_artifact
-from vsa_agent.observability.live_trace import write_live_trace_event
+from vsa_agent.observability.live_trace import write_live_text_artifact, write_live_trace_event
 
 logger = logging.getLogger(__name__)
 
-_INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter",
-                     "kwargs", "args", "kwds"}
+_INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter", "kwargs", "args", "kwds"}
 
 _MAX_TOOL_RESULT_CHARS = 800
 _MAX_VIDEO_TOOL_RESULT_CHARS = 3200
@@ -134,6 +132,7 @@ def _build_tool_schema(fn) -> type[BaseModel] | None:
 
 def _build_langchain_tools() -> list[StructuredTool]:
     from vsa_agent.registry import ToolRegistry
+
     tools = ToolRegistry.get_all()
     lc_tools = []
     for name, fn in tools.items():
@@ -145,6 +144,7 @@ def _build_langchain_tools() -> list[StructuredTool]:
         def _make_coro(f):
             async def _coroutine(**kw):
                 return await f(**kw)
+
             return _coroutine
 
         t = StructuredTool(
@@ -316,7 +316,7 @@ def _redact_tool_arg(name: str, value) -> str:
         return "<redacted>"
     if isinstance(value, str):
         return _truncate_text(value, 300)
-    if isinstance(value, (int, float, bool)) or value is None:
+    if isinstance(value, int | float | bool) or value is None:
         return str(value)
     try:
         return _truncate_text(json.dumps(value, ensure_ascii=False, default=str), 300)
@@ -415,8 +415,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
         AgentMessageChunk(
             type=AgentMessageChunkType.THOUGHT,
             content=(
-                f"Analyzing user request (LLM iteration {state.iteration_count + 1}; "
-                f"{len(lc_tools)} tools available)."
+                f"Analyzing user request (LLM iteration {state.iteration_count + 1}; {len(lc_tools)} tools available)."
             ),
             metadata={"iteration": state.iteration_count + 1, "tool_count": len(lc_tools)},
         )
@@ -595,14 +594,22 @@ async def build_graph() -> CompiledStateGraph:
     graph.add_node("finalize", finalize_node)
 
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", decide_next, {
-        AgentDecision.CALL_TOOL.value: "tool",
-        AgentDecision.RESPOND.value: "finalize",
-    })
-    graph.add_conditional_edges("tool", decide_after_tool, {
-        AgentDecision.CALL_TOOL.value: "agent",
-        AgentDecision.RESPOND.value: "finalize",
-    })
+    graph.add_conditional_edges(
+        "agent",
+        decide_next,
+        {
+            AgentDecision.CALL_TOOL.value: "tool",
+            AgentDecision.RESPOND.value: "finalize",
+        },
+    )
+    graph.add_conditional_edges(
+        "tool",
+        decide_after_tool,
+        {
+            AgentDecision.CALL_TOOL.value: "agent",
+            AgentDecision.RESPOND.value: "finalize",
+        },
+    )
     graph.add_edge("finalize", END)
 
     compiled = graph.compile(checkpointer=InMemorySaver())

@@ -4,8 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from vsa_agent.config import AppConfig
-from vsa_agent.config import SearchBackendConfig
+from vsa_agent.config import AppConfig, SearchBackendConfig
 
 
 def _client_for_router(router) -> TestClient:

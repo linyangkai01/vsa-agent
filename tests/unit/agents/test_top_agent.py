@@ -1,13 +1,15 @@
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
 from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunkType, AgentState
-from vsa_agent.agents.top_agent import _build_langchain_tools
-from vsa_agent.agents.top_agent import _is_unrecoverable_tool_error
-from vsa_agent.agents.top_agent import _truncate_result
-from vsa_agent.agents.top_agent import build_graph
-from vsa_agent.agents.top_agent import decide_after_tool
-from vsa_agent.agents.top_agent import decide_next
+from vsa_agent.agents.top_agent import (
+    _build_langchain_tools,
+    _is_unrecoverable_tool_error,
+    _truncate_result,
+    build_graph,
+    decide_after_tool,
+    decide_next,
+)
 
 
 class TestDecideNext:
@@ -39,6 +41,7 @@ class TestDecideAfterTool:
 class TestBuildGraph:
     def test_graph_compiles(self):
         import asyncio
+
         graph = asyncio.run(build_graph())
         assert graph is not None
 
@@ -81,7 +84,8 @@ def test_truncate_video_result_keeps_late_safety_evidence():
         "Risk digest by chunk:\n"
         "- Chunk 1 [00:00:00 - 00:00:30] PPE / visibility: workers lack visible safety vests.\n"
         "- Chunk 3 [00:01:00 - 00:01:30] Fire / hot work: angle grinder throws sparks without eye protection.\n"
-        "- Chunk 6 [00:02:30 - 00:03:00] Slip / trip / housekeeping: wet debris-covered ground around hydraulic breaker.\n"
+        "- Chunk 6 [00:02:30 - 00:03:00] Slip / trip / housekeeping: wet debris-covered ground around "
+        "hydraulic breaker.\n"
         + ("additional middle detail\n" * 80)
         + "Overall assessment: immediate corrective action is required for PPE and fall protection."
     )

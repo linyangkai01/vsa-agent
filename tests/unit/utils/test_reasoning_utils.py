@@ -1,4 +1,5 @@
 """Tests for utils/reasoning_utils.py."""
+
 from vsa_agent.utils.reasoning_utils import (
     bind_reasoning_kwargs,
     get_llm_reasoning_bind_kwargs,
@@ -6,12 +7,14 @@ from vsa_agent.utils.reasoning_utils import (
     thinking_tag,
 )
 
+
 class TestThinkingTag:
     def test_wraps_content(self):
         result = thinking_tag("test reasoning")
         assert "<thinking>" in result
         assert "test reasoning" in result
         assert "</thinking>" in result
+
 
 class TestBindReasoningKwargs:
     def test_filters_relevant_keys(self):

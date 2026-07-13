@@ -6,8 +6,7 @@ from collections import Counter
 from dataclasses import replace
 
 from vsa_agent.registry import register_tool
-from vsa_agent.video_analytics.nvschema import Incident
-from vsa_agent.video_analytics.nvschema import Location
+from vsa_agent.video_analytics.nvschema import Incident, Location
 
 
 def enrich_incidents_with_location(

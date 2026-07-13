@@ -77,7 +77,4 @@ def test_claim_due_job_accepts_owner_and_explicit_clock() -> None:
     now = datetime(2026, 7, 12, 8, 30, tzinfo=UTC)
 
     assert asyncio.run(repository.claim_due_job(owner="worker-1", now=now)) is None
-    assert (
-        asyncio.run(JobRepository.claim_due_job(repository, owner="worker-1", now=now))
-        is None
-    )
+    assert asyncio.run(JobRepository.claim_due_job(repository, owner="worker-1", now=now)) is None

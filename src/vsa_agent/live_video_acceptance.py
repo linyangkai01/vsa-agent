@@ -5,26 +5,25 @@ import asyncio
 import json
 import os
 import sys
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage
 
 from vsa_agent.agents.data_models import AgentState
-from vsa_agent.agents.report_agent import ReportAgentInput
-from vsa_agent.agents.report_agent import VideoReportCallable
-from vsa_agent.agents.report_agent import VideoUnderstandingCallable
-from vsa_agent.agents.report_agent import execute_report_agent
+from vsa_agent.agents.report_agent import (
+    ReportAgentInput,
+    VideoReportCallable,
+    VideoUnderstandingCallable,
+    execute_report_agent,
+)
 from vsa_agent.agents.top_agent import build_graph
 from vsa_agent.config import resolve_runtime_config
 from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.registry import temporary_tool_override
 from vsa_agent.tools.video_understanding import analyze_video
-
 
 DEFAULT_QA_QUERY = "Describe what happened in this video and identify any safety risks."
 REPORT_QUERY = "Generate a single-video Markdown inspection report using this video as evidence."
@@ -321,7 +320,10 @@ def _build_reused_report_agent_tool(
 def _build_deferred_report_agent_tool():
     async def deferred_report_agent_tool(video_path: str = "", sensor_id: str = "", query: str = REPORT_QUERY) -> str:
         del video_path, sensor_id, query
-        return "Report generation is deferred until after QA. Use the existing video_understanding result to answer the user."
+        return (
+            "Report generation is deferred until after QA. "
+            "Use the existing video_understanding result to answer the user."
+        )
 
     deferred_report_agent_tool._tool_name = "report_agent"
     deferred_report_agent_tool._tool_description = (

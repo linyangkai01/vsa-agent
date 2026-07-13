@@ -22,4 +22,3 @@ async def test_skim_caption_adds_brief_prompt_prefix(monkeypatch):
     assert text == "brief caption"
     assert "简要" in captured["user_prompt"]
     assert "describe" in captured["user_prompt"]
-

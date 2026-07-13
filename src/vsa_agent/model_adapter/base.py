@@ -1,10 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from typing import Any
 
 from langchain_core.messages import BaseMessage
-from openai import AuthenticationError
-from openai import PermissionDeniedError
+from openai import AuthenticationError, PermissionDeniedError
 
 from vsa_agent.utils.retry import call_with_async_retry
 

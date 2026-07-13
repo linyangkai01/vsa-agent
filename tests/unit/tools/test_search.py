@@ -3,8 +3,13 @@
 import pytest
 
 from vsa_agent.tools.search import (
-    DecomposedQuery, SearchResult, SearchOutput, SearchConfig, SearchInput,
-    _apply_weighted_linear_fusion, _apply_rrf_fusion,
+    DecomposedQuery,
+    SearchConfig,
+    SearchInput,
+    SearchOutput,
+    SearchResult,
+    _apply_rrf_fusion,
+    _apply_weighted_linear_fusion,
 )
 
 
@@ -22,7 +27,9 @@ class TestDecomposedQuery:
 
 class TestSearchResult:
     def test_required_fields(self):
-        sr = SearchResult(video_name="test.mp4", description="d", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.85)
+        sr = SearchResult(
+            video_name="test.mp4", description="d", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.85
+        )
         assert sr.video_name == "test.mp4"
         assert sr.similarity == 0.85
 
@@ -48,9 +55,26 @@ class TestSearchInput:
 class TestFusionFunctions:
     def test_weighted_linear_fusion(self):
         from vsa_agent.tools.search import SearchResult
+
         video_data = [
-            {"embed_result": SearchResult(video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.8), "embed_score": 0.8, "normalised_attribute_score": 0.6, "screenshot_url": "", "object_ids": []},
-            {"embed_result": SearchResult(video_name="v2", description="d2", start_time="t3", end_time="t4", sensor_id="s2", similarity=0.5), "embed_score": 0.5, "normalised_attribute_score": 0.9, "screenshot_url": "", "object_ids": []},
+            {
+                "embed_result": SearchResult(
+                    video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.8
+                ),
+                "embed_score": 0.8,
+                "normalised_attribute_score": 0.6,
+                "screenshot_url": "",
+                "object_ids": [],
+            },
+            {
+                "embed_result": SearchResult(
+                    video_name="v2", description="d2", start_time="t3", end_time="t4", sensor_id="s2", similarity=0.5
+                ),
+                "embed_score": 0.5,
+                "normalised_attribute_score": 0.9,
+                "screenshot_url": "",
+                "object_ids": [],
+            },
         ]
         results = _apply_weighted_linear_fusion(video_data, w_embed=0.4, w_attribute=0.6)
         assert len(results) == 2
@@ -60,9 +84,26 @@ class TestFusionFunctions:
 
     def test_rrf_fusion(self):
         from vsa_agent.tools.search import SearchResult
+
         video_data = [
-            {"embed_result": SearchResult(video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.9), "embed_score": 0.9, "normalised_attribute_score": 0.5, "screenshot_url": "", "object_ids": []},
-            {"embed_result": SearchResult(video_name="v2", description="d2", start_time="t3", end_time="t4", sensor_id="s2", similarity=0.6), "embed_score": 0.6, "normalised_attribute_score": 0.8, "screenshot_url": "", "object_ids": []},
+            {
+                "embed_result": SearchResult(
+                    video_name="v1", description="d1", start_time="t1", end_time="t2", sensor_id="s1", similarity=0.9
+                ),
+                "embed_score": 0.9,
+                "normalised_attribute_score": 0.5,
+                "screenshot_url": "",
+                "object_ids": [],
+            },
+            {
+                "embed_result": SearchResult(
+                    video_name="v2", description="d2", start_time="t3", end_time="t4", sensor_id="s2", similarity=0.6
+                ),
+                "embed_score": 0.6,
+                "normalised_attribute_score": 0.8,
+                "screenshot_url": "",
+                "object_ids": [],
+            },
         ]
         results = _apply_rrf_fusion(video_data, rrf_k=60, rrf_w=0.5)
         assert len(results) == 2

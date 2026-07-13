@@ -21,20 +21,14 @@ def translate_url(url: str, target_base: str | None = None) -> str:
     if parsed.scheme == "file":
         path = normalize_local_path(parsed.path)
         if target_base:
-            return normalize_local_path(
-                os.path.join(target_base, os.path.basename(path))
-            )
+            return normalize_local_path(os.path.join(target_base, os.path.basename(path)))
         return path
 
     if parsed.scheme in ("", "c", "d"):
         return normalize_local_path(url)
 
     if parsed.scheme in ("s3", "minio") and target_base:
-        relative_parts = [
-            part
-            for part in [parsed.netloc, *parsed.path.lstrip("/").split("/")]
-            if part
-        ]
+        relative_parts = [part for part in [parsed.netloc, *parsed.path.lstrip("/").split("/")] if part]
         return "/".join([normalize_local_path(target_base).rstrip("/")] + relative_parts)
 
     return url

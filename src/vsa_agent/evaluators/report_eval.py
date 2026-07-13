@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from vsa_agent.evaluators.data_models import EvaluationResult
-from vsa_agent.evaluators.data_models import ExpectedReportSection
-from vsa_agent.evaluators.data_models import MetricScore
+from vsa_agent.evaluators.data_models import EvaluationResult, ExpectedReportSection, MetricScore
 
 
 def _normalize_text(value: str) -> str:

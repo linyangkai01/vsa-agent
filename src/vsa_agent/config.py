@@ -370,9 +370,7 @@ def _validate_role_bindings(
         elif not _resolve_api_key(backend):
             source = backend.api_key_env or "api_key"
             issues.append(
-                ConfigIssue(
-                    message=f"{role_name} backend '{binding.backend}' requires API key from {source}"
-                )
+                ConfigIssue(message=f"{role_name} backend '{binding.backend}' requires API key from {source}")
             )
     return issues
 

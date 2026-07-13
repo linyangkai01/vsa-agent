@@ -1,4 +1,4 @@
-﻿"""Video database lookup tool - finds local video files by name.
+"""Video database lookup tool - finds local video files by name.
 
 Maps user-friendly video names ("test1", "warehouse_cam") to local file paths.
 In production, this would query Elasticsearch/Milvus for video metadata.
@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 @register_tool(
     "find_video",
     description="Find a video file by name or path. Returns the full file path if found. "
-                "Use this FIRST when the user mentions a video name like 'test1' or 'test1.mp4'. "
-                "The returned path can be passed to frame_extract or video_understanding.",
+    "Use this FIRST when the user mentions a video name like 'test1' or 'test1.mp4'. "
+    "The returned path can be passed to frame_extract or video_understanding.",
 )
 async def find_video_tool(name: str) -> str:
     """Find a video file by name.
@@ -54,4 +54,3 @@ async def list_videos_tool(**_: object) -> str:
         size_mb = v["size_bytes"] / (1024 * 1024)
         lines.append(f"  - {v['name']} ({size_mb:.1f} MB)")
     return "\n".join(lines)
-

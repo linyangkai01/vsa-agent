@@ -3,8 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from vsa_agent.agents.search_agent import SearchAgentInput
-from vsa_agent.agents.search_agent import execute_search_agent_flow
+from vsa_agent.agents.search_agent import SearchAgentInput, execute_search_agent_flow
 from vsa_agent.archive.ingest import ingest_live_run
 from vsa_agent.archive.search import LocalArchiveSearchStore
 

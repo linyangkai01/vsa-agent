@@ -1,10 +1,6 @@
 """Tests for tools/report_structuring.py."""
 
-import pytest
-
-from vsa_agent.data_models.understanding import DetectedEvent
-from vsa_agent.data_models.understanding import EvidenceRef
-from vsa_agent.data_models.understanding import UnderstandingResult
+from vsa_agent.data_models.understanding import DetectedEvent, EvidenceRef, UnderstandingResult
 
 
 def test_build_single_section_report_maps_understanding_to_structured_report():
@@ -68,6 +64,7 @@ def test_build_single_section_report_sets_location_summary():
 
     assert "unknown" in report.sections[0].location_summary
 
+
 def test_build_single_section_report_accepts_lax_event_dicts():
     from vsa_agent.tools.report_structuring import build_single_section_report
 
@@ -93,4 +90,3 @@ def test_build_single_section_report_accepts_lax_event_dicts():
     assert report.sections[0].incidents[0].description == "person walking near forklift"
     assert report.sections[0].incidents[0].start_timestamp == "00:00:05"
     assert report.sections[0].incidents[0].end_timestamp == "00:00:09"
-

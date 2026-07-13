@@ -4,14 +4,15 @@ from pathlib import Path
 import pytest
 
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.evaluators import ExpectedEvent
-from vsa_agent.evaluators import ExpectedReportSection
-from vsa_agent.evaluators import ExpectedSearchHit
-from vsa_agent.evaluators import evaluate_report_markdown
-from vsa_agent.evaluators import evaluate_search_output
-from vsa_agent.evaluators import evaluate_understanding_result
+from vsa_agent.evaluators import (
+    ExpectedEvent,
+    ExpectedReportSection,
+    ExpectedSearchHit,
+    evaluate_report_markdown,
+    evaluate_search_output,
+    evaluate_understanding_result,
+)
 from vsa_agent.tools.search import SearchOutput
-
 
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "evaluator_regression.json"
 
@@ -42,7 +43,9 @@ def evaluate_case(case: dict):
         )
 
     if evaluator_type == "report":
-        expected_sections = [ExpectedReportSection.model_validate(item) for item in case["expected"].get("sections", [])]
+        expected_sections = [
+            ExpectedReportSection.model_validate(item) for item in case["expected"].get("sections", [])
+        ]
         return evaluate_report_markdown(
             case["actual"]["markdown"],
             expected_sections=expected_sections,
