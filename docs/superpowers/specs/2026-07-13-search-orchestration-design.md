@@ -2,6 +2,8 @@
 comet_change: refactor-search-orchestration
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-13-refactor-search-orchestration
+status: final
 ---
 
 # 搜索编排重构技术设计
