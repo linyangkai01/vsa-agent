@@ -1,0 +1,788 @@
+"""SQLite persistence and worker leases for recorded-video ingestion."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+
+from vsa_agent.recorded_video.models import (
+    Asset,
+    AssetStatus,
+    Job,
+    JobStage,
+    JobStatus,
+    JobStep,
+    UploadSession,
+)
+
+_MIGRATION_1 = (
+    """
+    CREATE TABLE assets (
+        asset_id TEXT PRIMARY KEY,
+        display_filename TEXT NOT NULL,
+        safe_filename TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        sha256 TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        source_extension TEXT NOT NULL,
+        duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+        width INTEGER CHECK (width IS NULL OR width >= 0),
+        height INTEGER CHECK (height IS NULL OR height >= 0),
+        timeline_origin TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_job_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        FOREIGN KEY (current_job_id) REFERENCES jobs(job_id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE upload_sessions (
+        session_id TEXT PRIMARY KEY,
+        identifier TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        total_chunks INTEGER NOT NULL CHECK (total_chunks > 0),
+        received_chunks INTEGER NOT NULL DEFAULT 0 CHECK (
+            received_chunks >= 0 AND received_chunks <= total_chunks
+        ),
+        filename TEXT NOT NULL,
+        temp_dir TEXT NOT NULL,
+        status TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE upload_chunks (
+        upload_chunk_id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        chunk_number INTEGER NOT NULL CHECK (chunk_number > 0),
+        checksum TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        path TEXT,
+        recorded_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES upload_sessions(session_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE jobs (
+        job_id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL,
+        pipeline_version TEXT NOT NULL CHECK (length(trim(pipeline_version)) > 0),
+        status TEXT NOT NULL,
+        stage TEXT,
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+        next_run_at TEXT,
+        lease_owner TEXT,
+        lease_until TEXT,
+        heartbeat_at TEXT,
+        config_snapshot TEXT NOT NULL,
+        last_error TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE job_steps (
+        job_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        output_manifest TEXT,
+        output_checksum TEXT,
+        model TEXT,
+        elapsed_ms INTEGER CHECK (elapsed_ms IS NULL OR elapsed_ms >= 0),
+        PRIMARY KEY (job_id, stage),
+        FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE segments (
+        segment_id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL,
+        pipeline_version TEXT NOT NULL CHECK (length(trim(pipeline_version)) > 0),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        start_offset_ms INTEGER NOT NULL CHECK (start_offset_ms >= 0),
+        end_offset_ms INTEGER NOT NULL CHECK (end_offset_ms >= start_offset_ms),
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        thumbnail_key TEXT,
+        model TEXT,
+        prompt_version TEXT,
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE CASCADE
+    )
+    """,
+    "CREATE UNIQUE INDEX uq_upload_sessions_identifier ON upload_sessions(identifier)",
+    "CREATE UNIQUE INDEX uq_upload_chunks_session_chunk ON upload_chunks(session_id, chunk_number)",
+    "CREATE UNIQUE INDEX uq_jobs_asset_pipeline ON jobs(asset_id, pipeline_version)",
+    "CREATE UNIQUE INDEX uq_segments_asset_pipeline_ordinal ON segments(asset_id, pipeline_version, ordinal)",
+    "CREATE INDEX ix_jobs_due ON jobs(status, next_run_at, lease_until)",
+)
+
+
+def _require_aware(value: datetime, name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _to_iso(value: datetime | None, name: str = "datetime") -> str | None:
+    if value is None:
+        return None
+    return _require_aware(value, name).isoformat()
+
+
+def _from_iso(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    return _require_aware(parsed, "persisted datetime")
+
+
+def _json_snapshot(snapshot: Mapping[str, Any]) -> str:
+    return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+class JobRepository:
+    """Concrete file-backed implementation of the recorded-video repository port."""
+
+    def __init__(
+        self,
+        database_path: str | Path,
+        *,
+        lease_seconds: int = 120,
+        busy_timeout_ms: int = 5_000,
+    ) -> None:
+        self.database_path = Path(database_path)
+        if str(database_path) == ":memory:" or self.database_path.as_posix().startswith("file:"):
+            raise ValueError("JobRepository requires a file-backed SQLite database")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if busy_timeout_ms <= 0:
+            raise ValueError("busy_timeout_ms must be positive")
+        self.lease_seconds = lease_seconds
+        self.busy_timeout_ms = busy_timeout_ms
+
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
+        connection = await aiosqlite.connect(
+            self.database_path,
+            isolation_level=None,
+            timeout=self.busy_timeout_ms / 1_000,
+        )
+        connection.row_factory = aiosqlite.Row
+        try:
+            await connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            await connection.execute("PRAGMA foreign_keys = ON")
+            yield connection
+        finally:
+            await connection.close()
+
+    @asynccontextmanager
+    async def _transaction(self, connection: aiosqlite.Connection) -> AsyncIterator[None]:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            await connection.rollback()
+            raise
+        else:
+            await connection.commit()
+
+    async def initialize(self) -> None:
+        """Create or migrate the database; safe to call repeatedly."""
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        async with self._connect() as connection:
+            await connection.execute("PRAGMA journal_mode = WAL")
+            async with self._transaction(connection):
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                    )
+                    """
+                )
+                row = await self._fetchone(connection, "SELECT MAX(version) AS version FROM schema_migrations")
+                version = int(row["version"] or 0) if row is not None else 0
+                if version < 1:
+                    for statement in _MIGRATION_1:
+                        await connection.execute(statement)
+                    await connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                        (1, _to_iso(datetime.now(UTC))),
+                    )
+
+    async def create_upload_session(self, asset: Asset, session: UploadSession) -> UploadSession:
+        if asset.asset_id != session.asset_id:
+            raise ValueError("asset and upload session must refer to the same asset_id")
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                await connection.execute(
+                    """
+                    INSERT INTO assets (
+                        asset_id, display_filename, safe_filename, size_bytes, sha256, mime_type,
+                        source_extension, duration_ms, width, height, timeline_origin, status,
+                        current_job_id, created_at, updated_at, deleted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(asset_id) DO NOTHING
+                    """,
+                    self._asset_parameters(asset),
+                )
+                try:
+                    await connection.execute(
+                        """
+                        INSERT INTO upload_sessions (
+                            session_id, identifier, asset_id, total_chunks, received_chunks,
+                            filename, temp_dir, status, expires_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session.session_id,
+                            session.identifier,
+                            session.asset_id,
+                            session.total_chunks,
+                            session.received_chunks,
+                            session.filename,
+                            session.temp_dir,
+                            session.status.value,
+                            _to_iso(session.expires_at, "session.expires_at"),
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    existing = await self._fetchone(
+                        connection,
+                        "SELECT * FROM upload_sessions WHERE identifier = ?",
+                        (session.identifier,),
+                    )
+                    if existing is None or (
+                        existing["session_id"] != session.session_id or existing["asset_id"] != session.asset_id
+                    ):
+                        raise
+                    return self._row_to_upload_session(existing)
+        return session
+
+    async def record_chunk(
+        self,
+        session_id: str,
+        chunk_number: int,
+        checksum: str,
+        *,
+        size_bytes: int = 0,
+        path: str | None = None,
+    ) -> None:
+        if chunk_number <= 0:
+            raise ValueError("chunk_number must be positive")
+        if size_bytes < 0:
+            raise ValueError("size_bytes cannot be negative")
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                existing = await self._fetchone(
+                    connection,
+                    "SELECT checksum, size_bytes, path FROM upload_chunks WHERE session_id = ? AND chunk_number = ?",
+                    (session_id, chunk_number),
+                )
+                if existing is not None:
+                    if (
+                        existing["checksum"] != checksum
+                        or existing["size_bytes"] != size_bytes
+                        or existing["path"] != path
+                    ):
+                        raise ValueError("chunk key already contains different content")
+                    return
+
+                await connection.execute(
+                    """
+                    INSERT INTO upload_chunks (
+                        session_id, chunk_number, checksum, size_bytes, path, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, chunk_number, checksum, size_bytes, path, _to_iso(datetime.now(UTC))),
+                )
+                await connection.execute(
+                    """
+                    UPDATE upload_sessions
+                    SET received_chunks = (
+                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
+                    )
+                    WHERE session_id = ?
+                    """,
+                    (session_id, session_id),
+                )
+
+    async def complete_upload(
+        self,
+        asset_id: str,
+        pipeline_version: str,
+        *,
+        now: datetime | None = None,
+        config_snapshot: Mapping[str, Any] | None = None,
+    ) -> Job:
+        completed_at = _require_aware(now or datetime.now(UTC), "now")
+        snapshot = dict(config_snapshot or {})
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                existing = await self._fetchone(
+                    connection,
+                    "SELECT * FROM jobs WHERE asset_id = ? AND pipeline_version = ?",
+                    (asset_id, pipeline_version),
+                )
+                if existing is not None:
+                    return self._row_to_job(existing)
+
+                asset = await self._fetchone(connection, "SELECT status FROM assets WHERE asset_id = ?", (asset_id,))
+                if asset is None:
+                    raise KeyError(f"unknown asset: {asset_id}")
+                if asset["status"] == AssetStatus.DELETED.value:
+                    raise ValueError("cannot complete upload for a deleted asset")
+
+                job = Job(
+                    job_id=str(uuid.uuid4()),
+                    asset_id=asset_id,
+                    pipeline_version=pipeline_version,
+                    status=JobStatus.QUEUED,
+                    next_run_at=completed_at,
+                    config_snapshot=snapshot,
+                    created_at=completed_at,
+                    updated_at=completed_at,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, asset_id, pipeline_version, status, stage, attempt, next_run_at,
+                        lease_owner, lease_until, heartbeat_at, config_snapshot, last_error,
+                        cancel_requested, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    self._job_parameters(job),
+                )
+                await connection.execute(
+                    """
+                    UPDATE assets
+                    SET status = ?, current_job_id = ?, updated_at = ?
+                    WHERE asset_id = ?
+                    """,
+                    (AssetStatus.READY.value, job.job_id, _to_iso(completed_at), asset_id),
+                )
+                await connection.execute(
+                    "UPDATE upload_sessions SET status = ? WHERE asset_id = ?",
+                    (AssetStatus.READY.value, asset_id),
+                )
+                return job
+
+    async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
+        """Atomically claim one due job using the caller's timezone-aware clock."""
+        if not owner.strip():
+            raise ValueError("owner must not be empty")
+        claimed_at = _require_aware(now, "now")
+        claimed_iso = _to_iso(claimed_at)
+        lease_until = _to_iso(claimed_at + timedelta(seconds=self.lease_seconds))
+        due = """
+            (
+                cancel_requested = 0 AND (
+                    (status = 'queued' AND (next_run_at IS NULL OR next_run_at <= :now))
+                    OR (status = 'retry_wait' AND next_run_at IS NOT NULL AND next_run_at <= :now)
+                )
+            )
+            OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= :now)
+        """
+        sql = f"""
+            UPDATE jobs
+            SET status = CASE WHEN cancel_requested = 1 THEN :cancelled ELSE :running END,
+                attempt = CASE WHEN cancel_requested = 1 THEN attempt ELSE attempt + 1 END,
+                lease_owner = CASE WHEN cancel_requested = 1 THEN NULL ELSE :owner END,
+                lease_until = CASE WHEN cancel_requested = 1 THEN NULL ELSE :lease_until END,
+                heartbeat_at = CASE WHEN cancel_requested = 1 THEN NULL ELSE :now END,
+                cancel_requested = 0,
+                updated_at = :now
+            WHERE job_id = (
+                SELECT job_id FROM jobs
+                WHERE {due}
+                ORDER BY COALESCE(next_run_at, lease_until, created_at), created_at, job_id
+                LIMIT 1
+            )
+            AND {due}
+            RETURNING *
+        """
+        parameters = {
+            "cancelled": JobStatus.CANCELLED.value,
+            "running": JobStatus.RUNNING.value,
+            "owner": owner,
+            "lease_until": lease_until,
+            "now": claimed_iso,
+        }
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                row = await self._fetchone(connection, sql, parameters)
+                if row is None or row["status"] == JobStatus.CANCELLED.value:
+                    return None
+                return self._row_to_job(row)
+
+    async def renew_lease(self, job_id: str, owner: str, now: datetime) -> Job:
+        renewed_at = _require_aware(now, "now")
+        renewed_iso = _to_iso(renewed_at)
+        lease_until = _to_iso(renewed_at + timedelta(seconds=self.lease_seconds))
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                row = await self._fetchone(
+                    connection,
+                    """
+                    UPDATE jobs
+                    SET lease_until = ?, heartbeat_at = ?, updated_at = ?
+                    WHERE job_id = ? AND status = ? AND lease_owner = ?
+                        AND lease_until > ? AND cancel_requested = 0
+                    RETURNING *
+                    """,
+                    (
+                        lease_until,
+                        renewed_iso,
+                        renewed_iso,
+                        job_id,
+                        JobStatus.RUNNING.value,
+                        owner,
+                        renewed_iso,
+                    ),
+                )
+                if row is not None:
+                    return self._row_to_job(row)
+                current = await self._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+                if current is None:
+                    raise KeyError(f"unknown job: {job_id}")
+                if current["lease_owner"] != owner:
+                    raise PermissionError("lease owner does not match")
+                raise PermissionError("job has no active lease")
+
+    async def checkpoint_step(self, job: Job, step: JobStep) -> None:
+        if step.job_id != job.job_id:
+            raise ValueError("job and checkpoint must refer to the same job_id")
+        if job.lease_owner is None:
+            raise PermissionError("checkpoint requires a lease owner")
+        checkpoint_at = datetime.now(UTC)
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                current = await self._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job.job_id,))
+                if current is None:
+                    raise KeyError(f"unknown job: {job.job_id}")
+                if current["status"] != JobStatus.RUNNING.value or current["lease_owner"] != job.lease_owner:
+                    raise PermissionError("checkpoint requires the active lease owner")
+
+                await connection.execute(
+                    """
+                    INSERT INTO job_steps (
+                        job_id, stage, status, output_manifest, output_checksum, model, elapsed_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(job_id, stage) DO UPDATE SET
+                        status = excluded.status,
+                        output_manifest = excluded.output_manifest,
+                        output_checksum = excluded.output_checksum,
+                        model = excluded.model,
+                        elapsed_ms = excluded.elapsed_ms
+                    """,
+                    (
+                        step.job_id,
+                        step.stage.value,
+                        step.status.value,
+                        step.output_manifest,
+                        step.output_checksum,
+                        step.model,
+                        step.elapsed_ms,
+                    ),
+                )
+                if current["cancel_requested"]:
+                    await connection.execute(
+                        """
+                        UPDATE jobs
+                        SET status = ?, stage = ?, lease_owner = NULL, lease_until = NULL,
+                            heartbeat_at = NULL, cancel_requested = 0, updated_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (JobStatus.CANCELLED.value, step.stage.value, _to_iso(checkpoint_at), job.job_id),
+                    )
+                else:
+                    await connection.execute(
+                        "UPDATE jobs SET stage = ?, updated_at = ? WHERE job_id = ?",
+                        (step.stage.value, _to_iso(checkpoint_at), job.job_id),
+                    )
+
+    async def schedule_retry(
+        self,
+        job_id: str,
+        owner: str,
+        next_run_at: datetime,
+        error: str,
+        *,
+        now: datetime | None = None,
+    ) -> Job:
+        retry_at = _require_aware(next_run_at, "next_run_at")
+        scheduled_at = _require_aware(now or datetime.now(UTC), "now")
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                row = await self._fetchone(
+                    connection,
+                    """
+                    UPDATE jobs
+                    SET status = ?, next_run_at = ?, lease_owner = NULL, lease_until = NULL,
+                        heartbeat_at = NULL, last_error = ?, updated_at = ?
+                    WHERE job_id = ? AND status = ? AND lease_owner = ? AND cancel_requested = 0
+                    RETURNING *
+                    """,
+                    (
+                        JobStatus.RETRY_WAIT.value,
+                        _to_iso(retry_at),
+                        error,
+                        _to_iso(scheduled_at),
+                        job_id,
+                        JobStatus.RUNNING.value,
+                        owner,
+                    ),
+                )
+                if row is not None:
+                    return self._row_to_job(row)
+                await self._raise_lease_error(connection, job_id, owner)
+                raise AssertionError("unreachable")
+
+    async def request_cancel(self, job_id: str, now: datetime) -> Job:
+        requested_at = _require_aware(now, "now")
+        requested_iso = _to_iso(requested_at)
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                row = await self._fetchone(
+                    connection,
+                    """
+                    UPDATE jobs
+                    SET status = CASE
+                            WHEN status IN ('queued', 'retry_wait') THEN 'cancelled'
+                            WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
+                            ELSE status
+                        END,
+                        cancel_requested = CASE
+                            WHEN status = 'running' AND lease_until > ? THEN 1
+                            ELSE 0
+                        END,
+                        lease_owner = CASE
+                            WHEN status IN ('queued', 'retry_wait')
+                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                            THEN NULL ELSE lease_owner
+                        END,
+                        lease_until = CASE
+                            WHEN status IN ('queued', 'retry_wait')
+                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                            THEN NULL ELSE lease_until
+                        END,
+                        heartbeat_at = CASE
+                            WHEN status IN ('queued', 'retry_wait')
+                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                            THEN NULL ELSE heartbeat_at
+                        END,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    RETURNING *
+                    """,
+                    (
+                        requested_iso,
+                        requested_iso,
+                        requested_iso,
+                        requested_iso,
+                        requested_iso,
+                        requested_iso,
+                        job_id,
+                    ),
+                )
+                if row is None:
+                    raise KeyError(f"unknown job: {job_id}")
+                return self._row_to_job(row)
+
+    async def soft_delete_asset(self, asset_id: str, now: datetime) -> Asset:
+        deleted_at = _require_aware(now, "now")
+        deleted_iso = _to_iso(deleted_at)
+
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                await connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = CASE
+                            WHEN status IN ('queued', 'retry_wait') THEN 'cancelled'
+                            WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
+                            ELSE status
+                        END,
+                        cancel_requested = CASE
+                            WHEN status = 'running' AND lease_until > ? THEN 1
+                            ELSE cancel_requested
+                        END,
+                        lease_owner = CASE
+                            WHEN status IN ('queued', 'retry_wait')
+                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                            THEN NULL ELSE lease_owner
+                        END,
+                        lease_until = CASE
+                            WHEN status IN ('queued', 'retry_wait')
+                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                            THEN NULL ELSE lease_until
+                        END,
+                        heartbeat_at = CASE
+                            WHEN status IN ('queued', 'retry_wait')
+                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                            THEN NULL ELSE heartbeat_at
+                        END,
+                        updated_at = ?
+                    WHERE asset_id = ? AND status IN ('queued', 'retry_wait', 'running')
+                    """,
+                    (
+                        deleted_iso,
+                        deleted_iso,
+                        deleted_iso,
+                        deleted_iso,
+                        deleted_iso,
+                        deleted_iso,
+                        asset_id,
+                    ),
+                )
+                row = await self._fetchone(
+                    connection,
+                    """
+                    UPDATE assets
+                    SET status = ?, deleted_at = COALESCE(deleted_at, ?), updated_at = ?
+                    WHERE asset_id = ?
+                    RETURNING *
+                    """,
+                    (AssetStatus.DELETED.value, deleted_iso, deleted_iso, asset_id),
+                )
+                if row is None:
+                    raise KeyError(f"unknown asset: {asset_id}")
+                return self._row_to_asset(row)
+
+    @staticmethod
+    async def _fetchone(
+        connection: aiosqlite.Connection,
+        sql: str,
+        parameters: tuple[Any, ...] | Mapping[str, Any] = (),
+    ) -> aiosqlite.Row | None:
+        cursor = await connection.execute(sql, parameters)
+        try:
+            return await cursor.fetchone()
+        finally:
+            await cursor.close()
+
+    @staticmethod
+    async def _raise_lease_error(connection: aiosqlite.Connection, job_id: str, owner: str) -> None:
+        current = await JobRepository._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        if current is None:
+            raise KeyError(f"unknown job: {job_id}")
+        if current["lease_owner"] != owner:
+            raise PermissionError("lease owner does not match")
+        raise PermissionError("job has no active lease")
+
+    @staticmethod
+    def _asset_parameters(asset: Asset) -> tuple[Any, ...]:
+        return (
+            asset.asset_id,
+            asset.display_filename,
+            asset.safe_filename,
+            asset.size_bytes,
+            asset.sha256,
+            asset.mime_type,
+            asset.source_extension,
+            asset.duration_ms,
+            asset.width,
+            asset.height,
+            _to_iso(asset.timeline_origin, "asset.timeline_origin"),
+            asset.status.value,
+            asset.current_job_id,
+            _to_iso(asset.created_at, "asset.created_at"),
+            _to_iso(asset.updated_at, "asset.updated_at"),
+            _to_iso(asset.deleted_at, "asset.deleted_at"),
+        )
+
+    @staticmethod
+    def _job_parameters(job: Job) -> tuple[Any, ...]:
+        snapshot = job.model_dump(mode="json")["config_snapshot"]
+        return (
+            job.job_id,
+            job.asset_id,
+            job.pipeline_version,
+            job.status.value,
+            job.stage.value if job.stage else None,
+            job.attempt,
+            _to_iso(job.next_run_at, "job.next_run_at"),
+            job.lease_owner,
+            _to_iso(job.lease_until, "job.lease_until"),
+            _to_iso(job.heartbeat_at, "job.heartbeat_at"),
+            _json_snapshot(snapshot),
+            job.last_error,
+            _to_iso(job.created_at, "job.created_at"),
+            _to_iso(job.updated_at, "job.updated_at"),
+        )
+
+    @staticmethod
+    def _row_to_upload_session(row: aiosqlite.Row) -> UploadSession:
+        return UploadSession(
+            session_id=row["session_id"],
+            identifier=row["identifier"],
+            asset_id=row["asset_id"],
+            total_chunks=row["total_chunks"],
+            received_chunks=row["received_chunks"],
+            filename=row["filename"],
+            temp_dir=row["temp_dir"],
+            status=AssetStatus(row["status"]),
+            expires_at=_from_iso(row["expires_at"]),
+        )
+
+    @staticmethod
+    def _row_to_job(row: aiosqlite.Row) -> Job:
+        return Job(
+            job_id=row["job_id"],
+            asset_id=row["asset_id"],
+            pipeline_version=row["pipeline_version"],
+            status=JobStatus(row["status"]),
+            stage=JobStage(row["stage"]) if row["stage"] else None,
+            attempt=row["attempt"],
+            next_run_at=_from_iso(row["next_run_at"]),
+            lease_owner=row["lease_owner"],
+            lease_until=_from_iso(row["lease_until"]),
+            heartbeat_at=_from_iso(row["heartbeat_at"]),
+            config_snapshot=json.loads(row["config_snapshot"]),
+            last_error=row["last_error"],
+            created_at=_from_iso(row["created_at"]),
+            updated_at=_from_iso(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_asset(row: aiosqlite.Row) -> Asset:
+        return Asset(
+            asset_id=row["asset_id"],
+            display_filename=row["display_filename"],
+            safe_filename=row["safe_filename"],
+            size_bytes=row["size_bytes"],
+            sha256=row["sha256"],
+            mime_type=row["mime_type"],
+            source_extension=row["source_extension"],
+            duration_ms=row["duration_ms"],
+            width=row["width"],
+            height=row["height"],
+            timeline_origin=_from_iso(row["timeline_origin"]),
+            status=AssetStatus(row["status"]),
+            current_job_id=row["current_job_id"],
+            created_at=_from_iso(row["created_at"]),
+            updated_at=_from_iso(row["updated_at"]),
+            deleted_at=_from_iso(row["deleted_at"]),
+        )
