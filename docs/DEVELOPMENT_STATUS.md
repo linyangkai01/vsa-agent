@@ -6,7 +6,7 @@ Last updated: 2026-07-12
 
 - Active OpenSpec change: `production-recorded-video-ingest`.
 - Active branch: `codex/production-recorded-video-ingest`.
-- Phase: design is approved; the detailed implementation plan is being prepared before code changes.
+- Phase: design is approved and the detailed implementation plan is ready for execution-mode selection.
 - Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
@@ -54,8 +54,9 @@ Result: valid before archive.
 
 ## Active Change
 
-- `production-recorded-video-ingest`: OpenSpec proposal/spec/design/tasks and the Chinese Superpowers design document are approved; implementation planning is active.
+- `production-recorded-video-ingest`: OpenSpec and Chinese design artifacts are approved; the 24-task TDD implementation plan is ready for Comet execution-mode selection.
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
+- Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
 - No implementation code has been started for this change.
 
 ## Active Runtime Validation
@@ -72,4 +73,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-Complete and review the `production-recorded-video-ingest` Superpowers implementation plan, then choose isolation, execution, TDD and review modes before writing code.
+Choose whether to continue from the Comet plan-ready gate; if continuing, select isolation, execution, TDD and review modes before writing code.
