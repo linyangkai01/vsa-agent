@@ -18,7 +18,7 @@ verification_report: docs/superpowers/reports/2026-07-13-enforce-python-quality-
 branch_status: handled
 created_at: 2026-07-13
 verified_at: 2026-07-13
-archived: false
+archived: true
 direct_override: null
 handoff_context: openspec/changes/enforce-python-quality-baseline/.comet/handoff/design-context.json
 handoff_hash: f1c9f30bee5756105372337bdfc586162f035960ccbf80cafb99e8cd748d2f96
