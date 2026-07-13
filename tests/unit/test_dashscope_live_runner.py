@@ -7,18 +7,32 @@ import pytest
 
 from vsa_agent.config import AppConfig, resolve_runtime_config
 
+SHARED_RUNTIME = Path("scripts/lib/dashscope_runtime.sh")
+RUNNERS = (
+    Path("scripts/run_live_acceptance_dashscope.sh"),
+    Path("scripts/run_live_top_agent_video_dashscope.sh"),
+)
 
-def _assert_key_guard_precedes_config_resolution(script: Path) -> None:
-    text = script.read_text(encoding="utf-8")
+
+def test_dashscope_runners_share_one_runtime_preflight():
+    shared_text = SHARED_RUNTIME.read_text(encoding="utf-8")
     guard = 'if [[ -z "${DASHSCOPE_API_KEY:-}" ]]; then'
 
-    assert guard in text
-    assert text.index(guard) < text.index('conda run -n "${VSA_CONDA_ENV}" python -m vsa_agent config doctor')
+    assert "vsa_dashscope_preflight()" in shared_text
+    assert guard in shared_text
+    assert shared_text.index(guard) < shared_text.index(
+        'conda run -n "${VSA_CONDA_ENV}" python -m vsa_agent config doctor'
+    )
+    assert "resolve_runtime_config" in shared_text
+    assert "VSA_RESOLVED_LLM_API_KEY" in shared_text
 
-
-def test_dashscope_runners_check_key_before_config_resolution():
-    _assert_key_guard_precedes_config_resolution(Path("scripts/run_live_acceptance_dashscope.sh"))
-    _assert_key_guard_precedes_config_resolution(Path("scripts/run_live_top_agent_video_dashscope.sh"))
+    for runner in RUNNERS:
+        text = runner.read_text(encoding="utf-8")
+        assert 'source "${SCRIPT_DIR}/lib/dashscope_runtime.sh"' in text
+        assert "vsa_dashscope_preflight" in text
+        assert guard not in text
+        assert "config doctor" not in text
+        assert "resolve_runtime_config" not in text
 
 
 def test_dashscope_live_config_defines_non_secret_llm_and_vlm_defaults(monkeypatch):
@@ -48,9 +62,6 @@ def test_dashscope_runner_exists_and_is_executable_text():
     assert "config_live_dashscope.yaml" not in text
     assert "VSA_PROFILE" in text
     assert "LIVE_API_MODEL" in text
-    assert "config doctor" in text
-    assert "config print" in text
-    assert "resolve_runtime_config" in text
     assert "tests/acceptance/test_evaluator_live_api.py" in text
 
 
@@ -65,8 +76,6 @@ def test_dashscope_top_agent_video_runner_exists_and_configures_live_env():
     assert "config.yaml" in text
     assert "config_live_dashscope.yaml" not in text
     assert "VSA_PROFILE" in text
-    assert "config doctor" in text
-    assert "config print" in text
     assert "OPENAI_API_KEY" in text
     assert "python -m vsa_agent.live_video_acceptance" in text
     assert "VSA_LIVE_VIDEO_MODE" in text
