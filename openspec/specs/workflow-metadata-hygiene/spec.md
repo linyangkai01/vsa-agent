@@ -18,4 +18,3 @@ Removing stale workflow metadata MUST NOT delete, rename, or change a supported 
 - **WHEN** a developer reviews the runtime script inventory and server sync manifest after metadata cleanup
 - **THEN** every supported script entry remains present
 - **AND** the archived change reference continues to point to the archive location
-
