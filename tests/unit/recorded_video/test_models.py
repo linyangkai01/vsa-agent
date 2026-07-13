@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -140,7 +141,109 @@ def test_job_requires_non_empty_pipeline_version_and_is_frozen() -> None:
         job.status = JobStatus.RUNNING
 
 
+def test_pipeline_versions_are_stripped_and_reject_blank_values() -> None:
+    for pipeline_version in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError):
+            Job(
+                job_id="job-1",
+                asset_id="asset-1",
+                pipeline_version=pipeline_version,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        with pytest.raises(ValueError):
+            Segment(
+                segment_id="segment-1",
+                asset_id="asset-1",
+                pipeline_version=pipeline_version,
+                ordinal=0,
+                start_offset_ms=0,
+                end_offset_ms=1,
+                start_time=NOW,
+                end_time=NOW,
+            )
+
+    job = Job(
+        job_id="job-1",
+        asset_id="asset-1",
+        pipeline_version="  pipeline-v1  ",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    segment = Segment(
+        segment_id="segment-1",
+        asset_id="asset-1",
+        pipeline_version="  pipeline-v1  ",
+        ordinal=0,
+        start_offset_ms=0,
+        end_offset_ms=1,
+        start_time=NOW,
+        end_time=NOW,
+    )
+
+    assert job.pipeline_version == "pipeline-v1"
+    assert segment.pipeline_version == "pipeline-v1"
+
+
+def test_job_config_snapshot_is_recursively_immutable_and_json_round_trips() -> None:
+    default_job = Job(
+        job_id="job-default",
+        asset_id="asset-1",
+        pipeline_version="v1",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    with pytest.raises(TypeError):
+        default_job.config_snapshot["new"] = True
+
+    source = {
+        "pipeline": {
+            "models": [{"name": "vision-v1", "dimensions": [128, 256]}],
+        },
+    }
+    job = Job(
+        job_id="job-1",
+        asset_id="asset-1",
+        pipeline_version="v1",
+        config_snapshot=source,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    source["pipeline"]["models"][0]["name"] = "mutated"
+    with pytest.raises(TypeError):
+        job.config_snapshot["new"] = True
+    with pytest.raises(TypeError):
+        job.config_snapshot["pipeline"]["enabled"] = True
+    with pytest.raises(AttributeError):
+        job.config_snapshot["pipeline"]["models"].append({"name": "other"})
+    with pytest.raises(TypeError):
+        job.config_snapshot["pipeline"]["models"][0]["name"] = "other"
+
+    transitioned = transition_job(job, JobStatus.RUNNING)
+    with pytest.raises(TypeError):
+        transitioned.config_snapshot["pipeline"]["models"][0]["name"] = "other"
+
+    dumped = transitioned.model_dump(mode="json")
+    assert dumped["config_snapshot"] == {
+        "pipeline": {
+            "models": [{"name": "vision-v1", "dimensions": [128, 256]}],
+        },
+    }
+    assert json.loads(json.dumps(dumped)) == dumped
+    restored = Job.model_validate(dumped)
+    assert restored.model_dump(mode="json") == dumped
+    with pytest.raises(AttributeError):
+        restored.config_snapshot["pipeline"]["models"].append({"name": "other"})
+
+    python_dump = transitioned.model_dump()
+    assert python_dump["config_snapshot"] == dumped["config_snapshot"]
+    assert Job.model_validate(python_dump).model_dump(mode="json") == dumped
+
+
 def test_job_transition_table_is_deeply_immutable() -> None:
+    with pytest.raises(TypeError):
+        ALLOWED_JOB_TRANSITIONS[JobStatus.QUEUED] = frozenset()
     with pytest.raises((TypeError, AttributeError)):
         ALLOWED_JOB_TRANSITIONS[JobStatus.QUEUED].add(JobStatus.COMPLETED)
 
@@ -222,6 +325,21 @@ def test_domain_models_expose_persistable_recorded_video_fields() -> None:
     assert segment.end_offset_ms == 30_000
 
 
+def test_publish_job_step_json_round_trips() -> None:
+    step = JobStep(
+        job_id="job-1",
+        stage=JobStage.PUBLISH,
+        status=JobStatus.COMPLETED,
+        output_manifest="derived/v1/publish-manifest.json",
+        output_checksum="c" * 64,
+        elapsed_ms=50,
+    )
+
+    dumped = step.model_dump(mode="json")
+    assert dumped["stage"] == "publish"
+    assert JobStep.model_validate_json(step.model_dump_json()).stage is JobStage.PUBLISH
+
+
 @pytest.mark.parametrize(
     "factory",
     [
@@ -255,6 +373,138 @@ def test_persisted_datetimes_must_be_timezone_aware(factory) -> None:
         factory()
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: Job(
+            job_id="job-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            created_at=datetime(2026, 7, 12, 8, 30),
+            updated_at=NOW,
+        ),
+        lambda: Job(
+            job_id="job-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            created_at=NOW,
+            updated_at=datetime(2026, 7, 12, 8, 30),
+        ),
+        lambda: Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=0,
+            start_offset_ms=0,
+            end_offset_ms=1,
+            start_time=datetime(2026, 7, 12, 8, 30),
+            end_time=NOW,
+        ),
+        lambda: Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=0,
+            start_offset_ms=0,
+            end_offset_ms=1,
+            start_time=NOW,
+            end_time=datetime(2026, 7, 12, 8, 30),
+        ),
+    ],
+)
+def test_job_and_segment_datetimes_must_be_timezone_aware(factory) -> None:
+    with pytest.raises(ValueError):
+        factory()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: Asset(
+            asset_id="asset-1",
+            display_filename="video.mp4",
+            safe_filename="video.mp4",
+            size_bytes=-1,
+            sha256="a" * 64,
+            mime_type="video/mp4",
+            source_extension="mp4",
+            timeline_origin=NOW,
+            status=AssetStatus.READY,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        lambda: UploadSession(
+            session_id="session-1",
+            identifier="id",
+            asset_id="asset-1",
+            total_chunks=0,
+            filename="video.mp4",
+            temp_dir="tmp",
+            status=AssetStatus.UPLOADING,
+            expires_at=NOW,
+        ),
+        lambda: UploadSession(
+            session_id="session-1",
+            identifier="id",
+            asset_id="asset-1",
+            total_chunks=1,
+            received_chunks=-1,
+            filename="video.mp4",
+            temp_dir="tmp",
+            status=AssetStatus.UPLOADING,
+            expires_at=NOW,
+        ),
+        lambda: Job(
+            job_id="job-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            attempt=-1,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        lambda: JobStep(
+            job_id="job-1",
+            stage=JobStage.PROBING,
+            status=JobStatus.RUNNING,
+            elapsed_ms=-1,
+        ),
+        lambda: Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=-1,
+            start_offset_ms=0,
+            end_offset_ms=1,
+            start_time=NOW,
+            end_time=NOW,
+        ),
+        lambda: Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=0,
+            start_offset_ms=-1,
+            end_offset_ms=1,
+            start_time=NOW,
+            end_time=NOW,
+        ),
+        lambda: Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=0,
+            start_offset_ms=0,
+            end_offset_ms=-1,
+            start_time=NOW,
+            end_time=NOW,
+        ),
+    ],
+)
+def test_persistable_models_reject_negative_counts_and_offsets(factory) -> None:
+    with pytest.raises(ValueError):
+        factory()
+
+
 def test_persistable_models_reject_invalid_numeric_and_cross_field_values() -> None:
     with pytest.raises(ValueError):
         UploadSession(
@@ -278,4 +528,15 @@ def test_persistable_models_reject_invalid_numeric_and_cross_field_values() -> N
             end_offset_ms=10,
             start_time=NOW,
             end_time=NOW,
+        )
+    with pytest.raises(ValueError):
+        Segment(
+            segment_id="segment-1",
+            asset_id="asset-1",
+            pipeline_version="v1",
+            ordinal=0,
+            start_offset_ms=0,
+            end_offset_ms=10,
+            start_time=NOW,
+            end_time=datetime(2026, 7, 12, 8, 29, tzinfo=UTC),
         )

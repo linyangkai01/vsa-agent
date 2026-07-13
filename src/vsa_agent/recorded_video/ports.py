@@ -25,7 +25,9 @@ class AssetStore(Protocol):
 
 @runtime_checkable
 class JobRepository(Protocol):
-    async def claim_due_job(self, owner: str, now: datetime) -> Job | None: ...
+    async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
+        """Claim a due job using the caller's timezone-aware ``now`` clock."""
+        ...
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None: ...
 

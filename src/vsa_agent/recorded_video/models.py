@@ -6,9 +6,19 @@ import uuid
 from collections.abc import Mapping
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PlainSerializer,
+    StringConstraints,
+    model_validator,
+)
 
 from vsa_agent.recorded_video.errors import InvalidStateTransition
 
@@ -38,6 +48,52 @@ class JobStage(str, Enum):
     ANALYZING = "analyzing"
     EMBEDDING = "embedding"
     INDEXING = "indexing"
+    PUBLISH = "publish"
+
+
+class _FrozenDict(Mapping[str, Any]):
+    """Read-only mapping used inside persisted configuration snapshots."""
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        self._values = dict(values)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def _freeze_json(value: JsonValue) -> Any:
+    if isinstance(value, Mapping):
+        return _FrozenDict({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _serialize_frozen_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _serialize_frozen_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_serialize_frozen_json(item) for item in value]
+    return value
+
+
+ConfigSnapshot = Annotated[
+    dict[str, JsonValue],
+    AfterValidator(_freeze_json),
+    PlainSerializer(
+        _serialize_frozen_json,
+        return_type=dict[str, JsonValue],
+    ),
+]
+PipelineVersion = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class Asset(BaseModel):
@@ -82,7 +138,7 @@ class Job(BaseModel):
 
     job_id: str
     asset_id: str
-    pipeline_version: str = Field(min_length=1)
+    pipeline_version: PipelineVersion
     status: JobStatus = JobStatus.QUEUED
     stage: JobStage | None = None
     attempt: int = Field(default=0, ge=0)
@@ -90,7 +146,7 @@ class Job(BaseModel):
     lease_owner: str | None = None
     lease_until: AwareDatetime | None = None
     heartbeat_at: AwareDatetime | None = None
-    config_snapshot: dict[str, Any] = Field(default_factory=dict)
+    config_snapshot: ConfigSnapshot = Field(default_factory=lambda: _FrozenDict({}))
     last_error: str | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
@@ -109,7 +165,7 @@ class JobStep(BaseModel):
 class Segment(BaseModel):
     segment_id: str
     asset_id: str
-    pipeline_version: str = Field(min_length=1)
+    pipeline_version: PipelineVersion
     ordinal: int = Field(ge=0)
     start_offset_ms: int = Field(ge=0)
     end_offset_ms: int = Field(ge=0)

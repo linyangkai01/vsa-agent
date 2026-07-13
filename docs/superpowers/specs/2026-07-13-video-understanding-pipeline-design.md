@@ -2,6 +2,8 @@
 comet_change: refactor-video-understanding-pipeline
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-13-refactor-video-understanding-pipeline
+status: final
 ---
 
 # 视频理解管线重构技术设计

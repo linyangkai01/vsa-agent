@@ -2,6 +2,7 @@
 change: refactor-video-understanding-pipeline
 design-doc: docs/superpowers/specs/2026-07-13-video-understanding-pipeline-design.md
 base-ref: e06300d2a99dc790de4203d4e2d5de561e773bb1
+archived-with: 2026-07-13-refactor-video-understanding-pipeline
 ---
 
 # 视频理解管线重构 Implementation Plan
@@ -22,6 +23,7 @@ base-ref: e06300d2a99dc790de4203d4e2d5de561e773bb1
 - 纯模块不得依赖 cv2、网络、全局配置或 trace/artifact I/O。
 - `frontend/original-ui` 不在范围内。
 
+archived-with: 2026-07-13-refactor-video-understanding-pipeline
 ---
 
 ### Task 1: 锁定纯规范化模块契约
