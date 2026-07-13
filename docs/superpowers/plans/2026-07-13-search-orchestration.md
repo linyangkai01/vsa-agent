@@ -98,13 +98,13 @@ Run: `git add src/vsa_agent/tools/search.py src/vsa_agent/tools/search_pipeline.
 - Consumes: 新纯规则模块与稳定 facade。
 - Produces: 工具、agent、API、acceptance 与全仓证据。
 
-- [ ] **Step 1: 运行搜索路径矩阵**
+- [x] **Step 1: 运行搜索路径矩阵**
 
 Run: `pytest -q tests/unit/tools/test_search_pipeline.py tests/unit/tools/test_search.py tests/unit/tools/test_embed_search.py tests/unit/tools/test_attribute_search.py tests/unit/agents/test_search_agent.py tests/unit/api/test_original_ui_search_route.py tests/acceptance/test_search_flow.py`
 
 Expected: attribute-only、embed-only、fusion、critic、低置信度、空结果与异常降级全部通过。
 
-- [ ] **Step 2: 运行仓库门禁**
+- [x] **Step 2: 运行仓库门禁**
 
 Run: `python -m compileall -q src tests`
 
@@ -116,7 +116,7 @@ Run: `pytest -q`
 
 Expected: compileall 与 Ruff 通过，全量 pytest 无失败。
 
-- [ ] **Step 3: 更新状态并提交**
+- [x] **Step 3: 更新状态并提交**
 
 记录纯规则边界、保留的 facade/critic/日志行为和测试计数；勾选 OpenSpec 与计划任务，记录未授权多代理 reviewer。
 

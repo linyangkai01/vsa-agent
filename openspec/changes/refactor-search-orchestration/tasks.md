@@ -19,5 +19,7 @@
 ## 4. 集成与验证
 
 - [x] 4.1 将 `execute_core_search` 收敛为阶段协调 facade，保持公共 import、注册入口和进度输出顺序。
-- [ ] 4.2 运行 search/embed/attribute 工具、search agent、API 与 acceptance 测试。
-- [ ] 4.3 运行 Ruff 门禁和全量 `pytest -q`，并更新 `docs/DEVELOPMENT_STATUS.md` 的架构与验证状态。
+- [x] 4.2 运行 search/embed/attribute 工具、search agent、API 与 acceptance 测试。
+- [x] 4.3 运行 Ruff 门禁和全量 `pytest -q`，并更新 `docs/DEVELOPMENT_STATUS.md` 的架构与验证状态。
+
+<!-- review skipped: multi-agent execution was not authorized for this run -->
