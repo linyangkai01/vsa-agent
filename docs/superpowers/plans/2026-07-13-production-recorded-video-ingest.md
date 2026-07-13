@@ -88,7 +88,7 @@ class RecordedVideoConfig(BaseModel):
 **Interfaces:**
 - Produces: `AssetStatus`, `JobStatus`, `JobStage`, `Asset`, `UploadSession`, `Job`, `JobStep`, `Segment`, `RecordedVideoError(code, retryable)`；`transition_job(job, target) -> Job`；`AssetStore`、`JobRepository`、`Segmenter`、`VisionProvider`、`EmbeddingProvider`、`SearchProjectionStore`。
 
-- [ ] **Step 1: 写非法迁移和协议可替换性测试。**
+- [x] **Step 1: 写非法迁移和协议可替换性测试。**
 ```python
 def test_running_job_cannot_return_to_queued_and_segment_id_is_stable():
     with pytest.raises(InvalidStateTransition): transition_job(job(JobStatus.RUNNING), JobStatus.QUEUED)
@@ -97,8 +97,8 @@ def test_running_job_cannot_return_to_queued_and_segment_id_is_stable():
 def test_projection_store_is_a_structural_port():
     assert isinstance(FakeProjectionStore(), SearchProjectionStore)
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py -q`。Expected: FAIL，模块或协议不存在。
-- [ ] **Step 3: 实现受限状态图和先行端口。**
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py -q`。Expected: FAIL，模块或协议不存在。
+- [x] **Step 3: 实现受限状态图和先行端口。**
 ```python
 ALLOWED_JOB_TRANSITIONS = {QUEUED:{RUNNING,CANCELLED}, RUNNING:{COMPLETED,RETRY_WAIT,FAILED,CANCELLED}, RETRY_WAIT:{QUEUED}, COMPLETED:set(), FAILED:set(), CANCELLED:set()}
 def segment_id(asset_id: str, pipeline_version: str, ordinal: int) -> str:
@@ -111,8 +111,8 @@ class SearchProjectionStore(Protocol):
 ```
 同一文件定义 `ProjectionResult(indexed_ids: list[str], failed_ids: list[str])`，并用 `Protocol` 定义其余端口的最小方法：`AssetStore.write_chunk/assemble_source`、`JobRepository.claim_due_job/checkpoint_step`、`Segmenter.plan`、`VisionProvider.describe`、`EmbeddingProvider.embed`。定义永久错误 `CORRUPT_MEDIA/UNSUPPORTED_MEDIA/FFMPEG_MISSING/CONFIGURATION/EMBEDDING_DIMENSION`，可重试错误 `MODEL_RATE_LIMIT/MODEL_TIMEOUT/MODEL_5XX/ES_TIMEOUT/ES_5XX`。
 `JobStage` 必须包含最终 `publish` 阶段；`Job.config_snapshot` 必须保持递归不可变且可 JSON 序列化，状态迁移副本不得共享可变配置。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/models.py src/vsa_agent/recorded_video/errors.py src/vsa_agent/recorded_video/ports.py tests/unit/recorded_video/__init__.py tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py && git commit -m "feat: define recorded video domain ports"`。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/models.py src/vsa_agent/recorded_video/errors.py src/vsa_agent/recorded_video/ports.py tests/unit/recorded_video/__init__.py tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py && git commit -m "feat: define recorded video domain ports"`。
 
 ### Task 3: SQLite WAL repository 与租约（OpenSpec 1.3）
 
