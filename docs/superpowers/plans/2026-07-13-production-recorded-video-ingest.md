@@ -58,7 +58,7 @@ base-ref: b3cbea8473da7f15fccebbd4a0aabb8e4c357676
 **Interfaces:**
 - Produces: `RecordedVideoConfig`、`ProviderRuntimeConfig`、`validate_recorded_video_runtime(config: AppConfig) -> ConfigDiagnostics`；`AppConfig.recorded_video: RecordedVideoConfig`。
 
-- [ ] **Step 1: 写出配置缺失/越界的失败测试。**
+- [x] **Step 1: 写出配置缺失/越界的失败测试。**
 ```python
 def test_production_recorded_video_rejects_mock_and_invalid_limits():
     with pytest.raises(ValidationError, match="max_upload_bytes"):
@@ -66,8 +66,8 @@ def test_production_recorded_video_rejects_mock_and_invalid_limits():
     with pytest.raises(ValueError, match="allow_mock_fallback"):
         validate_recorded_video_runtime(production_config(force_mock_embedding=True))
 ```
-- [ ] **Step 2: 运行失败测试。** Run: `pytest tests/unit/recorded_video/test_config.py -q`。Expected: FAIL，导入或验证器不存在。
-- [ ] **Step 3: 实现最小配置和依赖。**
+- [x] **Step 2: 运行失败测试。** Run: `pytest tests/unit/recorded_video/test_config.py -q`。Expected: FAIL，导入或验证器不存在。
+- [x] **Step 3: 实现最小配置和依赖。**
 ```python
 class RecordedVideoConfig(BaseModel):
     enabled: bool = False; data_root: Path = Path(".runtime/recorded-video")
@@ -77,8 +77,8 @@ class RecordedVideoConfig(BaseModel):
     lease_sec: int = Field(120, gt=0); max_attempts: int = Field(3, ge=1)
 ```
 在 `project.dependencies` 添加 `httpx>=0.28`、`aiosqlite>=0.21`，在 `project.optional-dependencies.dev` 添加 `pytest-httpserver>=1.1`；配置校验要求 production 的 `allow_mock_fallback=False`、`force_mock_embedding=False` 和 provider 凭据环境变量存在。`data_root` 的默认值保证既有 `AppConfig()` 无需调用方补值。
-- [ ] **Step 4: 运行配置测试。** Run: `pytest tests/unit/test_config.py tests/unit/recorded_video/test_config.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add pyproject.toml config.yaml src/vsa_agent/config.py tests/unit/test_config.py tests/unit/recorded_video/test_config.py && git commit -m "feat: add recorded video runtime configuration"`。
+- [x] **Step 4: 运行配置测试。** Run: `pytest tests/unit/test_config.py tests/unit/recorded_video/test_config.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add pyproject.toml config.yaml src/vsa_agent/config.py tests/unit/test_config.py tests/unit/recorded_video/test_config.py && git commit -m "feat: add recorded video runtime configuration"`。
 
 ### Task 2: 领域模型、状态机、错误分类和基础协议（OpenSpec 1.2、3.1）
 

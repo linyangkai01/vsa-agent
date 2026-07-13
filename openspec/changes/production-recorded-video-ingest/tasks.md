@@ -1,6 +1,6 @@
 ## 1. 配置、领域模型与持久层
 
-- [ ] 1.1 为 recorded-video、Worker、媒体工具、provider 和生产搜索增加配置模型、校验、环境变量解析及单元测试
+- [x] 1.1 为 recorded-video、Worker、媒体工具、provider 和生产搜索增加配置模型、校验、环境变量解析及单元测试
 - [ ] 1.2 定义 Asset、UploadSession、Job、JobStep、Segment 的领域模型、状态迁移和错误码，并为非法迁移编写测试
 - [ ] 1.3 实现 SQLite WAL schema、版本迁移和 repository 接口，覆盖原子任务领取、租约、心跳、检查点和并发测试
 - [ ] 1.4 实现基于 UUID 路径的 LocalAssetStore、原子发布、配额/磁盘检查、临时块回收和路径安全测试
