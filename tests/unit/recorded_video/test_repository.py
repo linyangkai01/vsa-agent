@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -335,6 +337,99 @@ async def test_complete_upload_rejects_nested_secret_keys_before_json_persistenc
     finally:
         connection.close()
     assert persisted_json == []
+
+
+@pytest.mark.parametrize(
+    "secret_key",
+    ["API Key", "authorizationHeader"],
+)
+@pytest.mark.asyncio
+async def test_complete_upload_rejects_normalized_secret_key_variants_before_json_persistence(
+    repo: JobRepository,
+    secret_key: str,
+):
+    session = _session()
+    await repo.create_upload_session(_asset(), session)
+    await _record_all_chunks(repo, session)
+
+    with pytest.raises(ValueError, match="secret-bearing config key"):
+        await repo.complete_upload(
+            "asset",
+            "v1",
+            now=NOW,
+            config_snapshot={"provider": {secret_key: "private-value"}},
+        )
+
+    connection = sqlite3.connect(repo.database_path)
+    try:
+        persisted_json = connection.execute("SELECT config_snapshot FROM jobs").fetchall()
+    finally:
+        connection.close()
+    assert persisted_json == []
+
+
+@pytest.mark.parametrize(
+    ("payload_key", "payload"),
+    [
+        ("image", "https://example.invalid/full-frame.png"),
+        ("image_url", "https://example.invalid/full-frame.png"),
+        ("payload", "data:image/png;base64,iVBORw0KGgo="),
+        ("payload", base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"image-bytes" * 8).decode()),
+        ("mediaPayload", base64.b64encode(b"\x00\x00\x00\x18ftypmp42" + b"video-bytes" * 8).decode()),
+    ],
+)
+@pytest.mark.asyncio
+async def test_complete_upload_rejects_image_and_media_payloads_before_json_persistence(
+    repo: JobRepository,
+    payload_key: str,
+    payload: str,
+):
+    session = _session()
+    await repo.create_upload_session(_asset(), session)
+    await _record_all_chunks(repo, session)
+
+    with pytest.raises(ValueError, match="image or media payload"):
+        await repo.complete_upload(
+            "asset",
+            "v1",
+            now=NOW,
+            config_snapshot={"pipeline": {payload_key: payload}},
+        )
+
+    connection = sqlite3.connect(repo.database_path)
+    try:
+        persisted_json = connection.execute("SELECT config_snapshot FROM jobs").fetchall()
+    finally:
+        connection.close()
+    assert persisted_json == []
+
+
+@pytest.mark.asyncio
+async def test_ordinary_write_paths_share_transaction_helper(repo: JobRepository, monkeypatch):
+    original_write_transaction = JobRepository._write_transaction
+    helper_calls = 0
+
+    @asynccontextmanager
+    async def tracked_write_transaction(self):
+        nonlocal helper_calls
+        helper_calls += 1
+        async with original_write_transaction(self) as connection:
+            yield connection
+
+    monkeypatch.setattr(JobRepository, "_write_transaction", tracked_write_transaction)
+
+    session = _session()
+    await repo.create_upload_session(_asset(), session)
+    await _record_all_chunks(repo, session)
+    await repo.complete_upload("asset", "v1", now=NOW)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+    await repo.checkpoint_step(
+        claimed,
+        JobStep(job_id=claimed.job_id, stage=JobStage.PROBING, status=JobStatus.RUNNING),
+    )
+
+    assert helper_calls == 6
 
 
 @pytest.mark.asyncio

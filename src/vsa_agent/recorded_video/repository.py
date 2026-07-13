@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -29,6 +32,30 @@ _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
 _SCHEMA_VERSION = 1
 _SECRET_KEY_PARTS = frozenset({"authorization", "credential", "credentials", "password", "secret", "token", "tokens"})
+_MEDIA_PAYLOAD_KEYS = frozenset(
+    {
+        "audio",
+        "audiobase64",
+        "audiodata",
+        "audiopayload",
+        "audiourl",
+        "image",
+        "imagebase64",
+        "imagedata",
+        "imagepayload",
+        "imageurl",
+        "media",
+        "mediabase64",
+        "mediadata",
+        "mediapayload",
+        "mediaurl",
+        "video",
+        "videobase64",
+        "videodata",
+        "videopayload",
+        "videourl",
+    }
+)
 
 _MIGRATION_1 = (
     """
@@ -158,21 +185,49 @@ def _from_iso(value: str | None) -> datetime | None:
 
 
 def _json_snapshot(snapshot: Mapping[str, Any]) -> str:
-    _reject_secret_keys(snapshot)
+    _validate_snapshot_metadata(snapshot)
     return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def _reject_secret_keys(value: Any, path: str = "config_snapshot") -> None:
+def _snapshot_key_parts(key: Any) -> tuple[str, ...]:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key))
+    normalized = re.sub(r"[^0-9A-Za-z]+", "_", separated).strip("_").lower()
+    return tuple(part for part in normalized.split("_") if part)
+
+
+def _is_encoded_media(value: str) -> bool:
+    encoded = "".join(value.split())
+    if encoded.lower().startswith("data:"):
+        return True
+    if len(encoded) < 16:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return (
+        decoded.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM"))
+        or decoded.startswith((b"II*\x00", b"MM\x00*", b"\x1aE\xdf\xa3"))
+        or decoded[:4] == b"RIFF"
+        or decoded[4:8] == b"ftyp"
+    )
+
+
+def _validate_snapshot_metadata(value: Any, path: str = "config_snapshot") -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            normalized = "_".join(part for part in str(key).lower().replace("-", "_").split("_") if part)
-            parts = normalized.split("_")
-            if any(part in _SECRET_KEY_PARTS for part in parts) or normalized.replace("_", "") == "apikey":
+            parts = _snapshot_key_parts(key)
+            canonical = "".join(parts)
+            if any(part in _SECRET_KEY_PARTS for part in parts) or canonical == "apikey":
                 raise ValueError(f"secret-bearing config key is not allowed: {path}.{key}")
-            _reject_secret_keys(item, f"{path}.{key}")
+            if canonical in _MEDIA_PAYLOAD_KEYS:
+                raise ValueError(f"image or media payload is not allowed: {path}.{key}")
+            _validate_snapshot_metadata(item, f"{path}.{key}")
     elif isinstance(value, list | tuple):
         for index, item in enumerate(value):
-            _reject_secret_keys(item, f"{path}[{index}]")
+            _validate_snapshot_metadata(item, f"{path}[{index}]")
+    elif isinstance(value, str) and _is_encoded_media(value):
+        raise ValueError(f"image or media payload is not allowed: {path}")
 
 
 class JobRepository:
@@ -264,50 +319,49 @@ class JobRepository:
         if asset.asset_id != session.asset_id:
             raise ValueError("asset and upload session must refer to the same asset_id")
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
+        async with self._write_transaction() as connection:
+            await connection.execute(
+                """
+                INSERT INTO assets (
+                    asset_id, display_filename, safe_filename, size_bytes, sha256, mime_type,
+                    source_extension, duration_ms, width, height, timeline_origin, status,
+                    current_job_id, created_at, updated_at, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id) DO NOTHING
+                """,
+                self._asset_parameters(asset),
+            )
+            try:
                 await connection.execute(
                     """
-                    INSERT INTO assets (
-                        asset_id, display_filename, safe_filename, size_bytes, sha256, mime_type,
-                        source_extension, duration_ms, width, height, timeline_origin, status,
-                        current_job_id, created_at, updated_at, deleted_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(asset_id) DO NOTHING
+                    INSERT INTO upload_sessions (
+                        session_id, identifier, asset_id, total_chunks, received_chunks,
+                        filename, temp_dir, status, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    self._asset_parameters(asset),
+                    (
+                        session.session_id,
+                        session.identifier,
+                        session.asset_id,
+                        session.total_chunks,
+                        session.received_chunks,
+                        session.filename,
+                        session.temp_dir,
+                        session.status.value,
+                        _to_iso(session.expires_at, "session.expires_at"),
+                    ),
                 )
-                try:
-                    await connection.execute(
-                        """
-                        INSERT INTO upload_sessions (
-                            session_id, identifier, asset_id, total_chunks, received_chunks,
-                            filename, temp_dir, status, expires_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            session.session_id,
-                            session.identifier,
-                            session.asset_id,
-                            session.total_chunks,
-                            session.received_chunks,
-                            session.filename,
-                            session.temp_dir,
-                            session.status.value,
-                            _to_iso(session.expires_at, "session.expires_at"),
-                        ),
-                    )
-                except sqlite3.IntegrityError:
-                    existing = await self._fetchone(
-                        connection,
-                        "SELECT * FROM upload_sessions WHERE identifier = ?",
-                        (session.identifier,),
-                    )
-                    if existing is None or (
-                        existing["session_id"] != session.session_id or existing["asset_id"] != session.asset_id
-                    ):
-                        raise
-                    return self._row_to_upload_session(existing)
+            except sqlite3.IntegrityError:
+                existing = await self._fetchone(
+                    connection,
+                    "SELECT * FROM upload_sessions WHERE identifier = ?",
+                    (session.identifier,),
+                )
+                if existing is None or (
+                    existing["session_id"] != session.session_id or existing["asset_id"] != session.asset_id
+                ):
+                    raise
+                return self._row_to_upload_session(existing)
         return session
 
     async def record_chunk(
@@ -479,25 +533,24 @@ class JobRepository:
             "now": claimed_iso,
         }
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                await connection.execute(
-                    """
-                    UPDATE jobs
-                    SET status = ?, updated_at = ?
-                    WHERE status = ? AND next_run_at IS NOT NULL AND next_run_at <= ?
-                    """,
-                    (
-                        JobStatus.QUEUED.value,
-                        claimed_iso,
-                        JobStatus.RETRY_WAIT.value,
-                        claimed_iso,
-                    ),
-                )
-                row = await self._fetchone(connection, sql, parameters)
-                if row is None or row["status"] == JobStatus.CANCELLED.value:
-                    return None
-                return self._row_to_job(row)
+        async with self._write_transaction() as connection:
+            await connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, updated_at = ?
+                WHERE status = ? AND next_run_at IS NOT NULL AND next_run_at <= ?
+                """,
+                (
+                    JobStatus.QUEUED.value,
+                    claimed_iso,
+                    JobStatus.RETRY_WAIT.value,
+                    claimed_iso,
+                ),
+            )
+            row = await self._fetchone(connection, sql, parameters)
+            if row is None or row["status"] == JobStatus.CANCELLED.value:
+                return None
+            return self._row_to_job(row)
 
     async def renew_lease(
         self,
@@ -544,75 +597,74 @@ class JobRepository:
             raise PermissionError("checkpoint requires a lease owner")
         checkpoint_at = self._now()
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                current = await self._require_active_lease(
-                    connection,
-                    job.job_id,
-                    job.lease_owner,
-                    job.attempt,
-                    checkpoint_at,
-                )
+        async with self._write_transaction() as connection:
+            current = await self._require_active_lease(
+                connection,
+                job.job_id,
+                job.lease_owner,
+                job.attempt,
+                checkpoint_at,
+            )
 
-                existing = await self._fetchone(
-                    connection,
-                    "SELECT * FROM job_steps WHERE job_id = ? AND stage = ?",
-                    (step.job_id, step.stage.value),
+            existing = await self._fetchone(
+                connection,
+                "SELECT * FROM job_steps WHERE job_id = ? AND stage = ?",
+                (step.job_id, step.stage.value),
+            )
+            incoming_values = (
+                step.status.value,
+                step.output_manifest,
+                step.output_checksum,
+                step.model,
+                step.elapsed_ms,
+            )
+            if existing is not None:
+                stored_values = (
+                    existing["status"],
+                    existing["output_manifest"],
+                    existing["output_checksum"],
+                    existing["model"],
+                    existing["elapsed_ms"],
                 )
-                incoming_values = (
-                    step.status.value,
-                    step.output_manifest,
-                    step.output_checksum,
-                    step.model,
-                    step.elapsed_ms,
-                )
-                if existing is not None:
-                    stored_values = (
-                        existing["status"],
-                        existing["output_manifest"],
-                        existing["output_checksum"],
-                        existing["model"],
-                        existing["elapsed_ms"],
-                    )
-                    if stored_values != incoming_values:
-                        raise ValueError(f"checkpoint conflict for {step.job_id}:{step.stage.value}")
-                else:
-                    current_stage = JobStage(current["stage"]) if current["stage"] else None
-                    if current_stage is not None and _STAGE_ORDER[step.stage] < _STAGE_ORDER[current_stage]:
-                        raise ValueError(f"stage regression from {current_stage.value} to {step.stage.value}")
+                if stored_values != incoming_values:
+                    raise ValueError(f"checkpoint conflict for {step.job_id}:{step.stage.value}")
+            else:
+                current_stage = JobStage(current["stage"]) if current["stage"] else None
+                if current_stage is not None and _STAGE_ORDER[step.stage] < _STAGE_ORDER[current_stage]:
+                    raise ValueError(f"stage regression from {current_stage.value} to {step.stage.value}")
 
-                    await connection.execute(
-                        """
-                        INSERT INTO job_steps (
-                            job_id, stage, status, output_manifest, output_checksum, model, elapsed_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            step.job_id,
-                            step.stage.value,
-                            step.status.value,
-                            step.output_manifest,
-                            step.output_checksum,
-                            step.model,
-                            step.elapsed_ms,
-                        ),
-                    )
-                if current["cancel_requested"]:
-                    persisted_stage = current["stage"] if existing is not None else step.stage.value
-                    await connection.execute(
-                        """
-                        UPDATE jobs
-                        SET status = ?, stage = ?, lease_owner = NULL, lease_until = NULL,
-                            heartbeat_at = NULL, cancel_requested = 0, updated_at = ?
-                        WHERE job_id = ?
-                        """,
-                        (JobStatus.CANCELLED.value, persisted_stage, _to_iso(checkpoint_at), job.job_id),
-                    )
-                elif existing is None:
-                    await connection.execute(
-                        "UPDATE jobs SET stage = ?, updated_at = ? WHERE job_id = ?",
-                        (step.stage.value, _to_iso(checkpoint_at), job.job_id),
-                    )
+                await connection.execute(
+                    """
+                    INSERT INTO job_steps (
+                        job_id, stage, status, output_manifest, output_checksum, model, elapsed_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        step.job_id,
+                        step.stage.value,
+                        step.status.value,
+                        step.output_manifest,
+                        step.output_checksum,
+                        step.model,
+                        step.elapsed_ms,
+                    ),
+                )
+            if current["cancel_requested"]:
+                persisted_stage = current["stage"] if existing is not None else step.stage.value
+                await connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, stage = ?, lease_owner = NULL, lease_until = NULL,
+                        heartbeat_at = NULL, cancel_requested = 0, updated_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (JobStatus.CANCELLED.value, persisted_stage, _to_iso(checkpoint_at), job.job_id),
+                )
+            elif existing is None:
+                await connection.execute(
+                    "UPDATE jobs SET stage = ?, updated_at = ? WHERE job_id = ?",
+                    (step.stage.value, _to_iso(checkpoint_at), job.job_id),
+                )
 
     async def schedule_retry(
         self,
