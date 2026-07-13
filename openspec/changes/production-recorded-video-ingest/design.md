@@ -35,6 +35,8 @@ API 只处理上传、状态、资产、媒体和搜索短请求；Worker 领取
 
 用户文件名只作为展示信息，所有物理路径由 UUID asset ID 派生。上传块先写临时目录，完整文件通过原子 rename 发布。SQLite 保存资产、上传会话、任务、阶段检查点和片段 metadata；派生 manifest 保存可重建 ES 的描述和向量产物；ES 每个 segment 一份文档，不保存视频字节。
 
+处理流水线把最终检索可见性拆为 `indexing` 和 `publish` 两个可恢复阶段：`indexing` 生成并校验不含密钥的 ES 投影 manifest，`publish` 才幂等 bulk upsert segment 文档，并在成功后将资产和任务置为可搜索终态。这样 Worker 崩溃重试时不会发布缺少片段或校验未完成的半成品。
+
 ### 4. 采用可替换的固定时间 Segmenter
 
 第一阶段按配置的固定时长产生片段并抽取代表帧。Segmenter 只输出稳定的片段计划，不负责模型调用或索引。未来场景检测或事件算法只需实现同一接口，不改变上传、Worker、存储、搜索和播放主链路。

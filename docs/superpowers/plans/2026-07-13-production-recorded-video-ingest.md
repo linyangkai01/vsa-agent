@@ -110,6 +110,7 @@ class SearchProjectionStore(Protocol):
     async def delete_asset(self, asset_id: str) -> None: ...
 ```
 同一文件定义 `ProjectionResult(indexed_ids: list[str], failed_ids: list[str])`，并用 `Protocol` 定义其余端口的最小方法：`AssetStore.write_chunk/assemble_source`、`JobRepository.claim_due_job/checkpoint_step`、`Segmenter.plan`、`VisionProvider.describe`、`EmbeddingProvider.embed`。定义永久错误 `CORRUPT_MEDIA/UNSUPPORTED_MEDIA/FFMPEG_MISSING/CONFIGURATION/EMBEDDING_DIMENSION`，可重试错误 `MODEL_RATE_LIMIT/MODEL_TIMEOUT/MODEL_5XX/ES_TIMEOUT/ES_5XX`。
+`JobStage` 必须包含最终 `publish` 阶段；`Job.config_snapshot` 必须保持递归不可变且可 JSON 序列化，状态迁移副本不得共享可变配置。
 - [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py -q`。Expected: PASS。
 - [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/models.py src/vsa_agent/recorded_video/errors.py src/vsa_agent/recorded_video/ports.py tests/unit/recorded_video/__init__.py tests/unit/recorded_video/test_models.py tests/unit/recorded_video/test_ports.py && git commit -m "feat: define recorded video domain ports"`。
 
@@ -317,7 +318,7 @@ async def test_valid_analysis_checkpoint_skips_second_vision_call(pipeline, repo
     assert vision.describe.await_count == 1
 ```
 - [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_pipeline.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 stage 编排。** 每 stage 写 `derived/{pipeline_version}/manifest.json.tmp`，记录 provider model、prompt/segmenter version、输入/输出 SHA-256、UTC timestamps；核对 checksum 后复用 checkpoint；按 `probing/segmenting/extracting/analyzing/embedding/indexing/publish` 更新 `job_steps`，manifest 中排除密钥。
+- [ ] **Step 3: 实现 stage 编排。** 每 stage 写 `derived/{pipeline_version}/manifest.json.tmp`，记录 provider model、prompt/segmenter version、输入/输出 SHA-256、UTC timestamps；核对 checksum 后复用 checkpoint；按 `probing/segmenting/extracting/analyzing/embedding/indexing/publish` 更新 `job_steps`，其中 `indexing` 生成并校验 ES 投影 manifest，`publish` 幂等 bulk upsert 后才把资产/任务置为可搜索终态；manifest 中排除密钥。
 - [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_pipeline.py -q`。Expected: PASS。
 - [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/pipeline.py tests/unit/recorded_video/test_pipeline.py && git commit -m "feat: checkpoint recorded video processing pipeline"`。
 

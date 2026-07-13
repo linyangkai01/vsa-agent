@@ -224,7 +224,7 @@ stateDiagram-v2
     running --> cancelled: 安全检查点确认取消
 ```
 
-`running` 的 stage 为 probing、segmenting、extracting、analyzing、embedding、indexing。Worker 定期续租；进程退出后 lease 过期，任务可被重新领取。恢复时校验阶段 manifest 和 checksum，复用有效输出。
+`running` 的 stage 为 probing、segmenting、extracting、analyzing、embedding、indexing、publish。`indexing` 生成并校验可重建的 Elasticsearch 投影 manifest，但不对搜索开放半成品；`publish` 根据 manifest 幂等 bulk upsert segment 文档，成功后才把资产和任务推进到可搜索终态。Worker 定期续租；进程退出后 lease 过期，任务可被重新领取。恢复时校验阶段 manifest 和 checksum，复用有效输出。
 
 瞬时错误包括模型/ES 的 429、超时、网络错误和 5xx，默认退避 30 秒、2 分钟、10 分钟。永久错误包括损坏媒体、不支持格式、ffmpeg 缺失、配置缺失、无法校验的模型结构和 embedding 维度冲突。
 

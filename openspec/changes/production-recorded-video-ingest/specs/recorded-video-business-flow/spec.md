@@ -26,6 +26,7 @@ The system SHALL process uploaded videos in an independent Worker using persiste
 #### Scenario: Worker completes the processing pipeline
 - **WHEN** a Worker claims a queued recorded-video job
 - **THEN** it performs media probing, segment planning, representative-frame extraction, VLM description, embedding generation, and Elasticsearch indexing
+- **AND** it persists a publish checkpoint that idempotently writes the validated projection manifest before exposing the asset to search
 - **AND** the job API exposes the current stage and terminal result
 - **AND** the asset becomes searchable only after all required stages succeed
 
