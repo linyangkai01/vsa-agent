@@ -14,7 +14,7 @@
 
 - 不检查或修改 `frontend/original-ui` 内部代码。
 - 不合并 Windows 与 Linux 必需的运行栈入口。
-- 不重写 `production-recorded-video-ingest` 正在修改的运行栈。
+- 不重写 `production-recorded-video-ingest` 正在修改的运行栈；同步清单的陈旧路径修复不改变运行栈行为。
 
 ## Decisions
 
@@ -22,7 +22,7 @@
 2. 新增单一的 shell 公共 helper，封装仓库定位、Conda/config/key 校验和 runtime config 解析；两个 DashScope 用户入口保留为薄包装，分别启动 evaluator live API 与 TopAgent 视频验收。
 3. `es-runtime-stack.ps1` 与 `es-runtime-stack.sh` 继续作为平台入口，生命周期子脚本继续由运行栈组合。共享语义通过测试对齐，不强制跨语言源码复用。
 4. `install_original_ui_deps.sh`、`run_original_ui_vss.sh`、`run_original_ui_debug_stack.sh` 和 smoke 入口保持职责独立；只有当新入口完整替代调用者时才考虑删除。
-5. 与生产录制视频 change 重叠的文件只纳入清单，不修改其实现；DashScope wrapper 与其无文件重叠，可独立治理。
+5. 与生产录制视频 change 重叠的运行栈文件只纳入清单，不修改其实现；同步脚本只允许修复会阻断 preflight 的陈旧 manifest 路径。
 
 ## Risks / Trade-offs
 

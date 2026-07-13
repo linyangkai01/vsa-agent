@@ -19,7 +19,7 @@ Last audited: 2026-07-13
 | `run_original_ui_debug_stack.sh` | Bash | Start the original UI debug stack | runtime documentation | `bash -n scripts/run_original_ui_debug_stack.sh` | Keep |
 | `run_original_ui_vss.sh` | Bash | Start the original UI VSS application | ES stack launchers and runtime docs | `bash -n scripts/run_original_ui_vss.sh`; stack tests | Keep |
 | `smoke_original_ui_chat.sh` | Bash | Exercise original UI chat streaming | package command and runtime docs | `bash -n scripts/smoke_original_ui_chat.sh` | Keep |
-| `sync-server-files.ps1` | PowerShell | Sync approved project files to mapped server | runtime docs and server workflow | PowerShell parse; `-PreflightOnly` | Keep; frozen here |
+| `sync-server-files.ps1` | PowerShell | Sync approved project files to mapped server | runtime docs and server workflow | PowerShell parse; `-PreflightOnly` | Keep; archived change references repaired |
 
 ## Consolidation Boundary
 

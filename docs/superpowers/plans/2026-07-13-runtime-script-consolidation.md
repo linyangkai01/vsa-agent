@@ -18,7 +18,7 @@ base-ref: 86c3ee51b3fa108310d04c5d1eb14225f1c33cbe
 
 - 不修改 `frontend/original-ui` 内部源码。
 - 保留现有 14 个用户入口、命令参数、错误码和目标流程。
-- 不修改 `es-runtime-stack.*` 与 `sync-server-files.ps1` 的实现。
+- 不修改 `es-runtime-stack.*` 的实现或同步生命周期；允许修复 `sync-server-files.ps1` manifest 中的陈旧文件路径。
 - 不使用 `eval`，不读取或写入 `.env`，不输出 API key。
 - 删除脚本前必须迁移全部调用者并证明全仓引用数为零；本轮无删除候选。
 
@@ -98,7 +98,7 @@ Run: `git add scripts/lib/dashscope_runtime.sh scripts/run_live_acceptance_dashs
 - Consumes: 清单、helper 和两个薄 wrapper。
 - Produces: 脚本解析、定向测试、全量测试和同步 preflight 证据。
 
-- [ ] **Step 1: 验证全部脚本语法**
+- [x] **Step 1: 验证全部脚本语法**
 
 Run: `Get-ChildItem scripts -Recurse -Filter *.sh | ForEach-Object { bash -n $_.FullName }`
 
@@ -106,13 +106,13 @@ Run: `Get-ChildItem scripts -Recurse -Filter *.ps1 | ForEach-Object { [void][scr
 
 Expected: 所有解析命令退出 0。
 
-- [ ] **Step 2: 运行脚本定向测试**
+- [x] **Step 2: 运行脚本定向测试**
 
 Run: `pytest -q tests/unit/test_dashscope_live_runner.py tests/unit/scripts`
 
 Expected: all selected tests pass。
 
-- [ ] **Step 3: 运行 Python 质量与全量测试**
+- [x] **Step 3: 运行 Python 质量与全量测试**
 
 Run: `ruff check src tests`
 
@@ -122,13 +122,13 @@ Run: `pytest -q`
 
 Expected: Ruff 零问题、格式一致、全量测试无失败。
 
-- [ ] **Step 4: 运行同步前检查**
+- [x] **Step 4: 运行同步前检查**
 
 Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-server-files.ps1 -PreflightOnly`
 
 Expected: preflight 成功；若映射服务器不可写，记录环境阻塞，不修改同步脚本或伪造 smoke 结果。
 
-- [ ] **Step 5: 更新状态并提交**
+- [x] **Step 5: 更新状态并提交**
 
 记录清单结论、命令与计数，勾选 OpenSpec 和本计划任务。
 

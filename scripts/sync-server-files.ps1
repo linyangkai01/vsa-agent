@@ -32,11 +32,11 @@ param(
         "docs\superpowers\reports\2026-07-09-script-es-runtime-stack-verification.md",
         "docs\superpowers\reports\2026-07-12-interactive-es-ui-validation.md",
         "docs\superpowers\plans\2026-07-11-interactive-es-ui-validation.md",
-        "openspec\changes\script-es-runtime-stack\.comet.yaml",
-        "openspec\changes\script-es-runtime-stack\proposal.md",
-        "openspec\changes\script-es-runtime-stack\design.md",
-        "openspec\changes\script-es-runtime-stack\tasks.md",
-        "openspec\changes\script-es-runtime-stack\specs\recorded-video-business-flow\spec.md"
+        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\.comet.yaml",
+        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\proposal.md",
+        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\design.md",
+        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\tasks.md",
+        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\specs\recorded-video-business-flow\spec.md"
     ),
     [switch]$DryRun,
     [switch]$PreflightOnly
