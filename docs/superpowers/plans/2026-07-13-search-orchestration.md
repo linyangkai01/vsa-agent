@@ -62,25 +62,25 @@ Run: `git add tests/unit/tools/test_search_pipeline.py && git commit -m "test: c
 - Produces: 设计文档列出的七个 helper 和 `should_apply_critic`。
 - Facade: 重导出 `should_apply_critic`，保留其他公开/测试 import。
 
-- [ ] **Step 1: 实现纯模块**
+- [x] **Step 1: 实现纯模块**
 
 helper 仅读取 `.data`、`video_name`、`similarity`、`sensor_id`，总是复制列表；不支持形状返回空列表，空结果不计算最大分数。
 
-- [ ] **Step 2: 收敛 `execute_core_search`**
+- [x] **Step 2: 收敛 `execute_core_search`**
 
 用 route helper 选择阶段，用统一归一化消费 attribute/embed 返回，用 fusion helper 合并或回退，用 critic filter 移除拒绝项，用 trim helper 构造最终输出。保留原 try/except、日志和 yield 文本。
 
-- [ ] **Step 3: 复用到其他 facade 路径**
+- [x] **Step 3: 复用到其他 facade 路径**
 
 `fusion_search_rerank` 和 `_run_attribute_only_search` 用统一归一化；注册 `search_tool` 的 fusion 分支用统一归一化和 `rank_unique_results`，不改变 weighted/RRF 公式函数。
 
-- [ ] **Step 4: 验证 Green**
+- [x] **Step 4: 验证 Green**
 
 Run: `pytest -q tests/unit/tools/test_search_pipeline.py tests/unit/tools/test_search.py`
 
 Expected: all selected tests pass。
 
-- [ ] **Step 5: 静态检查并提交**
+- [x] **Step 5: 静态检查并提交**
 
 Run: `ruff check src/vsa_agent/tools/search.py src/vsa_agent/tools/search_pipeline.py tests/unit/tools/test_search_pipeline.py`
 
