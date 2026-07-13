@@ -39,7 +39,7 @@ Last updated: 2026-07-13
 ## Active Change
 
 - No active change is present on `master`.
-- `production-recorded-video-ingest` remains in progress on `codex/production-recorded-video-ingest`; resume from task 1.2 after this quality integration.
+- `production-recorded-video-ingest` remains in progress on `codex/production-recorded-video-ingest`; resume from its next unchecked task after this quality integration.
 
 ## Python Quality Program
 
@@ -136,4 +136,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-Resume `production-recorded-video-ingest` on `codex/production-recorded-video-ingest` from task 1.2, keeping its Comet artifacts and runtime implementation isolated until that change passes verification.
+Resume `production-recorded-video-ingest` on `codex/production-recorded-video-ingest` from its next unchecked task, keeping its Comet artifacts and runtime implementation isolated until that change passes verification.
