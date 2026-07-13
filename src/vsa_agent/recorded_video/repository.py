@@ -529,15 +529,7 @@ class JobRepository:
                         raise ValueError("chunk key already contains different content")
                     if existing["status"] == "confirmed":
                         return None
-                    await connection.execute(
-                        """
-                        UPDATE upload_chunks
-                        SET reservation_token = ?, recorded_at = ?
-                        WHERE session_id = ? AND chunk_number = ? AND status = 'reserved'
-                        """,
-                        (reservation_token, _to_iso(self._now()), session_id, chunk_number),
-                    )
-                    return reservation_token
+                    raise ValueError("chunk upload is already being uploaded")
 
                 total_row = await self._fetchone(
                     connection,

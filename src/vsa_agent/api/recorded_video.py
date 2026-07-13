@@ -106,7 +106,10 @@ async def create_recorded_video(payload: CreateRecordedVideoRequest) -> dict[str
     try:
         await store.create_session(session)
     except Exception:
-        await repository.delete_upload_session(session_id, asset_id)
+        try:
+            await store.remove_session(session_id)
+        finally:
+            await repository.delete_upload_session(session_id, asset_id)
         raise
     return {
         "url": f"/api/v1/vst/v1/storage/file?upload_session_id={session_id}",
@@ -158,11 +161,13 @@ async def upload_recorded_video_chunk(
         if reservation_token or not Path(path).is_file():
             await store.write_chunk(session, chunk_number, content)
         if reservation_token:
-            await repository.confirm_reserved_upload_chunk(
+            confirmed = await repository.confirm_reserved_upload_chunk(
                 upload_session_id,
                 chunk_number,
                 reservation_token,
             )
+            if not confirmed:
+                raise HTTPException(status_code=409, detail="chunk reservation is no longer owned; retry the upload")
     except Exception:
         if reservation_token:
             await repository.release_reserved_upload_chunk(

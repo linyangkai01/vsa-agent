@@ -92,6 +92,17 @@ async def test_create_session_builds_only_the_controlled_chunk_layout(store: Loc
     assert (session_dir / "chunks").is_dir()
 
 
+async def test_remove_session_deletes_only_the_controlled_session_directory(store: LocalAssetStore) -> None:
+    session_dir = await store.create_session(_session())
+
+    await store.remove_session("sid")
+
+    assert not session_dir.exists()
+    with pytest.raises(RecordedVideoError) as unsafe:
+        await store.remove_session("../outside")
+    assert unsafe.value.code is ErrorCode.CONFIGURATION
+
+
 async def test_free_bytes_reports_root_filesystem_capacity(
     store: LocalAssetStore,
     monkeypatch: pytest.MonkeyPatch,

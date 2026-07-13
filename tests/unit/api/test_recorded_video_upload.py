@@ -145,7 +145,10 @@ def test_create_upload_removes_database_rows_when_session_directory_creation_fai
 ) -> None:
     from vsa_agent.api import recorded_video
 
-    async def fail_create_session(*_args: object, **_kwargs: object) -> None:
+    original_create_session = recorded_video.LocalAssetStore.create_session
+
+    async def fail_create_session(store: object, *args: object, **kwargs: object) -> None:
+        await original_create_session(store, *args, **kwargs)
         raise OSError("session directory unavailable")
 
     monkeypatch.setattr(recorded_video.LocalAssetStore, "create_session", fail_create_session)
@@ -157,6 +160,26 @@ def test_create_upload_removes_database_rows_when_session_directory_creation_fai
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM upload_sessions").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM assets").fetchone() == (0,)
+    assert not list((tmp_path / "recorded-video" / "uploads").glob("*"))
+
+
+def test_chunk_confirm_losing_reservation_returns_conflict_instead_of_success(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video
+
+    created = _create_upload(client)
+
+    async def lose_reservation(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(recorded_video.JobRepository, "confirm_reserved_upload_chunk", lose_reservation)
+
+    response = _upload_chunk(client, created["url"], b"video")
+
+    assert response.status_code == 409
+    assert "reservation" in response.json()["detail"]
 
 
 def test_failed_first_chunk_write_releases_identifier_and_total_binding(

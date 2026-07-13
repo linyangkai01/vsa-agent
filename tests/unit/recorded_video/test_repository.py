@@ -275,21 +275,11 @@ async def test_upload_context_reserves_first_chunk_with_identifier_and_persisted
 
 
 @pytest.mark.asyncio
-async def test_failed_reservation_owner_cannot_release_a_confirmed_retry(repo: JobRepository):
+async def test_in_flight_duplicate_cannot_take_reservation_from_original_owner(repo: JobRepository):
     session = _session()
     await repo.create_upload_session(_asset(), session)
 
-    failed_owner = await repo.reserve_upload_chunk(
-        session.session_id,
-        identifier="client-identifier",
-        chunk_number=1,
-        total_chunks=2,
-        checksum="chunk-a",
-        size_bytes=4,
-        max_upload_bytes=8,
-        path="000001.part",
-    )
-    successful_retry = await repo.reserve_upload_chunk(
+    original_owner = await repo.reserve_upload_chunk(
         session.session_id,
         identifier="client-identifier",
         chunk_number=1,
@@ -300,9 +290,19 @@ async def test_failed_reservation_owner_cannot_release_a_confirmed_retry(repo: J
         path="000001.part",
     )
 
-    assert failed_owner != successful_retry
-    assert await repo.confirm_reserved_upload_chunk(session.session_id, 1, successful_retry) is True
-    assert await repo.release_reserved_upload_chunk(session.session_id, 1, failed_owner) is False
+    with pytest.raises(ValueError, match="already being uploaded"):
+        await repo.reserve_upload_chunk(
+            session.session_id,
+            identifier="client-identifier",
+            chunk_number=1,
+            total_chunks=2,
+            checksum="chunk-a",
+            size_bytes=4,
+            max_upload_bytes=8,
+            path="000001.part",
+        )
+
+    assert await repo.confirm_reserved_upload_chunk(session.session_id, 1, original_owner) is True
     restored_session, _ = await repo.get_upload_context(session.session_id)
     assert restored_session.received_chunks == 1
     assert await repo.stored_upload_bytes(session.session_id) == 4

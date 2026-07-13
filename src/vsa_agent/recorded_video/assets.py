@@ -54,6 +54,17 @@ class LocalAssetStore:
             raise
         return chunks.parent
 
+    async def remove_session(self, session_id: str) -> None:
+        """Remove one validated, store-owned upload session directory."""
+        session_dir = self._session_dir(session_id)
+        if not session_dir.exists():
+            return
+        try:
+            shutil.rmtree(session_dir)
+        except OSError as error:
+            self._raise_storage_error(error)
+            raise
+
     async def write_chunk(self, session: UploadSession, ordinal: int, data: bytes) -> str:
         if not 1 <= ordinal <= session.total_chunks:
             raise RecordedVideoError(
