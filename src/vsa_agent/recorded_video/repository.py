@@ -6,7 +6,7 @@ import json
 import math
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,7 +32,6 @@ _SCHEMA_VERSION = 1
 _SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
 _SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
 _SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
-_SNAPSHOT_MODEL_REFERENCES = frozenset({"qwen"})
 
 _MIGRATION_1 = (
     """
@@ -161,8 +160,8 @@ def _from_iso(value: str | None) -> datetime | None:
     return _require_aware(parsed, "persisted datetime")
 
 
-def _json_snapshot(snapshot: Mapping[str, Any]) -> str:
-    _validate_snapshot_metadata(snapshot)
+def _json_snapshot(snapshot: Mapping[str, Any], allowed_snapshot_models: Collection[str]) -> str:
+    _validate_snapshot_metadata(snapshot, allowed_snapshot_models)
     return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
@@ -173,19 +172,19 @@ def _validate_snapshot_identifier(value: Any, path: str) -> None:
         raise ValueError(f"snapshot value must be a short identifier: {path}")
 
 
-def _validate_snapshot_model_reference(value: Any, path: str) -> None:
-    if value not in _SNAPSHOT_MODEL_REFERENCES:
+def _validate_snapshot_model_reference(value: Any, path: str, allowed_snapshot_models: Collection[str]) -> None:
+    if value not in allowed_snapshot_models:
         raise ValueError(f"snapshot model is not allowed: {path}")
 
 
-def _validate_snapshot_section(value: Any, path: str) -> None:
+def _validate_snapshot_section(value: Any, path: str, allowed_snapshot_models: Collection[str]) -> None:
     if not isinstance(value, Mapping):
         raise ValueError(f"snapshot section must be an object: {path}")
     for key, item in value.items():
         if key not in _SNAPSHOT_SECTION_FIELDS:
             raise ValueError(f"snapshot key is not allowed: {path}.{key}")
         if key == "model":
-            _validate_snapshot_model_reference(item, f"{path}.{key}")
+            _validate_snapshot_model_reference(item, f"{path}.{key}", allowed_snapshot_models)
         elif key == "enabled":
             if not isinstance(item, bool):
                 raise ValueError(f"snapshot value must be boolean: {path}.{key}")
@@ -198,7 +197,7 @@ def _validate_snapshot_section(value: Any, path: str) -> None:
                 raise ValueError(f"snapshot thresholds must be between 0 and 1: {path}.{key}")
 
 
-def _validate_snapshot_metadata(snapshot: Mapping[str, Any]) -> None:
+def _validate_snapshot_metadata(snapshot: Mapping[str, Any], allowed_snapshot_models: Collection[str]) -> None:
     if not isinstance(snapshot, Mapping):
         raise ValueError("config_snapshot must be an object")
     for key, value in snapshot.items():
@@ -207,7 +206,7 @@ def _validate_snapshot_metadata(snapshot: Mapping[str, Any]) -> None:
         if key == "pipeline_version":
             _validate_snapshot_identifier(value, "config_snapshot.pipeline_version")
         else:
-            _validate_snapshot_section(value, f"config_snapshot.{key}")
+            _validate_snapshot_section(value, f"config_snapshot.{key}", allowed_snapshot_models)
 
 
 class JobRepository:
@@ -220,6 +219,7 @@ class JobRepository:
         lease_seconds: int = 120,
         busy_timeout_ms: int = 5_000,
         clock: Callable[[], datetime] | None = None,
+        allowed_snapshot_models: Collection[str] = (),
     ) -> None:
         self.database_path = Path(database_path)
         if str(database_path) == ":memory:" or self.database_path.as_posix().startswith("file:"):
@@ -231,6 +231,7 @@ class JobRepository:
         self.lease_seconds = lease_seconds
         self.busy_timeout_ms = busy_timeout_ms
         self._clock = clock or (lambda: datetime.now(UTC))
+        self.allowed_snapshot_models = frozenset(allowed_snapshot_models)
 
     def _now(self) -> datetime:
         return _require_aware(self._clock(), "clock")
@@ -845,8 +846,7 @@ class JobRepository:
             _to_iso(asset.deleted_at, "asset.deleted_at"),
         )
 
-    @staticmethod
-    def _job_parameters(job: Job) -> tuple[Any, ...]:
+    def _job_parameters(self, job: Job) -> tuple[Any, ...]:
         snapshot = job.model_dump(mode="json")["config_snapshot"]
         return (
             job.job_id,
@@ -859,7 +859,7 @@ class JobRepository:
             job.lease_owner,
             _to_iso(job.lease_until, "job.lease_until"),
             _to_iso(job.heartbeat_at, "job.heartbeat_at"),
-            _json_snapshot(snapshot),
+            _json_snapshot(snapshot, self.allowed_snapshot_models),
             job.last_error,
             _to_iso(job.created_at, "job.created_at"),
             _to_iso(job.updated_at, "job.updated_at"),

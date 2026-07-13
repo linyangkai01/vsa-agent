@@ -22,6 +22,7 @@ from vsa_agent.recorded_video.models import (
 from vsa_agent.recorded_video.repository import JobRepository
 
 NOW = datetime(2026, 7, 13, 4, 0, tzinfo=UTC)
+SNAPSHOT_MODEL = "qwen3-vl-flash-2025-10-15"
 
 
 def _asset(asset_id: str = "asset") -> Asset:
@@ -66,7 +67,12 @@ def _fetch_one(db_path: Path, sql: str, parameters: tuple[object, ...] = ()) -> 
 
 @pytest_asyncio.fixture
 async def repo(tmp_path: Path) -> JobRepository:
-    repository = JobRepository(tmp_path / "jobs.sqlite3", lease_seconds=30, clock=lambda: NOW)
+    repository = JobRepository(
+        tmp_path / "jobs.sqlite3",
+        lease_seconds=30,
+        clock=lambda: NOW,
+        allowed_snapshot_models={SNAPSHOT_MODEL},
+    )
     await repository.initialize()
     return repository
 
@@ -255,7 +261,7 @@ async def test_complete_upload_is_idempotent_and_round_trips_config_snapshot(rep
     session = _session()
     await repo.create_upload_session(_asset(), session)
     await _record_all_chunks(repo, session)
-    snapshot = {"vision": {"model": "qwen", "thresholds": [0.2, 0.8]}}
+    snapshot = {"vision": {"model": SNAPSHOT_MODEL, "thresholds": [0.2, 0.8]}}
 
     first = await repo.complete_upload("asset", "v1", now=NOW, config_snapshot=snapshot)
     second = await repo.complete_upload(
@@ -334,6 +340,7 @@ async def test_complete_upload_rejects_unlisted_composite_api_key_names_before_j
     [
         "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
         base64.b64encode(b"\x00\x00\x00\x01\x67\x42\x00\x1e\x95\xa8\x28\x0f" + b"h264bytes" * 9).decode(),
+        "unconfigured-model",
     ],
 )
 @pytest.mark.asyncio
@@ -355,6 +362,38 @@ async def test_complete_upload_rejects_unsafe_model_values_before_json_persisten
         )
 
     assert _fetch_one(repo.database_path, "SELECT COUNT(*) AS value FROM jobs")["value"] == 0
+
+
+@pytest.mark.asyncio
+async def test_default_repository_rejects_models_but_accepts_model_free_snapshot(tmp_path: Path):
+    allowed_models = {SNAPSHOT_MODEL}
+    repository = JobRepository(tmp_path / "jobs.sqlite3", allowed_snapshot_models=allowed_models)
+    allowed_models.add("later-model")
+    await repository.initialize()
+    session = _session()
+    await repository.create_upload_session(_asset(), session)
+    await _record_all_chunks(repository, session)
+
+    assert repository.allowed_snapshot_models == frozenset({SNAPSHOT_MODEL})
+
+    default_repository = JobRepository(repository.database_path)
+    with pytest.raises(ValueError, match="snapshot model is not allowed"):
+        await default_repository.complete_upload(
+            "asset",
+            "v1",
+            now=NOW,
+            config_snapshot={"vision": {"model": SNAPSHOT_MODEL}},
+        )
+
+    assert _fetch_one(repository.database_path, "SELECT COUNT(*) AS value FROM jobs")["value"] == 0
+
+    created = await default_repository.complete_upload(
+        "asset",
+        "v1",
+        now=NOW,
+        config_snapshot={"vision": {"enabled": True, "thresholds": [0.2, 0.8]}},
+    )
+    assert created.model_dump(mode="json")["config_snapshot"] == {"vision": {"enabled": True, "thresholds": [0.2, 0.8]}}
 
 
 @pytest.mark.parametrize(
