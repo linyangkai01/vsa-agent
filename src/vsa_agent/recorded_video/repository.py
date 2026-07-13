@@ -27,6 +27,8 @@ from vsa_agent.recorded_video.models import (
 
 _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
+_SCHEMA_VERSION = 1
+_SECRET_KEY_PARTS = frozenset({"authorization", "credential", "credentials", "password", "secret", "token", "tokens"})
 
 _MIGRATION_1 = (
     """
@@ -156,7 +158,21 @@ def _from_iso(value: str | None) -> datetime | None:
 
 
 def _json_snapshot(snapshot: Mapping[str, Any]) -> str:
+    _reject_secret_keys(snapshot)
     return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _reject_secret_keys(value: Any, path: str = "config_snapshot") -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = "_".join(part for part in str(key).lower().replace("-", "_").split("_") if part)
+            parts = normalized.split("_")
+            if any(part in _SECRET_KEY_PARTS for part in parts) or normalized.replace("_", "") == "apikey":
+                raise ValueError(f"secret-bearing config key is not allowed: {path}.{key}")
+            _reject_secret_keys(item, f"{path}.{key}")
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            _reject_secret_keys(item, f"{path}[{index}]")
 
 
 class JobRepository:
@@ -210,6 +226,12 @@ class JobRepository:
         else:
             await connection.commit()
 
+    @asynccontextmanager
+    async def _write_transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        async with self._connect() as connection:
+            async with self._transaction(connection):
+                yield connection
+
     async def initialize(self) -> None:
         """Create or migrate the database; safe to call repeatedly."""
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,12 +248,16 @@ class JobRepository:
                 )
                 row = await self._fetchone(connection, "SELECT MAX(version) AS version FROM schema_migrations")
                 version = int(row["version"] or 0) if row is not None else 0
-                if version < 1:
+                if version > _SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"database has newer schema migration {version}; supported version is {_SCHEMA_VERSION}"
+                    )
+                if version < _SCHEMA_VERSION:
                     for statement in _MIGRATION_1:
                         await connection.execute(statement)
                     await connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                        (1, _to_iso(self._now())),
+                        (_SCHEMA_VERSION, _to_iso(self._now())),
                     )
 
     async def create_upload_session(self, asset: Asset, session: UploadSession) -> UploadSession:
@@ -293,45 +319,48 @@ class JobRepository:
         size_bytes: int = 0,
         path: str | None = None,
     ) -> None:
-        if chunk_number <= 0:
-            raise ValueError("chunk_number must be positive")
         if size_bytes < 0:
             raise ValueError("size_bytes cannot be negative")
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                existing = await self._fetchone(
-                    connection,
-                    "SELECT checksum, size_bytes, path FROM upload_chunks WHERE session_id = ? AND chunk_number = ?",
-                    (session_id, chunk_number),
-                )
-                if existing is not None:
-                    if (
-                        existing["checksum"] != checksum
-                        or existing["size_bytes"] != size_bytes
-                        or existing["path"] != path
-                    ):
-                        raise ValueError("chunk key already contains different content")
-                    return
+        async with self._write_transaction() as connection:
+            session = await self._fetchone(
+                connection,
+                "SELECT total_chunks FROM upload_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if session is None:
+                raise KeyError(f"unknown upload session: {session_id}")
+            if not 1 <= chunk_number <= session["total_chunks"]:
+                raise ValueError(f"chunk_number must be between 1 and {session['total_chunks']}")
 
-                await connection.execute(
-                    """
+            existing = await self._fetchone(
+                connection,
+                "SELECT checksum, size_bytes, path FROM upload_chunks WHERE session_id = ? AND chunk_number = ?",
+                (session_id, chunk_number),
+            )
+            if existing is not None:
+                if existing["checksum"] != checksum or existing["size_bytes"] != size_bytes or existing["path"] != path:
+                    raise ValueError("chunk key already contains different content")
+                return
+
+            await connection.execute(
+                """
                     INSERT INTO upload_chunks (
                         session_id, chunk_number, checksum, size_bytes, path, recorded_at
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
-                )
-                await connection.execute(
-                    """
+                (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
+            )
+            await connection.execute(
+                """
                     UPDATE upload_sessions
                     SET received_chunks = (
                         SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
                     )
                     WHERE session_id = ?
                     """,
-                    (session_id, session_id),
-                )
+                (session_id, session_id),
+            )
 
     async def complete_upload(
         self,
@@ -345,55 +374,70 @@ class JobRepository:
         completed_at = _require_aware(now or self._now(), "now")
         snapshot = dict(config_snapshot or {})
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                existing = await self._fetchone(
-                    connection,
-                    "SELECT * FROM jobs WHERE asset_id = ? AND pipeline_version = ?",
-                    (asset_id, normalized_pipeline_version),
-                )
-                if existing is not None:
-                    return self._row_to_job(existing)
+        async with self._write_transaction() as connection:
+            existing = await self._fetchone(
+                connection,
+                "SELECT * FROM jobs WHERE asset_id = ? AND pipeline_version = ?",
+                (asset_id, normalized_pipeline_version),
+            )
+            if existing is not None:
+                return self._row_to_job(existing)
 
-                asset = await self._fetchone(connection, "SELECT status FROM assets WHERE asset_id = ?", (asset_id,))
-                if asset is None:
-                    raise KeyError(f"unknown asset: {asset_id}")
-                if asset["status"] == AssetStatus.DELETED.value:
-                    raise ValueError("cannot complete upload for a deleted asset")
+            asset = await self._fetchone(connection, "SELECT status FROM assets WHERE asset_id = ?", (asset_id,))
+            if asset is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            if asset["status"] == AssetStatus.DELETED.value:
+                raise ValueError("cannot complete upload for a deleted asset")
 
-                job = Job(
-                    job_id=str(uuid.uuid4()),
-                    asset_id=asset_id,
-                    pipeline_version=normalized_pipeline_version,
-                    status=JobStatus.QUEUED,
-                    next_run_at=completed_at,
-                    config_snapshot=snapshot,
-                    created_at=completed_at,
-                    updated_at=completed_at,
-                )
-                await connection.execute(
-                    """
+            completed_session = await self._fetchone(
+                connection,
+                """
+                    SELECT sessions.session_id
+                    FROM upload_sessions AS sessions
+                    LEFT JOIN upload_chunks AS chunks ON chunks.session_id = sessions.session_id
+                    WHERE sessions.asset_id = ?
+                    GROUP BY sessions.session_id, sessions.total_chunks
+                    HAVING COUNT(chunks.upload_chunk_id) = sessions.total_chunks
+                    LIMIT 1
+                    """,
+                (asset_id,),
+            )
+            if completed_session is None:
+                raise ValueError(f"upload is incomplete for asset: {asset_id}")
+
+            job = Job(
+                job_id=str(uuid.uuid4()),
+                asset_id=asset_id,
+                pipeline_version=normalized_pipeline_version,
+                status=JobStatus.QUEUED,
+                next_run_at=completed_at,
+                config_snapshot=snapshot,
+                created_at=completed_at,
+                updated_at=completed_at,
+            )
+            await connection.execute(
+                """
                     INSERT INTO jobs (
                         job_id, asset_id, pipeline_version, status, stage, attempt, next_run_at,
                         lease_owner, lease_until, heartbeat_at, config_snapshot, last_error,
                         cancel_requested, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
-                    self._job_parameters(job),
-                )
-                await connection.execute(
-                    """
+                self._job_parameters(job),
+            )
+            await connection.execute(
+                """
                     UPDATE assets
                     SET status = ?, current_job_id = ?, updated_at = ?
                     WHERE asset_id = ?
                     """,
-                    (AssetStatus.READY.value, job.job_id, _to_iso(completed_at), asset_id),
-                )
-                await connection.execute(
-                    "UPDATE upload_sessions SET status = ? WHERE asset_id = ?",
-                    (AssetStatus.READY.value, asset_id),
-                )
-                return job
+                (AssetStatus.READY.value, job.job_id, _to_iso(completed_at), asset_id),
+            )
+            await connection.execute(
+                "UPDATE upload_sessions SET status = ? WHERE asset_id = ?",
+                (AssetStatus.READY.value, asset_id),
+            )
+            return job
 
     async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
         """Atomically claim one due job using the caller's timezone-aware clock."""
@@ -455,37 +499,44 @@ class JobRepository:
                     return None
                 return self._row_to_job(row)
 
-    async def renew_lease(self, job_id: str, owner: str, now: datetime, *, attempt: int) -> Job:
+    async def renew_lease(
+        self,
+        job_id: str,
+        owner: str,
+        now: datetime,
+        *,
+        attempt: int | None = None,
+    ) -> Job:
         renewed_at = _require_aware(now, "now")
         renewed_iso = _to_iso(renewed_at)
         lease_until = _to_iso(renewed_at + timedelta(seconds=self.lease_seconds))
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                row = await self._fetchone(
-                    connection,
-                    """
-                    UPDATE jobs
-                    SET lease_until = ?, heartbeat_at = ?, updated_at = ?
-                    WHERE job_id = ? AND status = ? AND lease_owner = ?
-                        AND attempt = ? AND lease_until > ? AND cancel_requested = 0
-                    RETURNING *
-                    """,
-                    (
-                        lease_until,
-                        renewed_iso,
-                        renewed_iso,
-                        job_id,
-                        JobStatus.RUNNING.value,
-                        owner,
-                        attempt,
-                        renewed_iso,
-                    ),
-                )
-                if row is not None:
-                    return self._row_to_job(row)
-                await self._raise_lease_error(connection, job_id, owner, attempt, renewed_at)
-                raise AssertionError("unreachable")
+        async with self._write_transaction() as connection:
+            effective_attempt = await self._resolve_attempt(connection, job_id, attempt)
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET lease_until = ?, heartbeat_at = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ?
+                    AND attempt = ? AND lease_until > ? AND cancel_requested = 0
+                RETURNING *
+                """,
+                (
+                    lease_until,
+                    renewed_iso,
+                    renewed_iso,
+                    job_id,
+                    JobStatus.RUNNING.value,
+                    owner,
+                    effective_attempt,
+                    renewed_iso,
+                ),
+            )
+            if row is not None:
+                return self._row_to_job(row)
+            await self._raise_lease_error(connection, job_id, owner, effective_attempt, renewed_at)
+            raise AssertionError("unreachable")
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
         if step.job_id != job.job_id:
@@ -571,170 +622,81 @@ class JobRepository:
         next_run_at: datetime,
         error: str,
         *,
-        attempt: int,
+        attempt: int | None = None,
         now: datetime | None = None,
     ) -> Job:
         retry_at = _require_aware(next_run_at, "next_run_at")
         scheduled_at = _require_aware(now or self._now(), "now")
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                row = await self._fetchone(
-                    connection,
-                    """
-                    UPDATE jobs
-                    SET status = ?, next_run_at = ?, lease_owner = NULL, lease_until = NULL,
-                        heartbeat_at = NULL, last_error = ?, updated_at = ?
-                    WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
-                        AND lease_until > ? AND cancel_requested = 0
-                    RETURNING *
-                    """,
-                    (
-                        JobStatus.RETRY_WAIT.value,
-                        _to_iso(retry_at),
-                        error,
-                        _to_iso(scheduled_at),
-                        job_id,
-                        JobStatus.RUNNING.value,
-                        owner,
-                        attempt,
-                        _to_iso(scheduled_at),
-                    ),
-                )
-                if row is not None:
-                    return self._row_to_job(row)
-                await self._raise_lease_error(connection, job_id, owner, attempt, scheduled_at)
-                raise AssertionError("unreachable")
+        async with self._write_transaction() as connection:
+            effective_attempt = await self._resolve_attempt(connection, job_id, attempt)
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET status = ?, next_run_at = ?, lease_owner = NULL, lease_until = NULL,
+                    heartbeat_at = NULL, last_error = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                    AND lease_until > ? AND cancel_requested = 0
+                RETURNING *
+                """,
+                (
+                    JobStatus.RETRY_WAIT.value,
+                    _to_iso(retry_at),
+                    error,
+                    _to_iso(scheduled_at),
+                    job_id,
+                    JobStatus.RUNNING.value,
+                    owner,
+                    effective_attempt,
+                    _to_iso(scheduled_at),
+                ),
+            )
+            if row is not None:
+                return self._row_to_job(row)
+            await self._raise_lease_error(connection, job_id, owner, effective_attempt, scheduled_at)
+            raise AssertionError("unreachable")
 
     async def request_cancel(self, job_id: str, now: datetime) -> Job:
         requested_at = _require_aware(now, "now")
         requested_iso = _to_iso(requested_at)
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                await connection.execute(
-                    "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ? AND status = ?",
-                    (
-                        JobStatus.QUEUED.value,
-                        requested_iso,
-                        job_id,
-                        JobStatus.RETRY_WAIT.value,
-                    ),
-                )
-                row = await self._fetchone(
-                    connection,
-                    """
-                    UPDATE jobs
-                    SET status = CASE
-                            WHEN status = 'queued' THEN 'cancelled'
-                            WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
-                            ELSE status
-                        END,
-                        cancel_requested = CASE
-                            WHEN status = 'running' AND lease_until > ? THEN 1
-                            ELSE 0
-                        END,
-                        lease_owner = CASE
-                            WHEN status = 'queued'
-                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
-                            THEN NULL ELSE lease_owner
-                        END,
-                        lease_until = CASE
-                            WHEN status = 'queued'
-                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
-                            THEN NULL ELSE lease_until
-                        END,
-                        heartbeat_at = CASE
-                            WHEN status = 'queued'
-                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
-                            THEN NULL ELSE heartbeat_at
-                        END,
-                        updated_at = ?
-                    WHERE job_id = ?
-                    RETURNING *
-                    """,
-                    (
-                        requested_iso,
-                        requested_iso,
-                        requested_iso,
-                        requested_iso,
-                        requested_iso,
-                        requested_iso,
-                        job_id,
-                    ),
-                )
-                if row is None:
-                    raise KeyError(f"unknown job: {job_id}")
-                return self._row_to_job(row)
+        async with self._write_transaction() as connection:
+            await self._transition_jobs_for_cancellation(
+                connection,
+                requested_iso,
+                target_predicate="job_id = ?",
+                target_parameters=(job_id,),
+            )
+            row = await self._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+            if row is None:
+                raise KeyError(f"unknown job: {job_id}")
+            return self._row_to_job(row)
 
     async def soft_delete_asset(self, asset_id: str, now: datetime) -> Asset:
         deleted_at = _require_aware(now, "now")
         deleted_iso = _to_iso(deleted_at)
 
-        async with self._connect() as connection:
-            async with self._transaction(connection):
-                await connection.execute(
-                    "UPDATE jobs SET status = ?, updated_at = ? WHERE asset_id = ? AND status = ?",
-                    (
-                        JobStatus.QUEUED.value,
-                        deleted_iso,
-                        asset_id,
-                        JobStatus.RETRY_WAIT.value,
-                    ),
-                )
-                await connection.execute(
-                    """
-                    UPDATE jobs
-                    SET status = CASE
-                            WHEN status = 'queued' THEN 'cancelled'
-                            WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
-                            ELSE status
-                        END,
-                        cancel_requested = CASE
-                            WHEN status = 'running' AND lease_until > ? THEN 1
-                            ELSE cancel_requested
-                        END,
-                        lease_owner = CASE
-                            WHEN status = 'queued'
-                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
-                            THEN NULL ELSE lease_owner
-                        END,
-                        lease_until = CASE
-                            WHEN status = 'queued'
-                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
-                            THEN NULL ELSE lease_until
-                        END,
-                        heartbeat_at = CASE
-                            WHEN status = 'queued'
-                                OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
-                            THEN NULL ELSE heartbeat_at
-                        END,
-                        updated_at = ?
-                    WHERE asset_id = ? AND status IN ('queued', 'running')
-                    """,
-                    (
-                        deleted_iso,
-                        deleted_iso,
-                        deleted_iso,
-                        deleted_iso,
-                        deleted_iso,
-                        deleted_iso,
-                        asset_id,
-                    ),
-                )
-                row = await self._fetchone(
-                    connection,
-                    """
-                    UPDATE assets
-                    SET status = ?, deleted_at = COALESCE(deleted_at, ?), updated_at = ?
-                    WHERE asset_id = ?
-                    RETURNING *
-                    """,
-                    (AssetStatus.DELETED.value, deleted_iso, deleted_iso, asset_id),
-                )
-                if row is None:
-                    raise KeyError(f"unknown asset: {asset_id}")
-                return self._row_to_asset(row)
+        async with self._write_transaction() as connection:
+            await self._transition_jobs_for_cancellation(
+                connection,
+                deleted_iso,
+                target_predicate="asset_id = ?",
+                target_parameters=(asset_id,),
+            )
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE assets
+                SET status = ?, deleted_at = COALESCE(deleted_at, ?), updated_at = ?
+                WHERE asset_id = ?
+                RETURNING *
+                """,
+                (AssetStatus.DELETED.value, deleted_iso, deleted_iso, asset_id),
+            )
+            if row is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            return self._row_to_asset(row)
 
     @staticmethod
     async def _fetchone(
@@ -747,6 +709,69 @@ class JobRepository:
             return await cursor.fetchone()
         finally:
             await cursor.close()
+
+    @staticmethod
+    async def _transition_jobs_for_cancellation(
+        connection: aiosqlite.Connection,
+        now_iso: str,
+        *,
+        target_predicate: str,
+        target_parameters: tuple[Any, ...],
+    ) -> None:
+        await connection.execute(
+            f"""
+            UPDATE jobs
+            SET status = ?, updated_at = ?
+            WHERE ({target_predicate}) AND status = ?
+            """,
+            (JobStatus.QUEUED.value, now_iso, *target_parameters, JobStatus.RETRY_WAIT.value),
+        )
+        await connection.execute(
+            f"""
+            UPDATE jobs
+            SET status = CASE
+                    WHEN status = 'queued' THEN 'cancelled'
+                    WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
+                    ELSE status
+                END,
+                cancel_requested = CASE
+                    WHEN status = 'running' AND lease_until > ? THEN 1
+                    ELSE 0
+                END,
+                lease_owner = CASE
+                    WHEN status = 'queued'
+                        OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                    THEN NULL ELSE lease_owner
+                END,
+                lease_until = CASE
+                    WHEN status = 'queued'
+                        OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                    THEN NULL ELSE lease_until
+                END,
+                heartbeat_at = CASE
+                    WHEN status = 'queued'
+                        OR (status = 'running' AND (lease_until IS NULL OR lease_until <= ?))
+                    THEN NULL ELSE heartbeat_at
+                END,
+                updated_at = ?
+            WHERE ({target_predicate}) AND status IN ('queued', 'running')
+            """,
+            (now_iso, now_iso, now_iso, now_iso, now_iso, now_iso, *target_parameters),
+        )
+
+    @classmethod
+    async def _resolve_attempt(
+        cls,
+        connection: aiosqlite.Connection,
+        job_id: str,
+        attempt: int | None,
+    ) -> int:
+        if attempt is not None:
+            return attempt
+        current = await cls._fetchone(connection, "SELECT attempt FROM jobs WHERE job_id = ?", (job_id,))
+        if current is None:
+            raise KeyError(f"unknown job: {job_id}")
+        return int(current["attempt"])
 
     @classmethod
     async def _require_active_lease(

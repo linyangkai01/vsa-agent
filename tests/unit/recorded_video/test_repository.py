@@ -408,6 +408,24 @@ async def test_renew_lease_checks_owner_and_updates_heartbeat(repo: JobRepositor
 
 
 @pytest.mark.asyncio
+async def test_renew_and_retry_keep_the_existing_optional_attempt_call_shape(repo: JobRepository):
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+
+    renewed = await repo.renew_lease(claimed.job_id, "worker-1", NOW + timedelta(seconds=1))
+    scheduled = await repo.schedule_retry(
+        renewed.job_id,
+        "worker-1",
+        NOW + timedelta(minutes=1),
+        "temporary failure",
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert scheduled.status is JobStatus.RETRY_WAIT
+
+
+@pytest.mark.asyncio
 async def test_worker_writes_are_fenced_by_attempt_even_when_owner_is_reused(repo: JobRepository):
     await _ready_job(repo)
     stale = await repo.claim_due_job("worker-1", NOW)
@@ -445,6 +463,15 @@ async def test_worker_writes_are_fenced_by_attempt_even_when_owner_is_reused(rep
             attempt=current.attempt,
             now=NOW + timedelta(seconds=60),
         )
+    with pytest.raises(PermissionError, match="active lease"):
+        await repo.schedule_retry(
+            current.job_id,
+            "worker-1",
+            NOW + timedelta(minutes=3),
+            "expired worker",
+            attempt=current.attempt,
+            now=NOW + timedelta(seconds=61),
+        )
 
 
 @pytest.mark.asyncio
@@ -462,6 +489,10 @@ async def test_checkpoint_uses_injected_clock_and_rejects_expired_or_naive_time(
     step = JobStep(job_id=claimed.job_id, stage=JobStage.PROBING, status=JobStatus.RUNNING)
 
     current_time[0] = NOW + timedelta(seconds=30)
+    with pytest.raises(PermissionError, match="active lease"):
+        await repository.checkpoint_step(claimed, step)
+
+    current_time[0] = NOW + timedelta(seconds=31)
     with pytest.raises(PermissionError, match="active lease"):
         await repository.checkpoint_step(claimed, step)
 
