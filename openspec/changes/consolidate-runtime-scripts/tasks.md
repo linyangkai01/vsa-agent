@@ -6,14 +6,14 @@
 
 ## 2. 合并 DashScope 前置逻辑
 
-- [ ] 2.1 新增单一 shell 公共 helper，集中仓库定位、Conda、配置、API key 和 runtime config 解析。
-- [ ] 2.2 将 `run_live_acceptance_dashscope.sh` 迁移为保留原命令和 evaluator 行为的薄 wrapper。
-- [ ] 2.3 将 `run_live_top_agent_video_dashscope.sh` 迁移为保留视频参数、query 和 mode 行为的薄 wrapper。
+- [x] 2.1 新增单一 shell 公共 helper，集中仓库定位、Conda、配置、API key 和 runtime config 解析。
+- [x] 2.2 将 `run_live_acceptance_dashscope.sh` 迁移为保留原命令和 evaluator 行为的薄 wrapper。
+- [x] 2.3 将 `run_live_top_agent_video_dashscope.sh` 迁移为保留视频参数、query 和 mode 行为的薄 wrapper。
 
 ## 3. 清理与文档迁移
 
-- [ ] 3.1 复核 ES、UI、smoke、安装和服务器同步脚本的职责，保留必要的双平台入口。
-- [ ] 3.2 对真正冗余的 wrapper 迁移全部文档、测试、包命令和脚本调用者，并再次证明引用数为零后删除。
+- [x] 3.1 复核 ES、UI、smoke、安装和服务器同步脚本的职责，保留必要的双平台入口。
+- [x] 3.2 对真正冗余的 wrapper 迁移全部文档、测试、包命令和脚本调用者，并再次证明引用数为零后删除。
 - [ ] 3.3 更新 `package.json`、运行文档和 `docs/DEVELOPMENT_STATUS.md`，只暴露受支持入口。
 
 ## 4. 验证

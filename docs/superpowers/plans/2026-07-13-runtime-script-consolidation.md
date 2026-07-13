@@ -64,19 +64,19 @@ Run: `git add tests/unit/test_dashscope_live_runner.py docs/superpowers/referenc
 - Produces: `vsa_dashscope_preflight() -> shell status`。
 - Exports: `VSA_REPO_ROOT`、`VSA_CONFIG`、`VSA_CONDA_ENV`、`VSA_PROFILE`、`VSA_RESOLVED_LLM_API_KEY`、`VSA_RESOLVED_LLM_BASE_URL`、`VSA_RESOLVED_LLM_MODEL`。
 
-- [ ] **Step 1: 实现最小公共前置**
+- [x] **Step 1: 实现最小公共前置**
 
 helper 使用自身 `BASH_SOURCE[0]` 解析仓库根目录，按 Conda、配置、环境 key 顺序失败；设置公共默认值，执行 `config doctor`/`config print`，通过现有 `resolve_runtime_config` 分别解析 key、base URL 和 model，空 key 返回状态 2。
 
-- [ ] **Step 2: 将 evaluator wrapper 变薄**
+- [x] **Step 2: 将 evaluator wrapper 变薄**
 
 wrapper 只解析 `SCRIPT_DIR`、source helper、设置 trace 默认值、调用 `vsa_dashscope_preflight`、映射三个 `LIVE_API_*` 变量并运行 `tests/acceptance/test_evaluator_live_api.py`。
 
-- [ ] **Step 3: 将 TopAgent wrapper 变薄**
+- [x] **Step 3: 将 TopAgent wrapper 变薄**
 
 wrapper source helper 并调用公共前置，保留 `VSA_LIVE_VIDEO_MODE`、视频位置参数、配置默认视频、query 分支和 `--mode`；仅把公共 key 映射到 `OPENAI_API_KEY`。
 
-- [ ] **Step 4: 验证 Green 与 Bash 语法**
+- [x] **Step 4: 验证 Green 与 Bash 语法**
 
 Run: `pytest -q tests/unit/test_dashscope_live_runner.py`
 
@@ -84,7 +84,7 @@ Run: `Get-ChildItem scripts -Recurse -Filter *.sh | ForEach-Object { bash -n $_.
 
 Expected: tests PASS；所有 Bash 文件语法检查退出 0。
 
-- [ ] **Step 5: 提交实现**
+- [x] **Step 5: 提交实现**
 
 Run: `git add scripts/lib/dashscope_runtime.sh scripts/run_live_acceptance_dashscope.sh scripts/run_live_top_agent_video_dashscope.sh tests/unit/test_dashscope_live_runner.py && git commit -m "refactor: share DashScope runtime preflight"`
 
