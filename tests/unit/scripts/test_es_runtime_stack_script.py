@@ -336,6 +336,13 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
 
 
+def test_sync_manifest_does_not_reference_archived_change_as_active():
+    text = _sync_script_text()
+
+    assert "openspec\\changes\\script-es-runtime-stack\\" not in text
+    assert "openspec\\changes\\archive\\2026-07-12-script-es-runtime-stack\\" in text
+
+
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():
     text = _sync_script_text()
 

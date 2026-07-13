@@ -65,7 +65,7 @@ The repository-wide Python quality work is split into five ordered Comet changes
 
 - `stabilize-test-contracts`: implementation and verification complete. The current branch already contains `tests/unit/recorded_video/__init__.py`, which gives `recorded_video/test_models.py` a package-qualified module name while `archive/test_models.py` remains distinct.
 - `enforce-python-quality-baseline`: implementation complete; Ruff lint and format debt is cleared in `src/` and `tests/`.
-- `consolidate-runtime-scripts`: consolidate shared script preflight logic while preserving referenced and cross-platform entry points.
+- `consolidate-runtime-scripts`: implementation complete; all 14 user entries remain, the DashScope wrappers share one preflight helper, and stale archived-change paths no longer block server sync preflight.
 - `refactor-video-understanding-pipeline`: separate normalization from I/O orchestration while preserving public contracts.
 - `refactor-search-orchestration`: consolidate search result normalization, routing, fusion and critic stages.
 
@@ -88,6 +88,20 @@ pytest -q
 ```
 
 Result: compileall passed; Ruff reported zero lint issues; all 235 files were already formatted; `759 passed, 4 skipped, 1 warning`. The warning is the existing Starlette `httpx` deprecation from the installed environment.
+
+Runtime script consolidation verification on 2026-07-13:
+
+```powershell
+Get-ChildItem scripts -Recurse -Filter *.sh | ForEach-Object { bash -n $_.FullName }
+Get-ChildItem scripts -Recurse -Filter *.ps1 | ForEach-Object { [void][scriptblock]::Create((Get-Content -Raw $_.FullName)) }
+pytest -q tests/unit/test_dashscope_live_runner.py tests/unit/scripts
+ruff check src tests
+ruff format --check src tests
+pytest -q
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-server-files.ps1 -PreflightOnly
+```
+
+Result: all scripts parsed; `58` script tests passed; Ruff reported zero issues and 235 formatted files; `760 passed, 4 skipped, 1 warning`; mapped target preflight passed for 36 files. The 14 user script entries remain supported, while the two DashScope entries now share `scripts/lib/dashscope_runtime.sh`.
 
 ## Active Runtime Validation
 

@@ -10,7 +10,7 @@ canonical_spec: openspec
 
 治理范围是仓库根目录 `scripts/` 和直接验证这些入口的 Python 测试、包命令及运行文档。`frontend/original-ui` 内部源码不在范围内。当前 14 个脚本都有文档、测试、包命令或脚本间调用证据，因此本 change 不删除用户入口；新增的共享文件是被 source 的实现 helper，不计为用户入口。
 
-`es-runtime-stack.sh`、`es-runtime-stack.ps1`、Elasticsearch 生命周期脚本、UI 启动脚本、smoke、依赖安装和服务器同步入口职责不同。它们在清单中标记为保留，本 change 不修改仍由 `production-recorded-video-ingest` 演进的运行栈实现。
+`es-runtime-stack.sh`、`es-runtime-stack.ps1`、Elasticsearch 生命周期脚本、UI 启动脚本、smoke、依赖安装和服务器同步入口职责不同。它们在清单中标记为保留，本 change 不修改仍由 `production-recorded-video-ingest` 演进的运行栈实现；同步 manifest 中已归档 change 的陈旧路径允许就地迁移到归档目录。
 
 ## 组件边界
 
@@ -38,7 +38,7 @@ canonical_spec: openspec
 - Green：实现最小 helper 和薄 wrapper，验证缺少 key 时仍在配置解析前以状态 2 退出。
 - 静态：对所有 Bash 文件执行 `bash -n`，对所有 PowerShell 文件使用 ScriptBlock parser。
 - 回归：运行 `tests/unit/test_dashscope_live_runner.py`、脚本目录测试和全量 `pytest -q`。
-- 运维：运行 `scripts/sync-server-files.ps1 -PreflightOnly`；不在缺少真实凭据时启动 DashScope 或改写服务器运行栈。
+- 运维：运行 `scripts/sync-server-files.ps1 -PreflightOnly`；若陈旧 manifest 阻断 preflight，以失败测试约束路径迁移；不在缺少真实凭据时启动 DashScope 或改写服务器运行栈。
 
 ## 回滚
 

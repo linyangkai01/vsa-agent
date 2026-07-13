@@ -23,5 +23,5 @@
 ## Impact
 
 - 影响 `scripts/`、脚本单元测试、`package.json` 和运行文档。
-- 不修改 `production-recorded-video-ingest` 仍会演进的 `es-runtime-stack.*` 和同步入口实现。
+- 不修改 `production-recorded-video-ingest` 仍会演进的 `es-runtime-stack.*` 生命周期；允许修复同步清单中的陈旧文件引用。
 - 不检查或重构 `frontend/original-ui` 内部源码。
