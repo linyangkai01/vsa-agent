@@ -1,6 +1,6 @@
 workflow: full
 language: zh-CN
-phase: verify
+phase: archive
 context_compression: off
 build_mode: executing-plans
 build_pause: null
@@ -13,11 +13,11 @@ auto_transition: true
 base_ref: 3ff0625b9b7accd12783af98481d989dbfc0f9a6
 design_doc: docs/superpowers/specs/2026-07-13-python-quality-baseline-design.md
 plan: docs/superpowers/plans/2026-07-13-python-quality-baseline.md
-verify_result: pending
+verify_result: pass
 verification_report: docs/superpowers/reports/2026-07-13-enforce-python-quality-baseline-verify.md
 branch_status: handled
 created_at: 2026-07-13
-verified_at: null
+verified_at: 2026-07-13
 archived: false
 direct_override: null
 handoff_context: openspec/changes/enforce-python-quality-baseline/.comet/handoff/design-context.json
