@@ -148,4 +148,3 @@ Run: `git add pyproject.toml src tests docs/DEVELOPMENT_STATUS.md docs/superpowe
 Run: `git commit -m "style: enforce Python quality baseline"`
 
 Expected: commit excludes the other active change directories.
-
