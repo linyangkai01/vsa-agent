@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 LOCAL_CONFIG_FILENAME = "config.local.yaml"
 
@@ -336,22 +335,14 @@ def resolve_runtime_config(config: AppConfig | None = None) -> RuntimeResolvedCo
     )
 
 
-def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostics:
-    app_config = config or get_config()
-    backends, profiles, active_profile = _runtime_sources(app_config)
+def _validate_role_bindings(
+    backends: dict[str, BackendConfig],
+    roles: tuple[tuple[str, RoleBindingConfig | None], ...],
+    *,
+    require_api_key_env: bool = False,
+) -> list[ConfigIssue]:
     issues: list[ConfigIssue] = []
-
-    if active_profile not in profiles:
-        return ConfigDiagnostics(
-            issues=[ConfigIssue(message=f"active_profile '{active_profile}' is not defined in profiles")]
-        )
-
-    profile = profiles[active_profile]
-    for role_name, binding in (
-        ("llm", profile.llm),
-        ("vlm", profile.vlm),
-        ("embedding", profile.embedding),
-    ):
+    for role_name, binding in roles:
         if binding is None:
             continue
         if binding.backend not in backends:
@@ -362,11 +353,49 @@ def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostic
             issues.append(ConfigIssue(message=f"{role_name} backend '{binding.backend}' has empty base_url"))
         if not binding.model:
             issues.append(ConfigIssue(message=f"{role_name} model is empty"))
-        if backend.api_key_required and not _resolve_api_key(backend):
+        if not backend.api_key_required:
+            continue
+        if require_api_key_env:
+            api_key_env = backend.api_key_env
+            if api_key_env and os.getenv(api_key_env, "").strip():
+                continue
+            issues.append(
+                ConfigIssue(
+                    message=(
+                        f"{role_name} backend '{binding.backend}' requires API key "
+                        f"from api_key_env ({api_key_env or 'not configured'})"
+                    )
+                )
+            )
+        elif not _resolve_api_key(backend):
             source = backend.api_key_env or "api_key"
-            issues.append(ConfigIssue(message=f"{role_name} backend '{binding.backend}' requires API key from {source}"))
+            issues.append(
+                ConfigIssue(
+                    message=f"{role_name} backend '{binding.backend}' requires API key from {source}"
+                )
+            )
+    return issues
 
-    return ConfigDiagnostics(issues=issues)
+
+def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostics:
+    app_config = config or get_config()
+    backends, profiles, active_profile = _runtime_sources(app_config)
+    if active_profile not in profiles:
+        return ConfigDiagnostics(
+            issues=[ConfigIssue(message=f"active_profile '{active_profile}' is not defined in profiles")]
+        )
+
+    profile = profiles[active_profile]
+    return ConfigDiagnostics(
+        issues=_validate_role_bindings(
+            backends,
+            (
+                ("llm", profile.llm),
+                ("vlm", profile.vlm),
+                ("embedding", profile.embedding),
+            ),
+        )
+    )
 
 
 def validate_recorded_video_runtime(config: AppConfig) -> ConfigDiagnostics:
@@ -377,29 +406,21 @@ def validate_recorded_video_runtime(config: AppConfig) -> ConfigDiagnostics:
     if config.search.force_mock_embedding:
         raise ValueError("production recorded video requires force_mock_embedding=False")
 
-    diagnostics = validate_runtime_config(config)
     backends, profiles, active_profile = _runtime_sources(config)
     if active_profile not in profiles:
-        return diagnostics
+        return ConfigDiagnostics(
+            issues=[ConfigIssue(message=f"active_profile '{active_profile}' is not defined in profiles")]
+        )
 
     profile = profiles[active_profile]
+    issues: list[ConfigIssue] = []
     if profile.embedding is None:
-        diagnostics.issues.append(ConfigIssue(message="recorded video requires an embedding provider"))
-
-    for role_name, binding in (("vlm", profile.vlm), ("embedding", profile.embedding)):
-        if binding is None or binding.backend not in backends:
-            continue
-        backend = backends[binding.backend]
-        api_key_env = backend.api_key_env
-        if not backend.api_key_required or (api_key_env and os.getenv(api_key_env, "").strip()):
-            continue
-        issue_prefix = f"{role_name} backend '{binding.backend}' requires API key"
-        generic_issue = f"{issue_prefix} from {api_key_env or 'api_key'}"
-        if api_key_env and any(issue.message == generic_issue for issue in diagnostics.issues):
-            continue
-        if not api_key_env:
-            diagnostics.issues = [issue for issue in diagnostics.issues if issue.message != generic_issue]
-        diagnostics.issues.append(
-            ConfigIssue(message=f"{issue_prefix} from api_key_env ({api_key_env or 'not configured'})")
+        issues.append(ConfigIssue(message="recorded video requires an embedding provider"))
+    issues.extend(
+        _validate_role_bindings(
+            backends,
+            (("vlm", profile.vlm), ("embedding", profile.embedding)),
+            require_api_key_env=True,
         )
-    return diagnostics
+    )
+    return ConfigDiagnostics(issues=issues)

@@ -8,7 +8,9 @@ from vsa_agent.config import (
     AppConfig,
     BackendConfig,
     ProfileConfig,
+    ProviderRuntimeConfig,
     RecordedVideoConfig,
+    ResolvedRoleConfig,
     RoleBindingConfig,
     SearchBackendConfig,
     validate_recorded_video_runtime,
@@ -66,6 +68,20 @@ def test_recorded_video_defaults_and_limits():
     assert config.worker_concurrency == 3
     assert config.lease_sec == 120
     assert config.max_attempts == 3
+
+
+def test_provider_runtime_config_is_public_resolved_role_alias():
+    runtime = ProviderRuntimeConfig(
+        role="vlm",
+        backend="local-vlm",
+        provider="vllm",
+        base_url="http://localhost:8000/v1",
+        model="Qwen3-VL",
+    )
+
+    assert ProviderRuntimeConfig is ResolvedRoleConfig
+    assert runtime.role == "vlm"
+    assert runtime.api_key is None
 
 
 @pytest.mark.parametrize(
@@ -159,6 +175,59 @@ def test_production_recorded_video_accepts_resolvable_providers(monkeypatch):
     diagnostics = validate_recorded_video_runtime(production_config())
 
     assert diagnostics.ok is True
+
+
+@pytest.mark.parametrize(
+    "invalid_llm",
+    ["binding_backend", "base_url", "model", "credential"],
+)
+def test_recorded_video_ignores_invalid_llm_when_required_roles_are_valid(
+    monkeypatch, invalid_llm
+):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    config = AppConfig(
+        active_profile="production",
+        backends={
+            "llm": BackendConfig(
+                base_url="https://llm.example/v1",
+                api_key_required=False,
+            ),
+            "vlm": BackendConfig(
+                base_url="https://vlm.example/v1",
+                api_key_required=False,
+            ),
+            "embedding": BackendConfig(
+                base_url="https://embedding.example/v1",
+                api_key_required=False,
+            ),
+        },
+        profiles={
+            "production": ProfileConfig(
+                llm=RoleBindingConfig(backend="llm", model="llm-model"),
+                vlm=RoleBindingConfig(backend="vlm", model="vlm-model"),
+                embedding=RoleBindingConfig(backend="embedding", model="embedding-model"),
+            )
+        },
+        recorded_video=RecordedVideoConfig(enabled=True),
+        search=SearchBackendConfig(
+            allow_mock_fallback=False,
+            force_mock_embedding=False,
+        ),
+    )
+    if invalid_llm == "binding_backend":
+        config.profiles["production"].llm.backend = "missing-llm"
+    elif invalid_llm == "base_url":
+        config.backends["llm"].base_url = ""
+    elif invalid_llm == "model":
+        config.profiles["production"].llm.model = ""
+    else:
+        config.backends["llm"].api_key_required = True
+        config.backends["llm"].api_key_env = "LLM_API_KEY"
+
+    diagnostics = validate_recorded_video_runtime(config)
+
+    assert diagnostics.ok is True
+    assert diagnostics.issues == []
 
 
 def test_main_config_enables_production_recorded_video_without_secrets(monkeypatch):
