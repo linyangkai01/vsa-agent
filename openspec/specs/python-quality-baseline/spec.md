@@ -30,4 +30,3 @@ TBD - created by archiving change enforce-python-quality-baseline. Update Purpos
 #### Scenario: 完成质量整理
 - **WHEN** 所有 Ruff 问题和格式差异被清除
 - **THEN** 全量 pytest 套件 MUST 继续通过
-
