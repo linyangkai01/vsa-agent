@@ -18,6 +18,8 @@
 
 ## 4. 验证与质量收尾
 
-- [ ] 4.1 运行视频理解、LVS、shared data model 和 acceptance 路径测试。
-- [ ] 4.2 运行 Ruff 门禁和全量 `pytest -q`，确认 facade 与注册入口未回归。
-- [ ] 4.3 更新 `docs/DEVELOPMENT_STATUS.md`，记录模块边界、保留的兼容路径和验证结果。
+- [x] 4.1 运行视频理解、LVS、shared data model 和 acceptance 路径测试。
+- [x] 4.2 运行 Ruff 门禁和全量 `pytest -q`，确认 facade 与注册入口未回归。
+- [x] 4.3 更新 `docs/DEVELOPMENT_STATUS.md`，记录模块边界、保留的兼容路径和验证结果。
+
+<!-- review skipped: multi-agent execution was not authorized for this run -->

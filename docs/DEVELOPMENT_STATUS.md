@@ -64,7 +64,7 @@ The repository-wide Python quality work is split into five ordered Comet changes
 - `stabilize-test-contracts`: implementation and verification complete. The current branch already contains `tests/unit/recorded_video/__init__.py`, which gives `recorded_video/test_models.py` a package-qualified module name while `archive/test_models.py` remains distinct.
 - `enforce-python-quality-baseline`: implementation complete; Ruff lint and format debt is cleared in `src/` and `tests/`.
 - `consolidate-runtime-scripts`: implementation complete; all 14 user entries remain, the DashScope wrappers share one preflight helper, and stale archived-change paths no longer block server sync preflight.
-- `refactor-video-understanding-pipeline`: separate normalization from I/O orchestration while preserving public contracts.
+- `refactor-video-understanding-pipeline`: implementation complete; pure normalization is isolated from the stable I/O facade while public contracts and monkeypatch paths remain intact.
 - `refactor-search-orchestration`: consolidate search result normalization, routing, fusion and critic stages.
 
 Test collection verification on 2026-07-13:
@@ -100,6 +100,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-server-files.ps
 ```
 
 Result: all scripts parsed; `58` script tests passed; Ruff reported zero issues and 235 formatted files; `760 passed, 4 skipped, 1 warning`; mapped target preflight passed for 36 files. The 14 user script entries remain supported, while the two DashScope entries now share `scripts/lib/dashscope_runtime.sh`.
+
+Video-understanding pipeline verification on 2026-07-13:
+
+```powershell
+pytest -q tests/unit/tools/test_video_understanding_normalization.py tests/unit/tools/test_video_understanding.py tests/unit/tools/test_video_understanding_live_trace.py tests/unit/tools/test_lvs_video_understanding.py tests/unit/data_models/test_understanding_models.py tests/acceptance/test_video_understanding_flow.py
+python -m compileall -q src tests
+ruff check src tests
+ruff format --check src tests
+pytest -q
+```
+
+Result: the video path matrix passed 96 tests; Ruff reported zero issues and 237 formatted files; the current full tree passed `782 passed, 4 skipped, 1 warning`. `video_understanding_normalization.py` owns pure time, reasoning, evidence, event and result conversion; `video_understanding.py` keeps stable frame/VLM/source/tool boundaries and compatibility imports; LVS directly consumes the pure timestamp helper.
 
 ## Active Runtime Validation
 
