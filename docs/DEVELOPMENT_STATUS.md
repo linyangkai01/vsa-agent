@@ -4,9 +4,9 @@ Last updated: 2026-07-13
 
 ## Current State
 
-- Active OpenSpec change: `script-es-runtime-stack`.
-- Active branch: `codex/script-es-runtime-stack`.
-- Goal: provide an interactive Windows/Linux ES, API and original-UI launcher that verifies the original `/api/v1/search` business flow.
+- Active OpenSpec changes on `master`: none.
+- The five-change Python quality program is implemented, verified and archived.
+- Recorded-video development remains isolated on `codex/production-recorded-video-ingest`; its runtime code and active OpenSpec artifacts are not part of this `master` integration.
 - Default `config.yaml` still keeps `search.enabled: false`; runtime validation uses an explicit temporary config.
 - Stack wrappers: `scripts/es-runtime-stack.ps1`, `scripts/es-runtime-stack.sh`.
 - Smoke script: `scripts/es_ingest_smoke.py`.
@@ -29,43 +29,27 @@ Last updated: 2026-07-13
 
 ## Latest Verified Change
 
-`wire-es-ingest`
+`refactor-search-orchestration`
 
-- Added real `/api/search/ingest` behavior.
-- Uses `SearchBackendConfig`.
-- Returns `skipped` when search indexing is disabled or not configured.
-- Indexes one normalized metadata document to `search.embed_index` when enabled.
-- Returns HTTP 502 for Elasticsearch indexing failures.
-- Registers the ingest route in the FastAPI app.
-
-Verification:
-
-```powershell
-python -m pytest tests\unit\api\test_video_search_ingest.py tests\unit\api\test_original_ui_chat.py tests\unit\api\test_original_ui_chat_route.py tests\unit\test_config_search.py tests\unit\tools\test_embed_search.py tests\unit\tools\test_attribute_search.py tests\unit\tools\test_search.py tests\unit\agents\test_search_agent.py -q
-```
-
-Result: `79 passed, 1 warning`.
-
-```powershell
-npx openspec validate wire-es-ingest
-```
-
-Result: valid before archive.
+- Centralized search routing, result normalization, highest-score deduplication, confidence fallback, critic filtering and top-k trimming in `search_pipeline.py`.
+- Kept models, external I/O, stage logging, critic calls, progress order and registration in `search.py`.
+- Archived the OpenSpec change and merged its four requirements into the main specification.
+- Search path matrix: `75 passed, 1 warning`.
 
 ## Active Change
 
-- `script-es-runtime-stack`: building stack commands that start ES, start FastAPI with a temporary search-enabled config, run ingest/search smoke validation, and clean up owned resources.
-- Next server validation command: `./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings`.
+- No active change is present on `master`.
+- `production-recorded-video-ingest` remains in progress on `codex/production-recorded-video-ingest`; resume from task 1.2 after this quality integration.
 
 ## Python Quality Program
 
-The repository-wide Python quality work is split into five ordered Comet changes. `frontend/original-ui` is excluded from code-quality refactoring.
+The repository-wide Python quality work was completed as five ordered Comet changes. `frontend/original-ui` was excluded from code-quality refactoring. All five changes are archived.
 
-- `stabilize-test-contracts`: implementation and verification complete. The current branch already contains `tests/unit/recorded_video/__init__.py`, which gives `recorded_video/test_models.py` a package-qualified module name while `archive/test_models.py` remains distinct.
-- `enforce-python-quality-baseline`: implementation complete; Ruff lint and format debt is cleared in `src/` and `tests/`.
-- `consolidate-runtime-scripts`: implementation complete; all 14 user entries remain, the DashScope wrappers share one preflight helper, and stale archived-change paths no longer block server sync preflight.
-- `refactor-video-understanding-pipeline`: implementation complete; pure normalization is isolated from the stable I/O facade while public contracts and monkeypatch paths remain intact.
-- `refactor-search-orchestration`: implementation complete; routing, normalization, deduplication, confidence fallback, critic filtering and trimming now use one pure rule module.
+- `stabilize-test-contracts`: archived. `tests/unit/recorded_video/__init__.py` gives future recorded-video tests a package-qualified module name while `archive/test_models.py` remains distinct.
+- `enforce-python-quality-baseline`: archived. Ruff lint and format debt is cleared in `src/` and `tests/`.
+- `consolidate-runtime-scripts`: archived. All 14 user entries remain, the DashScope wrappers share one preflight helper, and stale archived-change paths no longer block server sync preflight.
+- `refactor-video-understanding-pipeline`: archived. Pure normalization is isolated from the stable I/O facade while public contracts and monkeypatch paths remain intact.
+- `refactor-search-orchestration`: archived. Routing, normalization, deduplication, confidence fallback, critic filtering and trimming use one pure rule module.
 
 Test collection verification on 2026-07-13:
 
@@ -123,7 +107,20 @@ ruff format --check src tests
 pytest -q
 ```
 
-Result: the search path matrix passed 75 tests; Ruff reported zero issues and 239 formatted files; the current full tree passed `792 passed, 4 skipped, 1 warning`. `search_pipeline.py` owns pure routing and result-selection rules; `search.py` retains models, external dependency boundaries, stage logs, critic calls, progress order and registration.
+Result: the search path matrix passed 75 tests; Ruff reported zero issues and 239 formatted files; the final development branch passed `795 passed, 4 skipped, 1 warning`. `search_pipeline.py` owns pure routing and result-selection rules; `search.py` retains models, external dependency boundaries, stage logs, critic calls, progress order and registration.
+
+Master integration verification on 2026-07-13:
+
+```powershell
+python -m compileall -q src tests
+ruff check src tests
+ruff format --check src tests
+pytest -q
+openspec validate --all
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-server-files.ps1 -PreflightOnly
+```
+
+Result: compileall and Ruff passed; 233 files were formatted; `721 passed, 4 skipped, 1 warning`; all 9 main OpenSpec specifications were valid; the mapped server preflight passed for 36 files. The warning remains the existing Starlette/httpx deprecation. The integration excludes recorded-video runtime code and its active change artifacts.
 
 ## Active Runtime Validation
 
@@ -139,4 +136,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-Finish `script-es-runtime-stack` through Comet verification, sync changed files to `Z:\vsa-agent`, then merge locally to `master` and push only `master` to origin.
+Resume `production-recorded-video-ingest` on `codex/production-recorded-video-ingest` from task 1.2, keeping its Comet artifacts and runtime implementation isolated until that change passes verification.

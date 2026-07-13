@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 LOCAL_CONFIG_FILENAME = "config.local.yaml"
 
