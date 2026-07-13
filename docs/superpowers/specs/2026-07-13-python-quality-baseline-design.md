@@ -2,6 +2,8 @@
 comet_change: enforce-python-quality-baseline
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-13-enforce-python-quality-baseline
+status: final
 ---
 
 # Python 质量基线技术设计
@@ -31,3 +33,4 @@ canonical_spec: openspec
 ## 回滚策略
 
 配置迁移、安全修复、格式化和人工语义修复分开提交。若测试失败，先回滚对应类别提交，不关闭 Ruff 规则或降低测试断言。
+

@@ -2,6 +2,7 @@
 change: enforce-python-quality-baseline
 design-doc: docs/superpowers/specs/2026-07-13-python-quality-baseline-design.md
 base-ref: 17f221c1d21780492bbe32e8c1ecea1db83c9fef
+archived-with: 2026-07-13-enforce-python-quality-baseline
 ---
 
 # Python 质量基线 Implementation Plan
@@ -21,6 +22,7 @@ base-ref: 17f221c1d21780492bbe32e8c1ecea1db83c9fef
 - 不改变公开 API、数据模型、prompt 内容或工具/代理注册行为。
 - 当前 Red：308 个 lint 问题，125 个文件需要格式化。
 
+archived-with: 2026-07-13-enforce-python-quality-baseline
 ---
 
 ### Task 1: 迁移 Ruff 配置
@@ -146,3 +148,4 @@ Run: `git add pyproject.toml src tests docs/DEVELOPMENT_STATUS.md docs/superpowe
 Run: `git commit -m "style: enforce Python quality baseline"`
 
 Expected: commit excludes the other active change directories.
+
