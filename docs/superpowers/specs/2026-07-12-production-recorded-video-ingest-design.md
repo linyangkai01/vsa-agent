@@ -1,3 +1,9 @@
+---
+comet_change: production-recorded-video-ingest
+role: technical-design
+canonical_spec: openspec
+---
+
 # 真实录播视频生产闭环设计
 
 日期：2026-07-12
