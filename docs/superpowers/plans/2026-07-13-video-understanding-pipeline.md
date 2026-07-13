@@ -65,25 +65,25 @@ Run: `git add tests/unit/tools/test_video_understanding_normalization.py && git 
 - Produces: 原 helper 签名和新 `_build_evidence(...) -> EvidenceRef`。
 - Facade: 从纯模块导入原 helper 名称，不定义第二份实现。
 
-- [ ] **Step 1: 移动纯函数**
+- [x] **Step 1: 移动纯函数**
 
 将时间转换、reasoning 分离、事件提取和模型响应转换移动到新模块。新增 `_build_evidence` 统一 source-specific 字段，保留原默认值、事件 ID、metadata 和字典/既有结果分支。
 
-- [ ] **Step 2: 建立 facade 兼容导入**
+- [x] **Step 2: 建立 facade 兼容导入**
 
 从新模块显式导入 `_normalize_model_response`、`_normalize_timestamp`、`_parse_thinking_from_content`、`_timestamp_to_seconds`；删除 facade 中重复实现和不再使用的数据模型/时间转换导入。
 
-- [ ] **Step 3: 解除 LVS 反向依赖**
+- [x] **Step 3: 解除 LVS 反向依赖**
 
 将 LVS 的 `_timestamp_to_seconds` import 改为 `video_understanding_normalization`，`analyze_video_segment` 仍从 facade 导入以保留动态调用路径。
 
-- [ ] **Step 4: 验证 Green**
+- [x] **Step 4: 验证 Green**
 
 Run: `pytest -q tests/unit/tools/test_video_understanding_normalization.py tests/unit/tools/test_video_understanding.py tests/unit/tools/test_lvs_video_understanding.py`
 
 Expected: all selected tests pass。
 
-- [ ] **Step 5: 运行静态门禁并提交**
+- [x] **Step 5: 运行静态门禁并提交**
 
 Run: `ruff check src/vsa_agent/tools/video_understanding.py src/vsa_agent/tools/video_understanding_normalization.py src/vsa_agent/tools/lvs_video_understanding.py tests/unit/tools/test_video_understanding_normalization.py`
 
