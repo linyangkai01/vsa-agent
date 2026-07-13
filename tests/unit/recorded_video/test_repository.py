@@ -328,6 +328,35 @@ async def test_complete_upload_rejects_unlisted_composite_api_key_names_before_j
     assert persisted_json == []
 
 
+@pytest.mark.parametrize("section", ["pipeline", "vision"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+        base64.b64encode(b"\x00\x00\x00\x01\x67\x42\x00\x1e\x95\xa8\x28\x0f" + b"h264bytes" * 9).decode(),
+    ],
+)
+@pytest.mark.asyncio
+async def test_complete_upload_rejects_unsafe_model_values_before_json_persistence(
+    repo: JobRepository,
+    section: str,
+    model: str,
+):
+    session = _session()
+    await repo.create_upload_session(_asset(), session)
+    await _record_all_chunks(repo, session)
+
+    with pytest.raises(ValueError, match="snapshot model is not allowed"):
+        await repo.complete_upload(
+            "asset",
+            "v1",
+            now=NOW,
+            config_snapshot={section: {"model": model}},
+        )
+
+    assert _fetch_one(repo.database_path, "SELECT COUNT(*) AS value FROM jobs")["value"] == 0
+
+
 @pytest.mark.parametrize(
     ("payload_key", "payload"),
     [

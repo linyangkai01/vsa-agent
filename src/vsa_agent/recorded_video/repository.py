@@ -32,6 +32,7 @@ _SCHEMA_VERSION = 1
 _SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
 _SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
 _SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
+_SNAPSHOT_MODEL_REFERENCES = frozenset({"qwen"})
 
 _MIGRATION_1 = (
     """
@@ -172,6 +173,11 @@ def _validate_snapshot_identifier(value: Any, path: str) -> None:
         raise ValueError(f"snapshot value must be a short identifier: {path}")
 
 
+def _validate_snapshot_model_reference(value: Any, path: str) -> None:
+    if value not in _SNAPSHOT_MODEL_REFERENCES:
+        raise ValueError(f"snapshot model is not allowed: {path}")
+
+
 def _validate_snapshot_section(value: Any, path: str) -> None:
     if not isinstance(value, Mapping):
         raise ValueError(f"snapshot section must be an object: {path}")
@@ -179,7 +185,7 @@ def _validate_snapshot_section(value: Any, path: str) -> None:
         if key not in _SNAPSHOT_SECTION_FIELDS:
             raise ValueError(f"snapshot key is not allowed: {path}.{key}")
         if key == "model":
-            _validate_snapshot_identifier(item, f"{path}.{key}")
+            _validate_snapshot_model_reference(item, f"{path}.{key}")
         elif key == "enabled":
             if not isinstance(item, bool):
                 raise ValueError(f"snapshot value must be boolean: {path}.{key}")
