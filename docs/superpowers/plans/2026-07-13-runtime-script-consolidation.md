@@ -2,6 +2,7 @@
 change: consolidate-runtime-scripts
 design-doc: docs/superpowers/specs/2026-07-13-runtime-script-consolidation-design.md
 base-ref: 86c3ee51b3fa108310d04c5d1eb14225f1c33cbe
+archived-with: 2026-07-13-consolidate-runtime-scripts
 ---
 
 # 运行脚本整理 Implementation Plan
@@ -22,6 +23,7 @@ base-ref: 86c3ee51b3fa108310d04c5d1eb14225f1c33cbe
 - 不使用 `eval`，不读取或写入 `.env`，不输出 API key。
 - 删除脚本前必须迁移全部调用者并证明全仓引用数为零；本轮无删除候选。
 
+archived-with: 2026-07-13-consolidate-runtime-scripts
 ---
 
 ### Task 1: 固化共享前置契约

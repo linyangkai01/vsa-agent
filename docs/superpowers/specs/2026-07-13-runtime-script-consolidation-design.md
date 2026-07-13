@@ -2,6 +2,8 @@
 comet_change: consolidate-runtime-scripts
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-13-consolidate-runtime-scripts
+status: final
 ---
 
 # 运行脚本整理技术设计
