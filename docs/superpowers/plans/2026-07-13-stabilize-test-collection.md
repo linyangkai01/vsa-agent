@@ -32,13 +32,13 @@ base-ref: 981007bf0a371f6e1385d3cae171af22db41db18
 - Consumes: pytest 默认测试收集规则。
 - Produces: 需要包边界的目录清单。
 
-- [ ] **Step 1: 运行组合收集并验证 RED**
+- [x] **Step 1: 运行组合收集并验证 RED**
 
 Run: `pytest --collect-only -q tests/unit/archive/test_models.py tests/unit/recorded_video/test_models.py`
 
 Expected: FAIL with `import file mismatch` and both paths in the diagnostic.
 
-- [ ] **Step 2: 扫描重复 basename**
+- [x] **Step 2: 扫描重复 basename**
 
 Run a PowerShell grouping over tracked `tests/**/*.py` files and list names whose count is greater than one. For each duplicate, record whether its parent contains `__init__.py`.
 
@@ -54,17 +54,17 @@ Expected: `test_models.py` includes the archive and recorded-video directories, 
 - Consumes: existing parent packages `tests` and `tests.unit`.
 - Produces: module names `tests.unit.archive.test_models` and `tests.unit.recorded_video.test_models`.
 
-- [ ] **Step 1: 创建空包初始化文件**
+- [x] **Step 1: 创建空包初始化文件**
 
 Create both files as empty Python package markers. Do not add runtime imports or comments.
 
-- [ ] **Step 2: 运行组合收集并验证 GREEN**
+- [x] **Step 2: 运行组合收集并验证 GREEN**
 
 Run: `pytest --collect-only -q tests/unit/archive/test_models.py tests/unit/recorded_video/test_models.py`
 
 Expected: PASS and collect all tests from both files without mismatch.
 
-- [ ] **Step 3: 运行组合测试**
+- [x] **Step 3: 运行组合测试**
 
 Run: `pytest -q tests/unit/archive/test_models.py tests/unit/recorded_video/test_models.py`
 
@@ -80,23 +80,23 @@ Expected: PASS with all tests from both files executed.
 - Consumes: stable package identities from Task 2.
 - Produces: verified repository test baseline and durable status record.
 
-- [ ] **Step 1: 运行全量收集**
+- [x] **Step 1: 运行全量收集**
 
 Run: `pytest --collect-only -q`
 
 Expected: PASS without import mismatch.
 
-- [ ] **Step 2: 运行全量测试**
+- [x] **Step 2: 运行全量测试**
 
 Run: `pytest -q`
 
 Expected: PASS; conditional skips remain skips rather than failures.
 
-- [ ] **Step 3: 更新状态和任务**
+- [x] **Step 3: 更新状态和任务**
 
 Record the root cause, package-boundary fix, exact commands, counts and date in `docs/DEVELOPMENT_STATUS.md`. Mark each verified OpenSpec task complete only after its command passes.
 
-- [ ] **Step 4: 提交 change 文件**
+- [x] **Step 4: 提交 change 文件**
 
 Run: `git add tests/unit/archive/__init__.py tests/unit/recorded_video/__init__.py openspec/changes/stabilize-test-contracts docs/superpowers/specs/2026-07-13-stabilize-test-collection-design.md docs/superpowers/plans/2026-07-13-stabilize-test-collection.md docs/DEVELOPMENT_STATUS.md`
 
