@@ -32,21 +32,21 @@ base-ref: 45f2bf7a03d741a728ac5d1149e99896e93e8b3e
 **Interfaces:**
 - Produces: 路由、归一化、去重、回退、过滤和裁剪的表驱动契约。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 从 `vsa_agent.tools.search_pipeline` 导入 `select_search_route`、`normalize_search_results`、`rank_unique_results`、`select_fusion_results`、`filter_rejected_sensors`、`trim_search_results` 和 `should_apply_critic`。
 
-- [ ] **Step 2: 覆盖规则矩阵**
+- [x] **Step 2: 覆盖规则矩阵**
 
 使用 `SearchOutput`、`SimpleNamespace(data=...)`、列表和 `None`；覆盖四种路由结果、同视频高分保留、降序、低置信度属性回退、critic sensor 过滤、top_k 和输入列表不变。
 
-- [ ] **Step 3: 验证 Red**
+- [x] **Step 3: 验证 Red**
 
 Run: `pytest -q tests/unit/tools/test_search_pipeline.py`
 
 Expected: collection FAIL with `ModuleNotFoundError`。
 
-- [ ] **Step 4: 提交测试**
+- [x] **Step 4: 提交测试**
 
 Run: `git add tests/unit/tools/test_search_pipeline.py && git commit -m "test: characterize search pipeline rules"`
 
