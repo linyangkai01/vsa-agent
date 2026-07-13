@@ -7,6 +7,7 @@ from typing import Any
 
 
 class ErrorCode(str, Enum):
+    DISK_FULL = "DISK_FULL"
     CORRUPT_MEDIA = "CORRUPT_MEDIA"
     UNSUPPORTED_MEDIA = "UNSUPPORTED_MEDIA"
     FFMPEG_MISSING = "FFMPEG_MISSING"
@@ -21,6 +22,7 @@ class ErrorCode(str, Enum):
 
 PERMANENT_ERROR_CODES: frozenset[ErrorCode] = frozenset(
     {
+        ErrorCode.DISK_FULL,
         ErrorCode.CORRUPT_MEDIA,
         ErrorCode.UNSUPPORTED_MEDIA,
         ErrorCode.FFMPEG_MISSING,

@@ -103,6 +103,7 @@ def test_invalid_transition_reports_source_and_target() -> None:
 
 def test_error_codes_are_partitioned_by_retryability() -> None:
     assert PERMANENT_ERROR_CODES == {
+        ErrorCode.DISK_FULL,
         ErrorCode.CORRUPT_MEDIA,
         ErrorCode.UNSUPPORTED_MEDIA,
         ErrorCode.FFMPEG_MISSING,
@@ -117,6 +118,7 @@ def test_error_codes_are_partitioned_by_retryability() -> None:
         ErrorCode.ES_5XX,
     }
     assert not (PERMANENT_ERROR_CODES & RETRYABLE_ERROR_CODES)
+    assert PERMANENT_ERROR_CODES | RETRYABLE_ERROR_CODES == set(ErrorCode)
 
 
 def test_recorded_video_error_rejects_retryability_that_conflicts_with_code() -> None:
