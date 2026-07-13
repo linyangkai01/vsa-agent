@@ -2,6 +2,7 @@
 change: stabilize-test-contracts
 design-doc: docs/superpowers/specs/2026-07-13-stabilize-test-collection-design.md
 base-ref: 981007bf0a371f6e1385d3cae171af22db41db18
+archived-with: 2026-07-13-stabilize-test-contracts
 ---
 
 # 测试收集稳定化 Implementation Plan
@@ -20,6 +21,7 @@ base-ref: 981007bf0a371f6e1385d3cae171af22db41db18
 - 不跳过、排除或重命名现有测试。
 - 保留未归属本 change 的 `recorded_video` 工作区修改。
 
+archived-with: 2026-07-13-stabilize-test-contracts
 ---
 
 ### Task 1: 证明并定位模块身份冲突
@@ -103,3 +105,4 @@ Run: `git add tests/unit/archive/__init__.py tests/unit/recorded_video/__init__.
 Run: `git commit -m "test: stabilize pytest module collection"`
 
 Expected: commit contains only this change and its planning/status artifacts.
+

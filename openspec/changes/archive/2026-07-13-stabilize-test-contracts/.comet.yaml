@@ -1,6 +1,6 @@
 workflow: full
 language: zh-CN
-phase: verify
+phase: archive
 context_compression: off
 build_mode: executing-plans
 build_pause: null
@@ -13,12 +13,12 @@ auto_transition: true
 base_ref: 3ff0625b9b7accd12783af98481d989dbfc0f9a6
 design_doc: docs/superpowers/specs/2026-07-13-stabilize-test-collection-design.md
 plan: docs/superpowers/plans/2026-07-13-stabilize-test-collection.md
-verify_result: pending
+verify_result: pass
 verification_report: docs/superpowers/reports/2026-07-13-stabilize-test-contracts-verify.md
 branch_status: handled
 created_at: 2026-07-13
-verified_at: null
-archived: false
+verified_at: 2026-07-13
+archived: true
 direct_override: null
 handoff_context: openspec/changes/stabilize-test-contracts/.comet/handoff/design-context.json
 handoff_hash: 9d752aabf1ec9389d71bf1f482c19a0ae4d4803889c5529dca098af284562e10
