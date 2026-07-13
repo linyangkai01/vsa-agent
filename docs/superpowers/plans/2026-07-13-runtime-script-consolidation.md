@@ -34,21 +34,21 @@ base-ref: 86c3ee51b3fa108310d04c5d1eb14225f1c33cbe
 - Consumes: 两个现有 DashScope wrapper 和 14 个脚本入口。
 - Produces: `scripts/lib/dashscope_runtime.sh` 的结构契约与脚本审计清单。
 
-- [ ] **Step 1: 添加失败测试**
+- [x] **Step 1: 添加失败测试**
 
 测试必须断言：helper 文件存在；两个 wrapper source `lib/dashscope_runtime.sh`；`DASHSCOPE_API_KEY` 前置 guard 和 `config doctor` 只由 helper 持有；wrapper 仍包含各自的 pytest 或 `live_video_acceptance` 目标命令。
 
-- [ ] **Step 2: 验证 Red**
+- [x] **Step 2: 验证 Red**
 
 Run: `pytest -q tests/unit/test_dashscope_live_runner.py`
 
 Expected: FAIL，因为 helper 尚不存在，wrapper 仍内联公共前置逻辑。
 
-- [ ] **Step 3: 写入脚本清单**
+- [x] **Step 3: 写入脚本清单**
 
 创建表格，列出 14 个入口的脚本名、平台、职责、调用依据、验证命令和结论；两个 DashScope wrapper 标记为“保留入口、合并内部前置”，其他入口标记为“保留”，删除候选写“无”。
 
-- [ ] **Step 4: 提交契约与清单**
+- [x] **Step 4: 提交契约与清单**
 
 Run: `git add tests/unit/test_dashscope_live_runner.py docs/superpowers/reference/runtime-scripts.md && git commit -m "test: define runtime script consolidation contract"`
 
