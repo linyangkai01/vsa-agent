@@ -408,21 +408,29 @@ async def test_renew_lease_checks_owner_and_updates_heartbeat(repo: JobRepositor
 
 
 @pytest.mark.asyncio
-async def test_renew_and_retry_keep_the_existing_optional_attempt_call_shape(repo: JobRepository):
+async def test_renew_lease_requires_attempt_fencing_token(repo: JobRepository):
     await _ready_job(repo)
     claimed = await repo.claim_due_job("worker-1", NOW)
     assert claimed is not None
 
-    renewed = await repo.renew_lease(claimed.job_id, "worker-1", NOW + timedelta(seconds=1))
-    scheduled = await repo.schedule_retry(
-        renewed.job_id,
-        "worker-1",
-        NOW + timedelta(minutes=1),
-        "temporary failure",
-        now=NOW + timedelta(seconds=2),
-    )
+    with pytest.raises(TypeError, match="attempt"):
+        await repo.renew_lease(claimed.job_id, "worker-1", NOW + timedelta(seconds=1))
 
-    assert scheduled.status is JobStatus.RETRY_WAIT
+
+@pytest.mark.asyncio
+async def test_schedule_retry_requires_attempt_fencing_token(repo: JobRepository):
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+
+    with pytest.raises(TypeError, match="attempt"):
+        await repo.schedule_retry(
+            claimed.job_id,
+            "worker-1",
+            NOW + timedelta(minutes=1),
+            "temporary failure",
+            now=NOW + timedelta(seconds=2),
+        )
 
 
 @pytest.mark.asyncio

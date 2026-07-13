@@ -505,14 +505,13 @@ class JobRepository:
         owner: str,
         now: datetime,
         *,
-        attempt: int | None = None,
+        attempt: int,
     ) -> Job:
         renewed_at = _require_aware(now, "now")
         renewed_iso = _to_iso(renewed_at)
         lease_until = _to_iso(renewed_at + timedelta(seconds=self.lease_seconds))
 
         async with self._write_transaction() as connection:
-            effective_attempt = await self._resolve_attempt(connection, job_id, attempt)
             row = await self._fetchone(
                 connection,
                 """
@@ -529,13 +528,13 @@ class JobRepository:
                     job_id,
                     JobStatus.RUNNING.value,
                     owner,
-                    effective_attempt,
+                    attempt,
                     renewed_iso,
                 ),
             )
             if row is not None:
                 return self._row_to_job(row)
-            await self._raise_lease_error(connection, job_id, owner, effective_attempt, renewed_at)
+            await self._raise_lease_error(connection, job_id, owner, attempt, renewed_at)
             raise AssertionError("unreachable")
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
@@ -622,14 +621,13 @@ class JobRepository:
         next_run_at: datetime,
         error: str,
         *,
-        attempt: int | None = None,
+        attempt: int,
         now: datetime | None = None,
     ) -> Job:
         retry_at = _require_aware(next_run_at, "next_run_at")
         scheduled_at = _require_aware(now or self._now(), "now")
 
         async with self._write_transaction() as connection:
-            effective_attempt = await self._resolve_attempt(connection, job_id, attempt)
             row = await self._fetchone(
                 connection,
                 """
@@ -648,13 +646,13 @@ class JobRepository:
                     job_id,
                     JobStatus.RUNNING.value,
                     owner,
-                    effective_attempt,
+                    attempt,
                     _to_iso(scheduled_at),
                 ),
             )
             if row is not None:
                 return self._row_to_job(row)
-            await self._raise_lease_error(connection, job_id, owner, effective_attempt, scheduled_at)
+            await self._raise_lease_error(connection, job_id, owner, attempt, scheduled_at)
             raise AssertionError("unreachable")
 
     async def request_cancel(self, job_id: str, now: datetime) -> Job:
@@ -758,20 +756,6 @@ class JobRepository:
             """,
             (now_iso, now_iso, now_iso, now_iso, now_iso, now_iso, *target_parameters),
         )
-
-    @classmethod
-    async def _resolve_attempt(
-        cls,
-        connection: aiosqlite.Connection,
-        job_id: str,
-        attempt: int | None,
-    ) -> int:
-        if attempt is not None:
-            return attempt
-        current = await cls._fetchone(connection, "SELECT attempt FROM jobs WHERE job_id = ?", (job_id,))
-        if current is None:
-            raise KeyError(f"unknown job: {job_id}")
-        return int(current["attempt"])
 
     @classmethod
     async def _require_active_lease(
