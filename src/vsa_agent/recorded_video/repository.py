@@ -376,6 +376,179 @@ class JobRepository:
                 await cursor.close()
         return [self._row_to_upload_session(row) for row in rows]
 
+    async def get_upload_context(self, session_id: str) -> tuple[UploadSession, Asset]:
+        """Load the persisted upload session and its asset for an API request."""
+        async with self._connect() as connection:
+            session_row = await self._fetchone(
+                connection,
+                "SELECT * FROM upload_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if session_row is None:
+                raise KeyError(f"unknown upload session: {session_id}")
+            asset_row = await self._fetchone(
+                connection,
+                "SELECT * FROM assets WHERE asset_id = ?",
+                (session_row["asset_id"],),
+            )
+            if asset_row is None:
+                raise KeyError(f"unknown asset: {session_row['asset_id']}")
+        return self._row_to_upload_session(session_row), self._row_to_asset(asset_row)
+
+    async def stored_upload_bytes(self, session_id: str) -> int:
+        """Return the durable byte count for chunks reserved by an upload session."""
+        async with self._connect() as connection:
+            session = await self._fetchone(
+                connection,
+                "SELECT session_id FROM upload_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if session is None:
+                raise KeyError(f"unknown upload session: {session_id}")
+            row = await self._fetchone(
+                connection,
+                "SELECT COALESCE(SUM(size_bytes), 0) AS stored_bytes FROM upload_chunks WHERE session_id = ?",
+                (session_id,),
+            )
+        return int(row["stored_bytes"] if row is not None else 0)
+
+    async def reserve_upload_chunk(
+        self,
+        session_id: str,
+        *,
+        identifier: str,
+        chunk_number: int,
+        total_chunks: int,
+        checksum: str,
+        size_bytes: int,
+        max_upload_bytes: int,
+        path: str,
+    ) -> bool:
+        """Atomically bind an upload and reserve durable quota for one chunk.
+
+        The initial session identifier is its session id. The first chunk replaces
+        that placeholder with the client-supplied nvstreamer identifier and fixes
+        the initially unknown total chunk count. Recording before filesystem I/O
+        makes the size limit safe across concurrent API workers; callers must
+        release a newly-created reservation when their write fails.
+        """
+        if not identifier:
+            raise ValueError("upload identifier is required")
+        if total_chunks < 1:
+            raise ValueError("total_chunks must be positive")
+        if size_bytes < 0:
+            raise ValueError("size_bytes cannot be negative")
+        if max_upload_bytes < 1:
+            raise ValueError("max_upload_bytes must be positive")
+
+        try:
+            async with self._write_transaction() as connection:
+                session = await self._fetchone(
+                    connection,
+                    "SELECT * FROM upload_sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                if session is None:
+                    raise KeyError(f"unknown upload session: {session_id}")
+
+                is_initial_chunk = session["received_chunks"] == 0
+                if is_initial_chunk:
+                    await connection.execute(
+                        """
+                        UPDATE upload_sessions
+                        SET identifier = ?, total_chunks = ?
+                        WHERE session_id = ?
+                        """,
+                        (identifier, total_chunks, session_id),
+                    )
+                elif session["identifier"] != identifier:
+                    raise ValueError("upload identifier does not match session")
+                elif session["total_chunks"] != total_chunks:
+                    raise ValueError("total chunks do not match session")
+
+                if not 1 <= chunk_number <= total_chunks:
+                    raise ValueError(f"chunk_number must be between 1 and {total_chunks}")
+
+                existing = await self._fetchone(
+                    connection,
+                    "SELECT checksum, size_bytes, path FROM upload_chunks WHERE session_id = ? AND chunk_number = ?",
+                    (session_id, chunk_number),
+                )
+                if existing is not None:
+                    if (
+                        existing["checksum"] != checksum
+                        or existing["size_bytes"] != size_bytes
+                        or existing["path"] != path
+                    ):
+                        raise ValueError("chunk key already contains different content")
+                    return False
+
+                total_row = await self._fetchone(
+                    connection,
+                    "SELECT COALESCE(SUM(size_bytes), 0) AS stored_bytes FROM upload_chunks WHERE session_id = ?",
+                    (session_id,),
+                )
+                stored_bytes = int(total_row["stored_bytes"] if total_row is not None else 0)
+                if stored_bytes + size_bytes > max_upload_bytes:
+                    raise ValueError("maximum upload size exceeded")
+
+                await connection.execute(
+                    """
+                    INSERT INTO upload_chunks (
+                        session_id, chunk_number, checksum, size_bytes, path, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
+                )
+                await connection.execute(
+                    """
+                    UPDATE upload_sessions
+                    SET received_chunks = (
+                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
+                    )
+                    WHERE session_id = ?
+                    """,
+                    (session_id, session_id),
+                )
+                return True
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("upload identifier belongs to a different session") from exc
+
+    async def release_reserved_upload_chunk(
+        self,
+        session_id: str,
+        chunk_number: int,
+        checksum: str,
+        *,
+        size_bytes: int,
+        path: str,
+    ) -> bool:
+        """Release a reservation only when it still exactly matches a failed write."""
+        async with self._write_transaction() as connection:
+            cursor = await connection.execute(
+                """
+                DELETE FROM upload_chunks
+                WHERE session_id = ? AND chunk_number = ? AND checksum = ? AND size_bytes = ? AND path = ?
+                """,
+                (session_id, chunk_number, checksum, size_bytes, path),
+            )
+            try:
+                released = cursor.rowcount == 1
+            finally:
+                await cursor.close()
+            if released:
+                await connection.execute(
+                    """
+                    UPDATE upload_sessions
+                    SET received_chunks = (
+                        SELECT COUNT(*) FROM upload_chunks WHERE session_id = ?
+                    )
+                    WHERE session_id = ?
+                    """,
+                    (session_id, session_id),
+                )
+            return released
+
     async def record_chunk(
         self,
         session_id: str,

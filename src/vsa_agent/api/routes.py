@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from vsa_agent.agents.data_models import AgentState
 from vsa_agent.api.original_ui_chat import OriginalUIChatRequest, extract_latest_user_text
 from vsa_agent.api.original_ui_search import router as original_ui_search_router
+from vsa_agent.api.recorded_video import router as recorded_video_router
 from vsa_agent.api.rtsp_stream_api import router as rtsp_router
 from vsa_agent.api.video_delete import router as video_delete_router
 from vsa_agent.api.video_search_ingest import router as video_search_ingest_router
@@ -35,6 +36,7 @@ app.router.routes.extend(rtsp_router.routes)
 app.router.routes.extend(video_delete_router.routes)
 app.router.routes.extend(video_search_ingest_router.routes)
 app.router.routes.extend(original_ui_search_router.routes)
+app.router.routes.extend(recorded_video_router.routes)
 
 
 class ChatRequest(BaseModel):

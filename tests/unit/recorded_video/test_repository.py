@@ -229,6 +229,52 @@ async def test_upload_identifier_and_chunk_key_are_unique_and_chunks_are_idempot
 
 
 @pytest.mark.asyncio
+async def test_upload_context_reserves_first_chunk_with_identifier_and_persisted_quota(repo: JobRepository):
+    session = _session()
+    await repo.create_upload_session(_asset(), session)
+
+    reserved = await repo.reserve_upload_chunk(
+        session.session_id,
+        identifier="client-identifier",
+        chunk_number=1,
+        total_chunks=2,
+        checksum="chunk-a",
+        size_bytes=4,
+        max_upload_bytes=8,
+        path="000001.part",
+    )
+    restored_session, asset = await repo.get_upload_context(session.session_id)
+
+    assert reserved is True
+    assert restored_session.identifier == "client-identifier"
+    assert restored_session.total_chunks == 2
+    assert asset.asset_id == session.asset_id
+    assert await repo.stored_upload_bytes(session.session_id) == 4
+    with pytest.raises(ValueError, match="identifier does not match"):
+        await repo.reserve_upload_chunk(
+            session.session_id,
+            identifier="different-identifier",
+            chunk_number=2,
+            total_chunks=2,
+            checksum="chunk-b",
+            size_bytes=4,
+            max_upload_bytes=8,
+            path="000002.part",
+        )
+    with pytest.raises(ValueError, match="maximum upload size"):
+        await repo.reserve_upload_chunk(
+            session.session_id,
+            identifier="client-identifier",
+            chunk_number=2,
+            total_chunks=2,
+            checksum="chunk-b",
+            size_bytes=5,
+            max_upload_bytes=8,
+            path="000002.part",
+        )
+
+
+@pytest.mark.asyncio
 async def test_record_chunk_rejects_unknown_sessions_and_numbers_outside_the_session(repo: JobRepository):
     with pytest.raises(KeyError, match="unknown upload session"):
         await repo.record_chunk("missing-session", 1, "chunk")
