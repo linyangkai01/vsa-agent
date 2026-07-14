@@ -292,16 +292,16 @@ async def test_mkv_creates_proxy_and_corrupt_probe_is_permanent(fake_runner, pro
 **Interfaces:**
 - Produces: `OpenAIVisionProvider.describe(frames, segment) -> VisionDescription`；`OpenAIEmbeddingProvider.embed(text) -> Embedding`。
 
-- [ ] **Step 1: 写 429/5xx、结构错误和维度错误测试。**
+- [x] **Step 1: 写 429/5xx、结构错误和维度错误测试。**
 ```python
 async def test_embedding_dimension_mismatch_is_permanent(httpserver, provider):
     httpserver.expect_request("/embeddings").respond_with_json({"data":[{"embedding":[0.1]}]})
     with pytest.raises(RecordedVideoError, match="EMBEDDING_DIMENSION"): await provider.embed("forklift", expected_dims=4)
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_providers.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 provider。** 使用 `httpx.AsyncClient(timeout=...)`、provider `asyncio.Semaphore`；只接受 schema 验证后的 `{description, tags}` 和浮点非空向量；429/超时/网络/5xx 标为 retryable；日志只写 model、status、duration、asset/job/stage，不写 Authorization 或图片 payload。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_providers.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/providers.py tests/unit/recorded_video/test_providers.py && git commit -m "feat: add recorded video model providers"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_providers.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 provider。** 使用 `httpx.AsyncClient(timeout=...)`、provider `asyncio.Semaphore`；只接受 schema 验证后的 `{description, tags}` 和浮点非空向量；429/超时/网络/5xx 标为 retryable；日志只写 model、status、duration、asset/job/stage，不写 Authorization 或图片 payload。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_providers.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/providers.py tests/unit/recorded_video/test_providers.py && git commit -m "feat: add recorded video model providers"`。
 
 ### Task 12: Pipeline manifest、检查点与可重放处理（OpenSpec 3.6）
 
