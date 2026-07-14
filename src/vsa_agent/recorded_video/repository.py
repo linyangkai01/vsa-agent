@@ -29,7 +29,7 @@ from vsa_agent.recorded_video.models import (
 
 _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
 _SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
 _SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
@@ -159,6 +159,27 @@ _MIGRATION_4 = (
         asset_id TEXT NOT NULL,
         step TEXT NOT NULL CHECK (step IN ('projection', 'derived', 'source', 'upload', 'sqlite')),
         completed_at TEXT NOT NULL,
+        PRIMARY KEY (asset_id, step),
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE CASCADE
+    )
+    """,
+)
+
+_MIGRATION_5 = (
+    """
+    CREATE TABLE asset_deletion_requests (
+        asset_id TEXT PRIMARY KEY,
+        requested_at TEXT NOT NULL,
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE asset_deletion_step_claims (
+        asset_id TEXT NOT NULL,
+        step TEXT NOT NULL CHECK (step IN ('projection', 'derived', 'source', 'upload')),
+        owner_token TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        lease_until TEXT NOT NULL,
         PRIMARY KEY (asset_id, step),
         FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE CASCADE
     )
@@ -313,7 +334,13 @@ class JobRepository:
                     raise RuntimeError(
                         f"database has newer schema migration {version}; supported version is {_SCHEMA_VERSION}"
                     )
-                migrations = {1: _MIGRATION_1, 2: _MIGRATION_2, 3: _MIGRATION_3, 4: _MIGRATION_4}
+                migrations = {
+                    1: _MIGRATION_1,
+                    2: _MIGRATION_2,
+                    3: _MIGRATION_3,
+                    4: _MIGRATION_4,
+                    5: _MIGRATION_5,
+                }
                 for migration_version in range(version + 1, _SCHEMA_VERSION + 1):
                     for statement in migrations[migration_version]:
                         await connection.execute(statement)
@@ -751,6 +778,17 @@ class JobRepository:
         snapshot = dict(config_snapshot or {})
 
         async with self._write_transaction() as connection:
+            asset = await self._fetchone(connection, "SELECT status FROM assets WHERE asset_id = ?", (asset_id,))
+            if asset is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            deletion_request = await self._fetchone(
+                connection,
+                "SELECT 1 FROM asset_deletion_requests WHERE asset_id = ?",
+                (asset_id,),
+            )
+            if deletion_request is not None:
+                raise ValueError("asset deletion is in progress")
+
             existing = await self._fetchone(
                 connection,
                 "SELECT * FROM jobs WHERE asset_id = ? AND pipeline_version = ?",
@@ -759,9 +797,6 @@ class JobRepository:
             if existing is not None:
                 return self._row_to_job(existing)
 
-            asset = await self._fetchone(connection, "SELECT status FROM assets WHERE asset_id = ?", (asset_id,))
-            if asset is None:
-                raise KeyError(f"unknown asset: {asset_id}")
             if asset["status"] == AssetStatus.DELETED.value:
                 raise ValueError("cannot complete upload for a deleted asset")
 
@@ -915,6 +950,10 @@ class JobRepository:
                     heartbeat_at = NULL, last_error = NULL, cancel_requested = 0,
                     updated_at = ?
                 WHERE job_id = ? AND status = ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM asset_deletion_requests
+                        WHERE asset_id = jobs.asset_id
+                    )
                 RETURNING *
                 """,
                 (
@@ -929,11 +968,20 @@ class JobRepository:
                 return self._row_to_job(row)
             current = await self._fetchone(
                 connection,
-                "SELECT status FROM jobs WHERE job_id = ?",
+                """
+                SELECT jobs.status,
+                    EXISTS (
+                        SELECT 1 FROM asset_deletion_requests
+                        WHERE asset_id = jobs.asset_id
+                    ) AS deletion_requested
+                FROM jobs WHERE job_id = ?
+                """,
                 (job_id,),
             )
             if current is None:
                 raise KeyError(f"unknown job: {job_id}")
+            if current["deletion_requested"]:
+                raise ValueError("asset deletion is in progress")
             raise ValueError(f"only failed jobs can be retried; current status is {current['status']}")
 
     async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
@@ -945,10 +993,13 @@ class JobRepository:
         lease_until = _to_iso(claimed_at + timedelta(seconds=self.lease_seconds))
         due = """
             (
-                status = 'queued'
-                AND (next_run_at IS NULL OR next_run_at <= :now)
+                (
+                    status = 'queued'
+                    AND (next_run_at IS NULL OR next_run_at <= :now)
+                )
+                OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= :now)
             )
-            OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= :now)
+            AND asset_id NOT IN (SELECT asset_id FROM asset_deletion_requests)
         """
         sql = f"""
             UPDATE jobs
@@ -982,6 +1033,7 @@ class JobRepository:
                 UPDATE jobs
                 SET status = ?, updated_at = ?
                 WHERE status = ? AND next_run_at IS NOT NULL AND next_run_at <= ?
+                    AND asset_id NOT IN (SELECT asset_id FROM asset_deletion_requests)
                 """,
                 (
                     JobStatus.QUEUED.value,
@@ -1176,12 +1228,122 @@ class JobRepository:
                 await cursor.close()
         return {str(row["step"]) for row in rows}
 
-    async def record_deletion_step(self, asset_id: str, step: str, now: datetime) -> None:
+    async def prepare_asset_deletion(self, asset_id: str, now: datetime) -> tuple[Asset, bool]:
+        """Cancel every active asset job and report whether a worker is still running."""
+        requested_at = _require_aware(now, "now")
+        requested_iso = _to_iso(requested_at)
+        async with self._write_transaction() as connection:
+            asset_row = await self._fetchone(
+                connection,
+                "SELECT * FROM assets WHERE asset_id = ?",
+                (asset_id,),
+            )
+            if asset_row is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            asset = self._row_to_asset(asset_row)
+            if asset.status in {AssetStatus.UPLOADING, AssetStatus.DELETED}:
+                return asset, False
+
+            await connection.execute(
+                """
+                INSERT INTO asset_deletion_requests(asset_id, requested_at)
+                VALUES (?, ?)
+                ON CONFLICT(asset_id) DO NOTHING
+                """,
+                (asset_id, requested_iso),
+            )
+
+            await self._transition_jobs_for_cancellation(
+                connection,
+                requested_iso,
+                target_predicate="asset_id = ?",
+                target_parameters=(asset_id,),
+            )
+            running = await self._fetchone(
+                connection,
+                "SELECT job_id FROM jobs WHERE asset_id = ? AND status = ? LIMIT 1",
+                (asset_id, JobStatus.RUNNING.value),
+            )
+            return asset, running is not None
+
+    async def claim_deletion_step(
+        self,
+        asset_id: str,
+        step: str,
+        owner_token: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> bool:
+        """Atomically claim one external deletion step unless it is complete or owned."""
+        if step not in _DELETION_STEPS or step == "sqlite":
+            raise ValueError(f"invalid external deletion step: {step}")
+        claimed_at = _require_aware(now, "now")
+        expires_at = _require_aware(lease_until, "lease_until")
+        if expires_at <= claimed_at:
+            raise ValueError("deletion step lease_until must be later than now")
+        claimed_iso = _to_iso(claimed_at)
+        expires_iso = _to_iso(expires_at)
+        async with self._write_transaction() as connection:
+            completed = await self._fetchone(
+                connection,
+                "SELECT 1 FROM asset_deletion_steps WHERE asset_id = ? AND step = ?",
+                (asset_id, step),
+            )
+            if completed is not None:
+                return False
+            row = await self._fetchone(
+                connection,
+                """
+                INSERT INTO asset_deletion_step_claims (
+                    asset_id, step, owner_token, claimed_at, lease_until
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id, step) DO UPDATE SET
+                    owner_token = excluded.owner_token,
+                    claimed_at = excluded.claimed_at,
+                    lease_until = excluded.lease_until
+                WHERE asset_deletion_step_claims.owner_token = excluded.owner_token
+                    OR asset_deletion_step_claims.lease_until <= excluded.claimed_at
+                RETURNING owner_token
+                """,
+                (asset_id, step, owner_token, claimed_iso, expires_iso),
+            )
+            return row is not None and row["owner_token"] == owner_token
+
+    async def release_deletion_step(self, asset_id: str, step: str, owner_token: str) -> None:
+        """Release a claim after an external operation fails so an immediate retry can resume."""
+        if step not in _DELETION_STEPS or step == "sqlite":
+            raise ValueError(f"invalid external deletion step: {step}")
+        async with self._write_transaction() as connection:
+            await connection.execute(
+                """
+                DELETE FROM asset_deletion_step_claims
+                WHERE asset_id = ? AND step = ? AND owner_token = ?
+                """,
+                (asset_id, step, owner_token),
+            )
+
+    async def record_deletion_step(
+        self,
+        asset_id: str,
+        step: str,
+        owner_token: str,
+        now: datetime,
+    ) -> None:
         """Persist an idempotent checkpoint after one external cleanup succeeds."""
         if step not in _DELETION_STEPS or step == "sqlite":
             raise ValueError(f"invalid external deletion step: {step}")
         completed_at = _to_iso(_require_aware(now, "now"))
         async with self._write_transaction() as connection:
+            claim = await self._fetchone(
+                connection,
+                """
+                SELECT owner_token FROM asset_deletion_step_claims
+                WHERE asset_id = ? AND step = ?
+                """,
+                (asset_id, step),
+            )
+            if claim is None or claim["owner_token"] != owner_token:
+                raise PermissionError("deletion step claim is not owned by this request")
             await connection.execute(
                 """
                 INSERT INTO asset_deletion_steps(asset_id, step, completed_at)
@@ -1189,6 +1351,10 @@ class JobRepository:
                 ON CONFLICT(asset_id, step) DO NOTHING
                 """,
                 (asset_id, step, completed_at),
+            )
+            await connection.execute(
+                "DELETE FROM asset_deletion_step_claims WHERE asset_id = ? AND step = ?",
+                (asset_id, step),
             )
 
     async def finalize_asset_deletion(self, asset_id: str, now: datetime) -> None:
@@ -1218,6 +1384,8 @@ class JobRepository:
             )
             await connection.execute("DELETE FROM jobs WHERE asset_id = ?", (asset_id,))
             await connection.execute("DELETE FROM upload_sessions WHERE asset_id = ?", (asset_id,))
+            await connection.execute("DELETE FROM asset_deletion_step_claims WHERE asset_id = ?", (asset_id,))
+            await connection.execute("DELETE FROM asset_deletion_requests WHERE asset_id = ?", (asset_id,))
             await connection.execute(
                 """
                 UPDATE assets

@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from vsa_agent.config import get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
-from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, JobStatus, UploadSession
+from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, UploadSession
 from vsa_agent.recorded_video.ports import SearchProjectionStore
 from vsa_agent.recorded_video.repository import JobRepository
 
@@ -27,17 +28,30 @@ _PIPELINE_VERSION = "v1"
 
 
 class DeletionRepository(Protocol):
-    async def get_asset(self, asset_id: str) -> Asset: ...
-
-    async def get_job(self, job_id: str) -> Job: ...
-
-    async def request_cancel(self, job_id: str, now: datetime) -> Job: ...
+    async def prepare_asset_deletion(self, asset_id: str, now: datetime) -> tuple[Asset, bool]: ...
 
     async def list_asset_upload_session_ids(self, asset_id: str) -> list[str]: ...
 
     async def completed_deletion_steps(self, asset_id: str) -> set[str]: ...
 
-    async def record_deletion_step(self, asset_id: str, step: str, now: datetime) -> None: ...
+    async def claim_deletion_step(
+        self,
+        asset_id: str,
+        step: str,
+        owner_token: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> bool: ...
+
+    async def release_deletion_step(self, asset_id: str, step: str, owner_token: str) -> None: ...
+
+    async def record_deletion_step(
+        self,
+        asset_id: str,
+        step: str,
+        owner_token: str,
+        now: datetime,
+    ) -> None: ...
 
     async def finalize_asset_deletion(self, asset_id: str, now: datetime) -> None: ...
 
@@ -59,6 +73,10 @@ class AssetNotFoundError(Exception):
     pass
 
 
+class AssetDeletionConflictError(Exception):
+    pass
+
+
 class DeletionService:
     def __init__(self, repository: DeletionRepository, asset_store: DeletionAssetStore) -> None:
         self.repository = repository
@@ -69,21 +87,21 @@ class DeletionService:
         asset_id: str,
         projection_store: SearchProjectionStore,
     ) -> DeleteResult:
+        now = datetime.now(UTC)
         try:
-            asset = await self.repository.get_asset(asset_id)
+            asset, has_running_jobs = await self.repository.prepare_asset_deletion(asset_id, now)
         except KeyError as exc:
             raise AssetNotFoundError(asset_id) from exc
         if asset.status is AssetStatus.DELETED:
             return DeleteResult(pending=False)
-        if asset.current_job_id is not None:
-            job = await self.repository.get_job(asset.current_job_id)
-            if job.status in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_WAIT}:
-                job = await self.repository.request_cancel(job.job_id, datetime.now(UTC))
-            if job.status is JobStatus.RUNNING:
-                return DeleteResult(pending=True)
+        if asset.status is AssetStatus.UPLOADING:
+            raise AssetDeletionConflictError("uploading assets cannot be deleted")
+        if has_running_jobs:
+            return DeleteResult(pending=True)
 
         completed = await self.repository.completed_deletion_steps(asset_id)
         upload_session_ids = await self.repository.list_asset_upload_session_ids(asset_id)
+        owner_token = str(uuid.uuid4())
         external_steps = (
             ("projection", lambda: projection_store.delete_asset(asset_id)),
             ("derived", lambda: self.asset_store.remove_derived(asset_id)),
@@ -93,8 +111,30 @@ class DeletionService:
         for step, operation in external_steps:
             if step in completed:
                 continue
-            await operation()
-            await self.repository.record_deletion_step(asset_id, step, datetime.now(UTC))
+            claimed_at = datetime.now(UTC)
+            claimed = await self.repository.claim_deletion_step(
+                asset_id,
+                step,
+                owner_token,
+                claimed_at,
+                claimed_at + timedelta(minutes=5),
+            )
+            if not claimed:
+                if step in await self.repository.completed_deletion_steps(asset_id):
+                    completed.add(step)
+                    continue
+                return DeleteResult(pending=True)
+            try:
+                await operation()
+            except BaseException:
+                await self.repository.release_deletion_step(asset_id, step, owner_token)
+                raise
+            await self.repository.record_deletion_step(
+                asset_id,
+                step,
+                owner_token,
+                datetime.now(UTC),
+            )
             completed.add(step)
         await self.repository.finalize_asset_deletion(asset_id, datetime.now(UTC))
         return DeleteResult(pending=False)
@@ -397,4 +437,17 @@ async def delete_recorded_video(asset_id: str, request: Request) -> Response:
         result = await DeletionService(repository, store).delete(asset_id, projection_store)
     except AssetNotFoundError as exc:
         raise HTTPException(status_code=404, detail="asset not found") from exc
-    return Response(status_code=202 if result.pending else 204)
+    except AssetDeletionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result.pending:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "asset_id": asset_id,
+                "status": "pending",
+                "pending": True,
+                "retry_after_ms": 250,
+            },
+            headers={"Retry-After": "1"},
+        )
+    return Response(status_code=204)

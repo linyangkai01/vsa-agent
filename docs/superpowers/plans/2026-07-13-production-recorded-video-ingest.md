@@ -227,23 +227,23 @@ async def test_media_range_returns_206_and_rejects_unsatisfiable(client, ready_a
 ### Task 8: 级联删除与恢复安全（OpenSpec 2.6、4.4）
 
 **Files:**
-- Modify: `src/vsa_agent/api/recorded_video.py`, `src/vsa_agent/recorded_video/repository.py`, `src/vsa_agent/recorded_video/assets.py`
+- Modify: `src/vsa_agent/api/recorded_video.py`, `src/vsa_agent/recorded_video/repository.py`, `src/vsa_agent/recorded_video/assets.py`, `tests/unit/recorded_video/test_repository.py`, `frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management/lib-src/videoDelete.ts`, `frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management/__tests__/videoDelete.test.ts`
 - Create: `tests/unit/api/test_recorded_video_delete.py`
 
 **Interfaces:**
 - Consumes: Task 2 的 `SearchProjectionStore`、`AssetStore`、`JobRepository` 协议；不得引用具体 ES 类。
 - Produces: `DELETE /api/v1/videos/{asset_id}`；`DeletionService.delete(asset_id, projection_store: SearchProjectionStore) -> DeleteResult`。
 
-- [ ] **Step 1: 写 running 删除、重试删除测试。**
+- [x] **Step 1: 写 running 删除、重试删除测试。**
 ```python
 async def test_delete_requests_cancel_then_is_idempotent(client, running_asset):
     assert (await client.delete(f"/api/v1/videos/{running_asset}")).status_code == 202
     assert (await client.delete(f"/api/v1/videos/{running_asset}")).status_code in {202, 204}
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_delete.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现严格顺序。** `DeletionService` 仅调用注入的 `SearchProjectionStore.delete_asset(asset_id)`，而不导入 ES implementation；running 先写 cancel；safe point 后按 projection 删除、derived、source、upload 目录、SQLite soft-delete 处理，每步记录可重试 deletion step；对已删除资产返回 204，绝不按路径参数访问任意文件。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_delete.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video.py src/vsa_agent/recorded_video/repository.py src/vsa_agent/recorded_video/assets.py tests/unit/api/test_recorded_video_delete.py && git commit -m "feat: delete recorded video assets idempotently"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_delete.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现严格顺序。** `DeletionService` 仅调用注入的 `SearchProjectionStore.delete_asset(asset_id)`，而不导入 ES implementation；running 先写 cancel；safe point 后按 projection 删除、derived、source、upload 目录、SQLite soft-delete 处理，每步记录可重试 deletion step；对已删除资产返回 204，绝不按路径参数访问任意文件。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_delete.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video.py src/vsa_agent/recorded_video/repository.py src/vsa_agent/recorded_video/assets.py tests/unit/api/test_recorded_video_delete.py && git commit -m "feat: delete recorded video assets idempotently"`。
 
 ### Task 9: 固定时段 Segmenter（OpenSpec 3.2）
 

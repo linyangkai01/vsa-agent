@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from vsa_agent.config import AppConfig, RecordedVideoConfig
 from vsa_agent.recorded_video.assets import LocalAssetStore
-from vsa_agent.recorded_video.models import JobStage, JobStatus
+from vsa_agent.recorded_video.models import AssetStatus, JobStage, JobStatus
 from vsa_agent.recorded_video.repository import JobRepository
 
 
@@ -26,6 +26,19 @@ class RecordingProjectionStore:
         self.deleted_assets.append(asset_id)
         if self.events is not None:
             self.events.append("projection")
+
+
+class BlockingProjectionStore:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def delete_asset(self, asset_id: str) -> None:
+        del asset_id
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
 
 
 class FailingProjectionStore:
@@ -136,7 +149,14 @@ def test_delete_requests_cancel_then_is_idempotent(
     second = client.delete(f"/api/v1/videos/{asset_id}")
 
     assert first.status_code == 202
-    assert second.status_code in {202, 204}
+    assert first.json() == {
+        "asset_id": asset_id,
+        "status": "pending",
+        "pending": True,
+        "retry_after_ms": 250,
+    }
+    assert first.headers["retry-after"] == "1"
+    assert second.status_code == 202
     with sqlite3.connect(database_path) as connection:
         job = connection.execute(
             "SELECT status, cancel_requested FROM jobs WHERE job_id = ?",
@@ -168,6 +188,141 @@ def test_delete_requests_cancel_then_is_idempotent(
     assert completed.status_code == repeated.status_code == 204
     assert projection_store.deleted_assets == [asset_id]
     assert not (data_root / "assets" / asset_id).exists()
+
+
+def test_delete_cancels_every_active_pipeline_job_before_cleanup(
+    api_context: tuple[TestClient, Path, RecordingProjectionStore],
+) -> None:
+    client, data_root, projection_store = api_context
+    asset_id, current_job_id = _ready_asset(client)
+    database_path = data_root / "recorded-video.sqlite3"
+    now = datetime.now(UTC)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, asset_id, pipeline_version, status, stage, attempt, next_run_at,
+                lease_owner, lease_until, heartbeat_at, config_snapshot, last_error,
+                cancel_requested, created_at, updated_at
+            )
+            SELECT ?, asset_id, 'v2', ?, ?, 0, NULL, ?, ?, ?, config_snapshot, NULL, 0, ?, ?
+            FROM jobs WHERE job_id = ?
+            """,
+            (
+                "old-running-job",
+                JobStatus.RUNNING.value,
+                JobStage.ANALYZING.value,
+                "worker-old",
+                (now + timedelta(minutes=1)).isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+                current_job_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE jobs SET pipeline_version = 'v3' WHERE job_id = ?",
+            (current_job_id,),
+        )
+        connection.commit()
+
+    response = client.delete(f"/api/v1/videos/{asset_id}")
+
+    assert response.status_code == 202
+    with sqlite3.connect(database_path) as connection:
+        jobs = connection.execute(
+            "SELECT job_id, status, cancel_requested FROM jobs WHERE asset_id = ? ORDER BY job_id",
+            (asset_id,),
+        ).fetchall()
+    assert jobs == [
+        (current_job_id, JobStatus.CANCELLED.value, 0),
+        ("old-running-job", JobStatus.RUNNING.value, 1),
+    ]
+    assert projection_store.deleted_assets == []
+
+
+def test_delete_rejects_uploading_asset_without_cleanup(
+    api_context: tuple[TestClient, Path, RecordingProjectionStore],
+) -> None:
+    client, data_root, projection_store = api_context
+    created = client.post("/api/v1/videos", json={"filename": "uploading.mp4"})
+    asset_id = created.json()["asset_id"]
+
+    response = client.delete(f"/api/v1/videos/{asset_id}")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "uploading assets cannot be deleted"}
+    assert projection_store.deleted_assets == []
+    assert (data_root / "uploads" / created.json()["upload_session_id"]).is_dir()
+
+
+def test_delete_fails_closed_when_projection_store_is_not_configured(
+    api_context: tuple[TestClient, Path, RecordingProjectionStore],
+) -> None:
+    client, data_root, _ = api_context
+    asset_id, _ = _ready_asset(client)
+    del client.app.state.recorded_video_projection_store
+
+    response = client.delete(f"/api/v1/videos/{asset_id}")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "recorded-video projection store is unavailable"}
+    assert (data_root / "assets" / asset_id / "source" / "original.mp4").is_file()
+
+
+@pytest.mark.anyio
+async def test_concurrent_delete_has_single_persisted_external_step_owner(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "recorded-video.sqlite3"
+    repository = JobRepository(database_path)
+    await repository.initialize()
+    now = datetime.now(UTC)
+    from vsa_agent.recorded_video.models import Asset, UploadSession
+
+    asset = Asset(
+        asset_id="asset-concurrent",
+        display_filename="concurrent.mp4",
+        safe_filename="concurrent.mp4",
+        size_bytes=5,
+        sha256="hash",
+        mime_type="video/mp4",
+        source_extension="mp4",
+        timeline_origin=now,
+        status=AssetStatus.READY,
+        created_at=now,
+        updated_at=now,
+    )
+    session = UploadSession(
+        session_id="session-concurrent",
+        identifier="session-concurrent",
+        asset_id=asset.asset_id,
+        total_chunks=1,
+        filename=asset.safe_filename,
+        temp_dir="uploads/session-concurrent",
+        status=AssetStatus.READY,
+        expires_at=now + timedelta(days=1),
+    )
+    await repository.create_upload_session(asset, session)
+    store = LocalAssetStore(tmp_path)
+    projection = BlockingProjectionStore()
+
+    from vsa_agent.api.recorded_video import DeletionService
+
+    first = asyncio.create_task(DeletionService(repository, store).delete(asset.asset_id, projection))
+    await projection.started.wait()
+    second_task = asyncio.create_task(
+        DeletionService(JobRepository(database_path), store).delete(asset.asset_id, projection)
+    )
+    await asyncio.sleep(0.05)
+    calls_while_first_owns_projection = projection.calls
+    projection.release.set()
+    first_result, second_result = await asyncio.gather(first, second_task, return_exceptions=True)
+
+    assert calls_while_first_owns_projection == 1
+    assert not isinstance(first_result, BaseException) and first_result.pending is False
+    assert not isinstance(second_result, BaseException) and second_result.pending is True
+    assert projection.calls == 1
 
 
 def test_delete_cascades_in_retryable_strict_order(

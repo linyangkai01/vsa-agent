@@ -65,6 +65,15 @@ def _fetch_one(db_path: Path, sql: str, parameters: tuple[object, ...] = ()) -> 
         connection.close()
 
 
+def _fetch_all(db_path: Path, sql: str, parameters: tuple[object, ...] = ()) -> list[sqlite3.Row]:
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute(sql, parameters).fetchall()
+    finally:
+        connection.close()
+
+
 @pytest_asyncio.fixture
 async def repo(tmp_path: Path) -> JobRepository:
     repository = JobRepository(
@@ -233,9 +242,17 @@ async def test_initialize_enables_wal_and_applies_versioned_schema_idempotently(
             "job_steps",
             "segments",
             "asset_deletion_steps",
+            "asset_deletion_requests",
+            "asset_deletion_step_claims",
             "schema_migrations",
         } <= tables
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,), (4,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
+            (1,),
+            (2,),
+            (3,),
+            (4,),
+            (5,),
+        ]
         deletion_step_columns = {
             row[1]: (row[2], row[3], row[5])
             for row in connection.execute("PRAGMA table_info(asset_deletion_steps)").fetchall()
@@ -301,7 +318,7 @@ async def test_initialize_rolls_back_a_migration_that_fails_midway(tmp_path: Pat
 
     monkeypatch.setattr(repository_module, "_MIGRATION_1", migration)
     await repository.initialize()
-    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 4
+    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 5
 
 
 @pytest.mark.asyncio
@@ -316,7 +333,7 @@ async def test_initialize_rejects_a_database_from_a_future_schema_version(tmp_pa
                 applied_at TEXT NOT NULL
             );
             INSERT INTO schema_migrations(version, applied_at)
-            VALUES (5, '2026-07-13T04:00:00+00:00');
+            VALUES (6, '2026-07-13T04:00:00+00:00');
             """
         )
         connection.commit()
@@ -326,7 +343,7 @@ async def test_initialize_rejects_a_database_from_a_future_schema_version(tmp_pa
     with pytest.raises(RuntimeError, match="newer schema migration"):
         await JobRepository(db_path, clock=lambda: NOW).initialize()
 
-    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 5
+    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 6
 
 
 @pytest.mark.asyncio
@@ -1157,6 +1174,118 @@ async def test_cancel_request_is_finalized_when_the_running_worker_lease_expires
     assert row["status"] == JobStatus.CANCELLED.value
     assert row["cancel_requested"] == 0
     assert row["lease_owner"] is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_asset_deletion_cancels_all_pipeline_jobs_atomically(repo: JobRepository):
+    current = await _ready_job(repo)
+    now = NOW + timedelta(seconds=1)
+    with sqlite3.connect(repo.database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, asset_id, pipeline_version, status, stage, attempt, next_run_at,
+                lease_owner, lease_until, heartbeat_at, config_snapshot, last_error,
+                cancel_requested, created_at, updated_at
+            )
+            SELECT 'running-v2', asset_id, 'v2', ?, ?, 0, NULL, 'worker-v2', ?, ?,
+                   config_snapshot, NULL, 0, created_at, updated_at
+            FROM jobs WHERE job_id = ?
+            """,
+            (
+                JobStatus.RUNNING.value,
+                JobStage.ANALYZING.value,
+                (now + timedelta(minutes=1)).isoformat(),
+                now.isoformat(),
+                current.job_id,
+            ),
+        )
+        connection.commit()
+
+    asset, has_running_jobs = await repo.prepare_asset_deletion("asset", now)
+
+    assert asset.status is AssetStatus.READY
+    assert has_running_jobs is True
+    rows = _fetch_all(
+        repo.database_path,
+        "SELECT job_id, status, cancel_requested FROM jobs WHERE asset_id = ? ORDER BY job_id",
+        ("asset",),
+    )
+    assert [(row["job_id"], row["status"], row["cancel_requested"]) for row in rows] == [
+        (current.job_id, JobStatus.CANCELLED.value, 0),
+        ("running-v2", JobStatus.RUNNING.value, 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deletion_step_claim_is_exclusive_releasable_and_completed(repo: JobRepository):
+    await _ready_job(repo)
+    claimed = await repo.claim_deletion_step(
+        "asset",
+        "projection",
+        "owner-1",
+        NOW,
+        NOW + timedelta(minutes=5),
+    )
+    assert claimed is True
+    assert (
+        await repo.claim_deletion_step(
+            "asset",
+            "projection",
+            "owner-2",
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(minutes=5),
+        )
+        is False
+    )
+    await repo.release_deletion_step("asset", "projection", "owner-1")
+    assert (
+        await repo.claim_deletion_step(
+            "asset",
+            "projection",
+            "owner-2",
+            NOW + timedelta(seconds=2),
+            NOW + timedelta(minutes=5),
+        )
+        is True
+    )
+    await repo.record_deletion_step("asset", "projection", "owner-2", NOW + timedelta(seconds=3))
+
+    assert await repo.completed_deletion_steps("asset") == {"projection"}
+    assert (
+        await repo.claim_deletion_step(
+            "asset",
+            "projection",
+            "owner-3",
+            NOW + timedelta(seconds=4),
+            NOW + timedelta(minutes=5),
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_deletion_request_blocks_retry_and_worker_claim(repo: JobRepository):
+    job = await _ready_job(repo)
+    with sqlite3.connect(repo.database_path) as connection:
+        connection.execute(
+            "UPDATE jobs SET status = ? WHERE job_id = ?",
+            (JobStatus.FAILED.value, job.job_id),
+        )
+        connection.commit()
+
+    await repo.prepare_asset_deletion("asset", NOW + timedelta(seconds=1))
+
+    with pytest.raises(ValueError, match="deletion is in progress"):
+        await repo.retry_failed_job(job.job_id, NOW + timedelta(seconds=2))
+
+    with sqlite3.connect(repo.database_path) as connection:
+        connection.execute(
+            "UPDATE jobs SET status = ?, next_run_at = ? WHERE job_id = ?",
+            (JobStatus.QUEUED.value, NOW.isoformat(), job.job_id),
+        )
+        connection.commit()
+    assert await repo.claim_due_job("worker-after-delete", NOW + timedelta(seconds=3)) is None
 
 
 @pytest.mark.asyncio
