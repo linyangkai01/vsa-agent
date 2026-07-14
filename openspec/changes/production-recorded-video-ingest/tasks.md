@@ -21,7 +21,7 @@
 - [x] 3.3 实现 ffprobe 媒体探测、代表帧提取和按需 ffmpeg MP4 playback proxy，覆盖 MP4/MKV 和损坏媒体
 - [x] 3.4 实现 OpenAI-compatible 视觉描述 provider，包含结构化输出校验、超时、限流和安全日志
 - [x] 3.5 实现 OpenAI-compatible embedding provider，验证向量维度并禁止生产 profile 静默 mock 降级
-- [ ] 3.6 实现 pipeline 编排、阶段 manifest/checksum、检查点复用、配置快照和可重复处理测试
+- [x] 3.6 实现 pipeline 编排、阶段 manifest/checksum、检查点复用、配置快照和可重复处理测试
 
 ## 4. Worker、恢复与生命周期
 

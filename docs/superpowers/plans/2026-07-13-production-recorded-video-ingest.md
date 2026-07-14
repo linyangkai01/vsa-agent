@@ -312,16 +312,16 @@ async def test_embedding_dimension_mismatch_is_permanent(httpserver, provider):
 - Consumes: Task 2 的 `AssetStore`、`JobRepository`、`VisionProvider`、`EmbeddingProvider`、`SearchProjectionStore` 协议，以及 Task 9/10 的实现。
 - Produces: `RecordedVideoPipeline.run(job) -> PipelineResult`；`load_verified_checkpoint()`。
 
-- [ ] **Step 1: 写 resume 不重复 provider 调用测试。**
+- [x] **Step 1: 写 resume 不重复 provider 调用测试。**
 ```python
 async def test_valid_analysis_checkpoint_skips_second_vision_call(pipeline, repo, vision):
     await pipeline.run(job); await pipeline.run(reclaimed_job)
     assert vision.describe.await_count == 1
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_pipeline.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 stage 编排。** 每 stage 写 `derived/{pipeline_version}/manifest.json.tmp`，记录 provider model、prompt/segmenter version、输入/输出 SHA-256、UTC timestamps；核对 checksum 后复用 checkpoint；按 `probing/segmenting/extracting/analyzing/embedding/indexing/publish` 更新 `job_steps`，其中 `indexing` 生成并校验 ES 投影 manifest，`publish` 幂等 bulk upsert 后才把资产/任务置为可搜索终态；manifest 中排除密钥。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_pipeline.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/pipeline.py tests/unit/recorded_video/test_pipeline.py && git commit -m "feat: checkpoint recorded video processing pipeline"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_pipeline.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 stage 编排。** 每 stage 写 `derived/{pipeline_version}/manifest.json.tmp`，记录 provider model、prompt/segmenter version、输入/输出 SHA-256、UTC timestamps；核对 checksum 后复用 checkpoint；按 `probing/segmenting/extracting/analyzing/embedding/indexing/publish` 更新 `job_steps`，其中 `indexing` 生成并校验 ES 投影 manifest，`publish` 幂等 bulk upsert 后才把资产/任务置为可搜索终态；manifest 中排除密钥。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_pipeline.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/pipeline.py tests/unit/recorded_video/test_pipeline.py && git commit -m "feat: checkpoint recorded video processing pipeline"`。
 
 ### Task 13: Worker、并发槽位与重试（OpenSpec 4.1、4.2）
 
