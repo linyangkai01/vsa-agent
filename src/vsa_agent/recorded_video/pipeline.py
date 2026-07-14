@@ -141,8 +141,8 @@ class RecordedVideoPipeline:
             raise PermissionError("pipeline requires an actively leased running job")
         _safe_path_component(job.asset_id, "asset_id")
         _safe_path_component(job.pipeline_version, "pipeline_version")
-        await self._repository.start_pipeline(job)
-        asset = await self._repository.get_asset(job.asset_id)
+        await self._fenced_call(job, lambda: self._repository.start_pipeline(job))
+        asset = await self._fenced_call(job, lambda: self._repository.get_asset(job.asset_id))
         manifest_key = _manifest_key(job.pipeline_version, job.attempt)
         manifest_relative = f"assets/{asset.asset_id}/{manifest_key}"
         asset_root = self._asset_store.root.resolve()
@@ -151,8 +151,14 @@ class RecordedVideoPipeline:
         if not asset_dir.is_relative_to(asset_root) or not manifest_path.is_relative_to(asset_dir):
             raise _pipeline_error("manifest path escaped the asset store")
         manifest = self._new_manifest(asset, job)
-        stored_steps = {step.stage: step for step in await self._repository.list_job_steps(job.job_id)}
-        source_path = await self._asset_store.resolve_source_path(asset)
+        stored_steps = {
+            step.stage: step
+            for step in await self._fenced_call(
+                job,
+                lambda: self._repository.list_job_steps(job.job_id),
+            )
+        }
+        source_path = await self._fenced_call(job, lambda: self._asset_store.resolve_source_path(asset))
         if _sha256_file(source_path) != asset.sha256:
             raise RecordedVideoError(
                 ErrorCode.CORRUPT_MEDIA,
@@ -169,6 +175,7 @@ class RecordedVideoPipeline:
             model: str | None = None,
         ) -> tuple[dict[str, Any], str]:
             nonlocal stored_steps
+            await self._repository.assert_active_lease(job)
             stored = stored_steps.get(stage)
             candidate_path = manifest_path
             if stored is not None and stored.output_manifest is not None:
@@ -195,12 +202,13 @@ class RecordedVideoPipeline:
                     manifest["stages"][stage.value] = entry
                     if stored is None:
                         step = self._step(job, stage, manifest_key, output_checksum, entry, model=model)
-                        await self._repository.checkpoint_step(job, step)
+                        await self._fenced_call(job, lambda: self._repository.checkpoint_step(job, step))
                         stored_steps[stage] = step
+                    await self._repository.assert_active_lease(job)
                     return verified, output_checksum
 
             if stored is not None:
-                await self._repository.reset_steps_from(job, stage)
+                await self._fenced_call(job, lambda: self._repository.reset_steps_from(job, stage))
                 stored_steps = {
                     candidate: step
                     for candidate, step in stored_steps.items()
@@ -214,7 +222,7 @@ class RecordedVideoPipeline:
 
             started_at = self._now()
             monotonic_start = time.monotonic()
-            output = await operation()
+            output = await self._fenced_call(job, operation)
             validator(output)
             completed_at = self._now()
             output_checksum = _sha256_json(output)
@@ -229,8 +237,9 @@ class RecordedVideoPipeline:
             manifest["stages"][stage.value] = entry
             await self._write_manifest(job, manifest_relative, manifest)
             step = self._step(job, stage, manifest_key, output_checksum, entry, model=model)
-            await self._repository.checkpoint_step(job, step)
+            await self._fenced_call(job, lambda: self._repository.checkpoint_step(job, step))
             stored_steps[stage] = step
+            await self._repository.assert_active_lease(job)
             return output, output_checksum
 
         probe_output, probe_sha = await run_stage(
@@ -285,10 +294,16 @@ class RecordedVideoPipeline:
 
         documents = indexing_output["documents"]
         projection_started = False
+        publish_started_at = self._now()
+        publish_monotonic_start = time.monotonic()
         try:
             await self._repository.assert_active_lease(job)
             projection_started = True
-            projection_result = await self._projection.project(documents)
+            projection_result = await self._projection.project(
+                documents,
+                job_id=job.job_id,
+                attempt=job.attempt,
+            )
             await self._repository.assert_active_lease(job)
             expected_ids = [str(document["_id"]) for document in documents]
             if (
@@ -301,13 +316,13 @@ class RecordedVideoPipeline:
                     retryable=True,
                     message="ES_5XX: projection did not acknowledge every deterministic document ID",
                 )
+            publish_completed_at = self._now()
             publish_output = {"artifacts": {}, "projected_ids": expected_ids}
             publish_checksum = _sha256_json(publish_output)
-            started_at = self._now()
             publish_entry = {
-                "started_at": started_at.isoformat(),
-                "completed_at": self._now().isoformat(),
-                "elapsed_ms": 0,
+                "started_at": publish_started_at.isoformat(),
+                "completed_at": publish_completed_at.isoformat(),
+                "elapsed_ms": max(0, round((time.monotonic() - publish_monotonic_start) * 1_000)),
                 "input_sha256": indexing_sha,
                 "output_sha256": publish_checksum,
                 "output": publish_output,
@@ -330,7 +345,11 @@ class RecordedVideoPipeline:
         except BaseException:
             if projection_started:
                 with suppress(Exception):
-                    await self._projection.delete_asset(job.asset_id)
+                    await self._projection.delete_projection(
+                        job.asset_id,
+                        job.job_id,
+                        job.attempt,
+                    )
             raise
 
         return PipelineResult(
@@ -372,12 +391,14 @@ class RecordedVideoPipeline:
         outputs: list[dict[str, Any]] = []
         frame_root = attempt_dir / "frames"
         for segment in segments:
-            await self._repository.assert_active_lease(job)
-            paths = await self._media.extract_representative_frames(
-                source_path,
-                segment,
-                frame_root,
-                frame_count=self._representative_frames,
+            paths = await self._fenced_call(
+                job,
+                lambda segment=segment: self._media.extract_representative_frames(
+                    source_path,
+                    segment,
+                    frame_root,
+                    frame_count=self._representative_frames,
+                ),
             )
             frame_keys: list[str] = []
             for path in paths:
@@ -407,7 +428,14 @@ class RecordedVideoPipeline:
         outputs = []
         for segment in segments:
             frame_paths = [asset_dir / PurePosixPath(key) for key in extracted[segment.segment_id]["frames"]]
-            description = await self._vision.describe(frame_paths, segment, job_id=job.job_id)
+            description = await self._fenced_call(
+                job,
+                lambda segment=segment, frame_paths=frame_paths: self._vision.describe(
+                    frame_paths,
+                    segment,
+                    job_id=job.job_id,
+                ),
+            )
             outputs.append(
                 {
                     "segment_id": segment.segment_id,
@@ -420,11 +448,14 @@ class RecordedVideoPipeline:
     async def _embed(self, job: Job, analysis: Mapping[str, Any]) -> dict[str, Any]:
         outputs = []
         for item in analysis["segments"]:
-            vector = await self._embedding.embed(
-                item["description"],
-                expected_dims=self._expected_embedding_dims,
-                asset_id=job.asset_id,
-                job_id=job.job_id,
+            vector = await self._fenced_call(
+                job,
+                lambda item=item: self._embedding.embed(
+                    item["description"],
+                    expected_dims=self._expected_embedding_dims,
+                    asset_id=job.asset_id,
+                    job_id=job.job_id,
+                ),
             )
             outputs.append({"segment_id": item["segment_id"], "vector": list(vector)})
         return {"artifacts": {}, "segments": outputs}
@@ -727,8 +758,17 @@ class RecordedVideoPipeline:
 
     async def _write_manifest(self, job: Job, relative_path: str, manifest: dict[str, Any]) -> None:
         manifest["updated_at"] = self._now().isoformat()
+        await self._fenced_call(
+            job,
+            lambda: self._asset_store.write_atomic(relative_path, _canonical_json(manifest)),
+        )
+
+    async def _fenced_call(self, job: Job, operation: Callable[[], Awaitable[Any]]) -> Any:
+        """Fence immediately around one awaited stage or external interaction."""
         await self._repository.assert_active_lease(job)
-        await self._asset_store.write_atomic(relative_path, _canonical_json(manifest))
+        result = await operation()
+        await self._repository.assert_active_lease(job)
+        return result
 
     @staticmethod
     def _checkpoint_path(asset_dir: Path, pipeline_version: str, key: str) -> Path:

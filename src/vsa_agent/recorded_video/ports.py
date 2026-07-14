@@ -152,6 +152,18 @@ class EmbeddingProvider(Protocol):
 
 @runtime_checkable
 class SearchProjectionStore(Protocol):
-    async def project(self, documents: Sequence[Mapping[str, Any]]) -> ProjectionResult: ...
+    async def project(
+        self,
+        documents: Sequence[Mapping[str, Any]],
+        *,
+        job_id: str,
+        attempt: int,
+    ) -> ProjectionResult:
+        """Write stable segment IDs only when no newer attempt already owns them."""
+        ...
+
+    async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+        """Delete only documents still owned by the exact job attempt."""
+        ...
 
     async def delete_asset(self, asset_id: str) -> None: ...

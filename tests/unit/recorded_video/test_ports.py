@@ -117,8 +117,17 @@ class FakeEmbeddingProvider:
 
 
 class FakeProjectionStore:
-    async def project(self, documents: Sequence[Mapping[str, Any]]) -> ProjectionResult:
+    async def project(
+        self,
+        documents: Sequence[Mapping[str, Any]],
+        *,
+        job_id: str,
+        attempt: int,
+    ) -> ProjectionResult:
         return ProjectionResult(indexed_ids=[], failed_ids=[])
+
+    async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+        return None
 
     async def delete_asset(self, asset_id: str) -> None:
         return None
@@ -157,6 +166,16 @@ def test_projection_result_keeps_successes_and_failures_separate() -> None:
 
     assert result.indexed_ids == ["segment-1"]
     assert result.failed_ids == ["segment-2"]
+
+
+def test_projection_store_contract_exposes_attempt_conditional_write_and_rollback() -> None:
+    project = inspect.signature(SearchProjectionStore.project)
+    assert list(project.parameters) == ["self", "documents", "job_id", "attempt"]
+    assert project.parameters["job_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert project.parameters["attempt"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    rollback = inspect.signature(SearchProjectionStore.delete_projection)
+    assert list(rollback.parameters) == ["self", "asset_id", "job_id", "attempt"]
 
 
 def test_projection_readiness_carries_sqlite_filter_identity() -> None:

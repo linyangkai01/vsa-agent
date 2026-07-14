@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -133,9 +134,21 @@ class FakeProjectionStore:
         self.partial = partial
         self.calls: list[list[dict[str, Any]]] = []
         self.deleted_assets: list[str] = []
+        self.deleted_projections: list[tuple[str, str, int]] = []
+        self.documents: dict[str, dict[str, Any]] = {}
 
-    async def project(self, documents: list[dict[str, Any]]) -> ProjectionResult:
+    async def project(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        job_id: str | None = None,
+        attempt: int | None = None,
+    ) -> ProjectionResult:
         self.calls.append(documents)
+        if documents:
+            job_id = job_id or str(documents[0]["job_id"])
+            attempt = attempt or int(documents[0]["job_attempt"])
+        assert job_id is not None and attempt is not None
         if self.fail:
             raise RuntimeError("projection unavailable")
         if self.partial:
@@ -143,10 +156,35 @@ class FakeProjectionStore:
                 indexed_ids=[],
                 failed_ids=[str(document["_id"]) for document in documents],
             )
-        return ProjectionResult(indexed_ids=[str(document["_id"]) for document in documents])
+        indexed_ids: list[str] = []
+        failed_ids: list[str] = []
+        for document in documents:
+            document_id = str(document["_id"])
+            current = self.documents.get(document_id)
+            if current is not None and current["job_id"] == job_id and current["job_attempt"] > attempt:
+                failed_ids.append(document_id)
+                continue
+            self.documents[document_id] = dict(document)
+            indexed_ids.append(document_id)
+        return ProjectionResult(indexed_ids=indexed_ids, failed_ids=failed_ids)
+
+    async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+        self.deleted_projections.append((asset_id, job_id, attempt))
+        self.documents = {
+            document_id: document
+            for document_id, document in self.documents.items()
+            if not (
+                document["asset_id"] == asset_id and document["job_id"] == job_id and document["job_attempt"] == attempt
+            )
+        }
 
     async def delete_asset(self, asset_id: str) -> None:
         self.deleted_assets.append(asset_id)
+        self.documents = {
+            document_id: document
+            for document_id, document in self.documents.items()
+            if document["asset_id"] != asset_id
+        }
 
 
 async def _claimed_job(
@@ -369,7 +407,7 @@ async def test_projection_failure_does_not_publish_completed_state(tmp_path: Pat
     assert await repository.list_segments(job.asset_id) == []
     steps = await repository.list_job_steps(job.job_id)
     assert [step.stage for step in steps] == list(JobStage)[:-1]
-    assert projection.deleted_assets == [job.asset_id]
+    assert projection.deleted_projections == [(job.asset_id, job.job_id, job.attempt)]
 
 
 @pytest.mark.asyncio
@@ -421,9 +459,9 @@ async def test_cancel_requested_during_projection_prevents_publish(tmp_path: Pat
     repository, store, job = await _claimed_job(tmp_path, clock)
 
     class CancellingProjectionStore(FakeProjectionStore):
-        async def project(self, documents: list[dict[str, Any]]) -> ProjectionResult:
+        async def project(self, documents, *, job_id=None, attempt=None) -> ProjectionResult:
             await repository.request_cancel(job.job_id, clock[0] + timedelta(seconds=1))
-            return await super().project(documents)
+            return await super().project(documents, job_id=job_id, attempt=attempt)
 
     projection = CancellingProjectionStore()
     with pytest.raises(PermissionError, match="cancellation requested"):
@@ -437,7 +475,7 @@ async def test_cancel_requested_during_projection_prevents_publish(tmp_path: Pat
     assert (await repository.get_job(job.job_id)).status is JobStatus.RUNNING
     assert await repository.list_ready_assets() == []
     assert await repository.list_segments(job.asset_id) == []
-    assert projection.deleted_assets == [job.asset_id]
+    assert projection.deleted_projections == [(job.asset_id, job.job_id, job.attempt)]
 
 
 @pytest.mark.asyncio
@@ -471,7 +509,7 @@ async def test_partial_projection_is_compensated_and_never_ready(tmp_path: Path)
         await _pipeline(repository, store, projection=projection, clock=clock).run(job)
 
     assert failure.value.code is ErrorCode.ES_5XX
-    assert projection.deleted_assets == [job.asset_id]
+    assert projection.deleted_projections == [(job.asset_id, job.job_id, job.attempt)]
     assert not await repository.is_asset_search_ready(
         job.asset_id,
         job.job_id,
@@ -633,3 +671,131 @@ async def test_source_and_artifact_hashing_never_uses_read_bytes(
     result = await _pipeline(repository, store, clock=clock).run(job)
 
     assert result.status is JobStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_overlapping_stale_attempt_cannot_overwrite_or_delete_newer_projection(
+    tmp_path: Path,
+) -> None:
+    clock = [NOW]
+    repository, store, first_job = await _claimed_job(tmp_path, clock)
+
+    class BlockingProjectionStore(FakeProjectionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def project(self, documents, *, job_id=None, attempt=None) -> ProjectionResult:
+            attempt = attempt or int(documents[0]["job_attempt"])
+            if attempt == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            return await super().project(documents, job_id=job_id, attempt=attempt)
+
+    projection = BlockingProjectionStore()
+    first_run = asyncio.create_task(_pipeline(repository, store, projection=projection, clock=clock).run(first_job))
+    await projection.first_started.wait()
+
+    clock[0] += timedelta(seconds=31)
+    second_job = await repository.claim_due_job("worker-2", clock[0])
+    assert second_job is not None and second_job.attempt == 2
+    second_result = await _pipeline(
+        repository,
+        store,
+        projection=projection,
+        clock=clock,
+    ).run(second_job)
+
+    projection.release_first.set()
+    with pytest.raises(PermissionError, match="active lease"):
+        await first_run
+
+    assert second_result.status is JobStatus.COMPLETED
+    assert projection.documents
+    assert all(document["job_attempt"] == 2 for document in projection.documents.values())
+    assert projection.deleted_projections == [(first_job.asset_id, first_job.job_id, 1)]
+
+
+@pytest.mark.asyncio
+async def test_reclaim_after_first_vision_segment_stops_later_provider_calls(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+
+    class ReclaimingVision(FakeVisionProvider):
+        async def describe(self, frame_keys, segment, *, job_id):
+            result = await super().describe(frame_keys, segment, job_id=job_id)
+            if len(self.calls) == 1:
+                clock[0] += timedelta(seconds=31)
+                reclaimed = await repository.claim_due_job("worker-2", clock[0])
+                assert reclaimed is not None and reclaimed.attempt == 2
+            return result
+
+    vision = ReclaimingVision()
+    with pytest.raises(PermissionError, match="active lease"):
+        await _pipeline(
+            repository,
+            store,
+            vision=vision,
+            segmenter=FixedDurationSegmenter(2),
+            clock=clock,
+        ).run(job)
+
+    assert len(vision.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_first_embedding_segment_stops_later_provider_calls(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+
+    class CancellingEmbedding(FakeEmbeddingProvider):
+        async def embed(self, text, *, expected_dims, asset_id, job_id):
+            vector = await super().embed(
+                text,
+                expected_dims=expected_dims,
+                asset_id=asset_id,
+                job_id=job_id,
+            )
+            if len(self.calls) == 1:
+                await repository.request_cancel(job.job_id, clock[0] + timedelta(seconds=1))
+            return vector
+
+    embedding = CancellingEmbedding()
+    with pytest.raises(PermissionError, match="cancellation requested"):
+        await _pipeline(
+            repository,
+            store,
+            embedding=embedding,
+            segmenter=FixedDurationSegmenter(2),
+            clock=clock,
+        ).run(job)
+
+    assert len(embedding.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_timing_spans_projection_and_records_elapsed_time(
+    tmp_path: Path,
+) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+
+    class AdvancingProjectionStore(FakeProjectionStore):
+        async def project(self, documents, *, job_id=None, attempt=None) -> ProjectionResult:
+            await asyncio.sleep(0.02)
+            clock[0] += timedelta(seconds=2)
+            return await super().project(documents, job_id=job_id, attempt=attempt)
+
+    result = await _pipeline(
+        repository,
+        store,
+        projection=AdvancingProjectionStore(),
+        clock=clock,
+    ).run(job)
+
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    publish = manifest["stages"][JobStage.PUBLISH.value]
+    assert publish["started_at"] == NOW.isoformat()
+    assert publish["completed_at"] == (NOW + timedelta(seconds=2)).isoformat()
+    assert publish["elapsed_ms"] >= 10
