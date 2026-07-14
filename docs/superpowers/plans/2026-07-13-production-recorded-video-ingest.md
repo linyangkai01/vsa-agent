@@ -371,16 +371,16 @@ async def test_reclaimed_job_uses_checkpoint_and_honors_cancel_before_embedding(
 **Interfaces:**
 - Produces: `RecordedVideoIndex.bootstrap(model, dims) -> str`、`validate_alias()`、`SegmentDocument`。
 
-- [ ] **Step 1: 写 mapping/dimension 冲突测试。**
+- [x] **Step 1: 写 mapping/dimension 冲突测试。**
 ```python
 async def test_existing_alias_with_wrong_vector_dimension_blocks_readiness(index, fake_es):
     fake_es.mapping_dims = 1536
     with pytest.raises(RecordedVideoError, match="EMBEDDING_DIMENSION"): await index.validate_alias(expected_dims=1024)
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_es_index.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现显式 mapping。** 索引名包含 model/version/dims；mapping 精确声明 keyword/text/date/long 和 `dense_vector(dims, similarity='cosine')`；创建后原子更新 alias；已有 alias 只校验，不动态猜测或修改 mapping。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_es_index.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/es_index.py tests/unit/recorded_video/test_es_index.py && git commit -m "feat: bootstrap recorded video search index"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_es_index.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现显式 mapping。** 索引名包含 model/version/dims；mapping 精确声明 keyword/text/date/long 和 `dense_vector(dims, similarity='cosine')`；创建后原子更新 alias；已有 alias 只校验，不动态猜测或修改 mapping。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_es_index.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/es_index.py tests/unit/recorded_video/test_es_index.py && git commit -m "feat: bootstrap recorded video search index"`。
 
 ### Task 16: ES 投影、生产查询与原版搜索契约（OpenSpec 5.2、5.3、5.4）
 
