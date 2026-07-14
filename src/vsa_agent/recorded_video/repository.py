@@ -1454,6 +1454,60 @@ class JobRepository:
             await self._raise_lease_error(connection, job_id, owner, attempt, scheduled_at)
             raise AssertionError("unreachable")
 
+    async def mark_failed(
+        self,
+        job_id: str,
+        owner: str,
+        error: str,
+        *,
+        attempt: int,
+        now: datetime | None = None,
+    ) -> Job:
+        """Persist a terminal failure while fencing the exact leased attempt."""
+        if not error.strip():
+            raise ValueError("error must not be empty")
+        failed_at = _require_aware(now or self._now(), "now")
+
+        async with self._write_transaction() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET status = ?, next_run_at = NULL, lease_owner = NULL, lease_until = NULL,
+                    heartbeat_at = NULL, last_error = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                    AND lease_until > ? AND cancel_requested = 0
+                RETURNING *
+                """,
+                (
+                    JobStatus.FAILED.value,
+                    error,
+                    _to_iso(failed_at),
+                    job_id,
+                    JobStatus.RUNNING.value,
+                    owner,
+                    attempt,
+                    _to_iso(failed_at),
+                ),
+            )
+            if row is None:
+                await self._raise_lease_error(connection, job_id, owner, attempt, failed_at)
+                raise AssertionError("unreachable")
+            await connection.execute(
+                """
+                UPDATE assets
+                SET status = ?, updated_at = ?
+                WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
+                """,
+                (
+                    AssetStatus.FAILED.value,
+                    _to_iso(failed_at),
+                    row["asset_id"],
+                    job_id,
+                ),
+            )
+            return self._row_to_job(row)
+
     async def list_asset_upload_session_ids(self, asset_id: str) -> list[str]:
         """Return only persisted session identifiers owned by one asset."""
         async with self._connect() as connection:
