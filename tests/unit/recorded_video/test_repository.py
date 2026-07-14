@@ -232,9 +232,27 @@ async def test_initialize_enables_wal_and_applies_versioned_schema_idempotently(
             "jobs",
             "job_steps",
             "segments",
+            "asset_deletion_steps",
             "schema_migrations",
         } <= tables
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,), (4,)]
+        deletion_step_columns = {
+            row[1]: (row[2], row[3], row[5])
+            for row in connection.execute("PRAGMA table_info(asset_deletion_steps)").fetchall()
+        }
+        assert deletion_step_columns == {
+            "asset_id": ("TEXT", 1, 1),
+            "step": ("TEXT", 1, 2),
+            "completed_at": ("TEXT", 1, 0),
+        }
+        assert connection.execute("PRAGMA foreign_key_list(asset_deletion_steps)").fetchall()[0][2:] == (
+            "assets",
+            "asset_id",
+            "asset_id",
+            "NO ACTION",
+            "CASCADE",
+            "NONE",
+        )
 
         indexes = {
             row[1]
@@ -283,7 +301,7 @@ async def test_initialize_rolls_back_a_migration_that_fails_midway(tmp_path: Pat
 
     monkeypatch.setattr(repository_module, "_MIGRATION_1", migration)
     await repository.initialize()
-    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 3
+    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 4
 
 
 @pytest.mark.asyncio
@@ -298,7 +316,7 @@ async def test_initialize_rejects_a_database_from_a_future_schema_version(tmp_pa
                 applied_at TEXT NOT NULL
             );
             INSERT INTO schema_migrations(version, applied_at)
-            VALUES (4, '2026-07-13T04:00:00+00:00');
+            VALUES (5, '2026-07-13T04:00:00+00:00');
             """
         )
         connection.commit()
@@ -308,7 +326,7 @@ async def test_initialize_rejects_a_database_from_a_future_schema_version(tmp_pa
     with pytest.raises(RuntimeError, match="newer schema migration"):
         await JobRepository(db_path, clock=lambda: NOW).initialize()
 
-    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 4
+    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 5
 
 
 @pytest.mark.asyncio

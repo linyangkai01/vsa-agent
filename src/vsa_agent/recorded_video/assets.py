@@ -71,6 +71,31 @@ class LocalAssetStore:
             self._raise_storage_error(error)
             raise
 
+    async def remove_derived(self, asset_id: str) -> None:
+        """Remove only rebuildable files from the controlled asset layout."""
+        asset_root = self._asset_root(asset_id)
+        for name in ("derived", "playback"):
+            await self._remove_tree(asset_root / name)
+
+    async def remove_source(self, asset_id: str) -> None:
+        """Remove the controlled source directory after derived cleanup."""
+        asset_root = self._asset_root(asset_id)
+        await self._remove_tree(asset_root / "source")
+        try:
+            asset_root.rmdir()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if error.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                return
+            self._raise_storage_error(error)
+            raise
+
+    async def remove_upload_sessions(self, session_ids: Sequence[str]) -> None:
+        """Remove persisted upload sessions by validated identifier only."""
+        for session_id in session_ids:
+            await self.remove_session(session_id)
+
     async def write_chunk(self, session: UploadSession, ordinal: int, data: bytes) -> str:
         if not 1 <= ordinal <= session.total_chunks:
             raise RecordedVideoError(
@@ -290,6 +315,15 @@ class LocalAssetStore:
 
     def _session_dir(self, session_id: str) -> Path:
         return self.root / "uploads" / self._validate_component(session_id, "session_id")
+
+    async def _remove_tree(self, directory: Path) -> None:
+        if not directory.exists():
+            return
+        try:
+            shutil.rmtree(directory)
+        except OSError as error:
+            self._raise_storage_error(error)
+            raise
 
     def _asset_root(self, asset_id: str) -> Path:
         return self.root / "assets" / self._validate_component(asset_id, "asset_id")

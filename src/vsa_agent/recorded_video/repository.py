@@ -29,10 +29,11 @@ from vsa_agent.recorded_video.models import (
 
 _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
 _SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
 _SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
+_DELETION_STEPS = frozenset({"projection", "derived", "source", "upload", "sqlite"})
 
 _MIGRATION_1 = (
     """
@@ -151,6 +152,18 @@ _MIGRATION_2 = (
 )
 
 _MIGRATION_3 = ("ALTER TABLE upload_chunks ADD COLUMN reservation_expires_at TEXT",)
+
+_MIGRATION_4 = (
+    """
+    CREATE TABLE asset_deletion_steps (
+        asset_id TEXT NOT NULL,
+        step TEXT NOT NULL CHECK (step IN ('projection', 'derived', 'source', 'upload', 'sqlite')),
+        completed_at TEXT NOT NULL,
+        PRIMARY KEY (asset_id, step),
+        FOREIGN KEY (asset_id) REFERENCES assets(asset_id) ON DELETE CASCADE
+    )
+    """,
+)
 
 
 def _require_aware(value: datetime, name: str) -> datetime:
@@ -300,7 +313,7 @@ class JobRepository:
                     raise RuntimeError(
                         f"database has newer schema migration {version}; supported version is {_SCHEMA_VERSION}"
                     )
-                migrations = {1: _MIGRATION_1, 2: _MIGRATION_2, 3: _MIGRATION_3}
+                migrations = {1: _MIGRATION_1, 2: _MIGRATION_2, 3: _MIGRATION_3, 4: _MIGRATION_4}
                 for migration_version in range(version + 1, _SCHEMA_VERSION + 1):
                     for statement in migrations[migration_version]:
                         await connection.execute(statement)
@@ -1136,6 +1149,92 @@ class JobRepository:
                 return self._row_to_job(row)
             await self._raise_lease_error(connection, job_id, owner, attempt, scheduled_at)
             raise AssertionError("unreachable")
+
+    async def list_asset_upload_session_ids(self, asset_id: str) -> list[str]:
+        """Return only persisted session identifiers owned by one asset."""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT session_id FROM upload_sessions WHERE asset_id = ? ORDER BY session_id",
+                (asset_id,),
+            )
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        return [str(row["session_id"]) for row in rows]
+
+    async def completed_deletion_steps(self, asset_id: str) -> set[str]:
+        """Load durable deletion checkpoints for an asset."""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT step FROM asset_deletion_steps WHERE asset_id = ?",
+                (asset_id,),
+            )
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        return {str(row["step"]) for row in rows}
+
+    async def record_deletion_step(self, asset_id: str, step: str, now: datetime) -> None:
+        """Persist an idempotent checkpoint after one external cleanup succeeds."""
+        if step not in _DELETION_STEPS or step == "sqlite":
+            raise ValueError(f"invalid external deletion step: {step}")
+        completed_at = _to_iso(_require_aware(now, "now"))
+        async with self._write_transaction() as connection:
+            await connection.execute(
+                """
+                INSERT INTO asset_deletion_steps(asset_id, step, completed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(asset_id, step) DO NOTHING
+                """,
+                (asset_id, step, completed_at),
+            )
+
+    async def finalize_asset_deletion(self, asset_id: str, now: datetime) -> None:
+        """Atomically remove child records and retain the soft-deleted asset tombstone."""
+        deleted_at = _require_aware(now, "now")
+        deleted_iso = _to_iso(deleted_at)
+        async with self._write_transaction() as connection:
+            current = await self._fetchone(
+                connection,
+                "SELECT status FROM assets WHERE asset_id = ?",
+                (asset_id,),
+            )
+            if current is None:
+                raise KeyError(f"unknown asset: {asset_id}")
+            running = await self._fetchone(
+                connection,
+                "SELECT job_id FROM jobs WHERE asset_id = ? AND status = ? LIMIT 1",
+                (asset_id, JobStatus.RUNNING.value),
+            )
+            if running is not None:
+                raise ValueError("asset deletion is waiting for the running job safe point")
+
+            await connection.execute("DELETE FROM segments WHERE asset_id = ?", (asset_id,))
+            await connection.execute(
+                "DELETE FROM job_steps WHERE job_id IN (SELECT job_id FROM jobs WHERE asset_id = ?)",
+                (asset_id,),
+            )
+            await connection.execute("DELETE FROM jobs WHERE asset_id = ?", (asset_id,))
+            await connection.execute("DELETE FROM upload_sessions WHERE asset_id = ?", (asset_id,))
+            await connection.execute(
+                """
+                UPDATE assets
+                SET status = ?, current_job_id = NULL,
+                    deleted_at = COALESCE(deleted_at, ?), updated_at = ?
+                WHERE asset_id = ?
+                """,
+                (AssetStatus.DELETED.value, deleted_iso, deleted_iso, asset_id),
+            )
+            await connection.execute(
+                """
+                INSERT INTO asset_deletion_steps(asset_id, step, completed_at)
+                VALUES (?, 'sqlite', ?)
+                ON CONFLICT(asset_id, step) DO NOTHING
+                """,
+                (asset_id, deleted_iso),
+            )
 
     async def request_cancel(self, job_id: str, now: datetime) -> Job:
         requested_at = _require_aware(now, "now")

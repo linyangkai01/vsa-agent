@@ -4,22 +4,100 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol, cast
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from vsa_agent.config import get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
-from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, UploadSession
+from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, JobStatus, UploadSession
+from vsa_agent.recorded_video.ports import SearchProjectionStore
 from vsa_agent.recorded_video.repository import JobRepository
 
 router = APIRouter()
 _ALLOWED_EXTENSIONS = frozenset({"mp4", "mkv"})
 _SESSION_TTL = timedelta(days=1)
 _PIPELINE_VERSION = "v1"
+
+
+class DeletionRepository(Protocol):
+    async def get_asset(self, asset_id: str) -> Asset: ...
+
+    async def get_job(self, job_id: str) -> Job: ...
+
+    async def request_cancel(self, job_id: str, now: datetime) -> Job: ...
+
+    async def list_asset_upload_session_ids(self, asset_id: str) -> list[str]: ...
+
+    async def completed_deletion_steps(self, asset_id: str) -> set[str]: ...
+
+    async def record_deletion_step(self, asset_id: str, step: str, now: datetime) -> None: ...
+
+    async def finalize_asset_deletion(self, asset_id: str, now: datetime) -> None: ...
+
+
+class DeletionAssetStore(Protocol):
+    async def remove_derived(self, asset_id: str) -> None: ...
+
+    async def remove_source(self, asset_id: str) -> None: ...
+
+    async def remove_upload_sessions(self, session_ids: Sequence[str]) -> None: ...
+
+
+@dataclass(frozen=True)
+class DeleteResult:
+    pending: bool
+
+
+class AssetNotFoundError(Exception):
+    pass
+
+
+class DeletionService:
+    def __init__(self, repository: DeletionRepository, asset_store: DeletionAssetStore) -> None:
+        self.repository = repository
+        self.asset_store = asset_store
+
+    async def delete(
+        self,
+        asset_id: str,
+        projection_store: SearchProjectionStore,
+    ) -> DeleteResult:
+        try:
+            asset = await self.repository.get_asset(asset_id)
+        except KeyError as exc:
+            raise AssetNotFoundError(asset_id) from exc
+        if asset.status is AssetStatus.DELETED:
+            return DeleteResult(pending=False)
+        if asset.current_job_id is not None:
+            job = await self.repository.get_job(asset.current_job_id)
+            if job.status in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.RETRY_WAIT}:
+                job = await self.repository.request_cancel(job.job_id, datetime.now(UTC))
+            if job.status is JobStatus.RUNNING:
+                return DeleteResult(pending=True)
+
+        completed = await self.repository.completed_deletion_steps(asset_id)
+        upload_session_ids = await self.repository.list_asset_upload_session_ids(asset_id)
+        external_steps = (
+            ("projection", lambda: projection_store.delete_asset(asset_id)),
+            ("derived", lambda: self.asset_store.remove_derived(asset_id)),
+            ("source", lambda: self.asset_store.remove_source(asset_id)),
+            ("upload", lambda: self.asset_store.remove_upload_sessions(upload_session_ids)),
+        )
+        for step, operation in external_steps:
+            if step in completed:
+                continue
+            await operation()
+            await self.repository.record_deletion_step(asset_id, step, datetime.now(UTC))
+            completed.add(step)
+        await self.repository.finalize_asset_deletion(asset_id, datetime.now(UTC))
+        return DeleteResult(pending=False)
 
 
 class CreateRecordedVideoRequest(BaseModel):
@@ -303,3 +381,20 @@ async def cancel_recorded_video_job(job_id: str) -> dict[str, object]:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="job not found") from exc
     return _public_job(job)
+
+
+@router.delete("/api/v1/videos/{asset_id}")
+async def delete_recorded_video(asset_id: str, request: Request) -> Response:
+    repository, store, _ = _repository_and_store()
+    await repository.initialize()
+    projection_store = cast(
+        SearchProjectionStore,
+        getattr(request.app.state, "recorded_video_projection_store", None),
+    )
+    if projection_store is None:
+        raise HTTPException(status_code=503, detail="recorded-video projection store is unavailable")
+    try:
+        result = await DeletionService(repository, store).delete(asset_id, projection_store)
+    except AssetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="asset not found") from exc
+    return Response(status_code=202 if result.pending else 204)
