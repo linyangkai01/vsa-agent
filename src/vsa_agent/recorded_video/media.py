@@ -13,11 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from vsa_agent.recorded_video.assets import LocalAssetStore
+from vsa_agent.recorded_video.assets import LocalAssetStore, raise_if_disk_full
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, Segment
 
 _MAX_REPRESENTATIVE_FRAMES = 16
+_DEFAULT_FFMPEG_TIMEOUT_SEC = 3_600
+_PROCESS_TERMINATION_TIMEOUT_SEC = 5
 _MP4_FORMAT_NAMES = frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
 _BROWSER_VIDEO_CODECS = frozenset({"avc1", "h264"})
 _BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3"})
@@ -46,15 +48,19 @@ class MediaProcessor:
         *,
         ffprobe_path: str = "ffprobe",
         ffmpeg_path: str = "ffmpeg",
-        timeout_sec: int = 60,
-        runner: CommandRunner = subprocess.run,
+        timeout_sec: float = 60,
+        ffmpeg_timeout_sec: float = _DEFAULT_FFMPEG_TIMEOUT_SEC,
+        runner: CommandRunner | None = None,
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
+        if ffmpeg_timeout_sec <= 0:
+            raise ValueError("ffmpeg_timeout_sec must be positive")
         self._store = store
         self._ffprobe_path = ffprobe_path
         self._ffmpeg_path = ffmpeg_path
         self._timeout_sec = timeout_sec
+        self._ffmpeg_timeout_sec = ffmpeg_timeout_sec
         self._runner = runner
 
     async def probe(self, path: str | Path) -> MediaProbe:
@@ -70,7 +76,7 @@ class MediaProcessor:
             "json",
             str(media_path),
         ]
-        result = await self._run(command)
+        result = await self._run(command, timeout_sec=self._timeout_sec)
         if result.returncode != 0:
             raise self._corrupt_media_error()
         try:
@@ -126,8 +132,11 @@ class MediaProcessor:
                     ]
                 )
                 self._publish_generated_file(temporary, destination)
-            finally:
-                temporary.unlink(missing_ok=True)
+            except BaseException:
+                self._discard_temporary_file(temporary, suppress_errors=True)
+                raise
+            else:
+                self._discard_temporary_file(temporary)
             frames.append(destination)
         return frames
 
@@ -152,8 +161,11 @@ class MediaProcessor:
             if not self._has_browser_codecs(proxy_probe):
                 raise self._corrupt_media_error()
             self._publish_generated_file(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+        except BaseException:
+            self._discard_temporary_file(temporary, suppress_errors=True)
+            raise
+        else:
+            self._discard_temporary_file(temporary)
         return destination
 
     async def _validated_existing_proxy(self, asset: Asset, destination: Path) -> Path | None:
@@ -209,11 +221,17 @@ class MediaProcessor:
         ]
 
     async def _run_ffmpeg(self, command: list[str]) -> None:
-        result = await self._run(command)
+        result = await self._run(command, timeout_sec=self._ffmpeg_timeout_sec)
         if result.returncode != 0:
-            raise self._corrupt_media_error()
+            raise RecordedVideoError(
+                ErrorCode.CONFIGURATION,
+                retryable=False,
+                message="CONFIGURATION: media processing failed",
+            )
 
-    async def _run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+    async def _run(self, command: list[str], *, timeout_sec: float) -> subprocess.CompletedProcess[str]:
+        if self._runner is None:
+            return await self._run_async_process(command, timeout_sec=timeout_sec)
         try:
             return await asyncio.to_thread(
                 self._runner,
@@ -221,7 +239,7 @@ class MediaProcessor:
                 capture_output=True,
                 check=False,
                 text=True,
-                timeout=self._timeout_sec,
+                timeout=timeout_sec,
             )
         except FileNotFoundError:
             raise RecordedVideoError(
@@ -229,8 +247,78 @@ class MediaProcessor:
                 retryable=False,
                 message="FFMPEG_MISSING: required media binary was not found",
             ) from None
-        except (subprocess.TimeoutExpired, OSError):
-            raise self._corrupt_media_error() from None
+        except subprocess.TimeoutExpired:
+            raise RecordedVideoError(
+                ErrorCode.FFMPEG_TIMEOUT,
+                retryable=True,
+                message="FFMPEG_TIMEOUT: media command exceeded its time limit",
+            ) from None
+        except OSError as error:
+            self._raise_media_storage_error(error)
+            raise AssertionError("unreachable")
+
+    async def _run_async_process(
+        self,
+        command: list[str],
+        *,
+        timeout_sec: float,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise RecordedVideoError(
+                ErrorCode.FFMPEG_MISSING,
+                retryable=False,
+                message="FFMPEG_MISSING: required media binary was not found",
+            ) from None
+        except OSError as error:
+            self._raise_media_storage_error(error)
+            raise AssertionError("unreachable")
+
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_sec)
+        except TimeoutError:
+            await asyncio.shield(self._terminate_process(process))
+            raise RecordedVideoError(
+                ErrorCode.FFMPEG_TIMEOUT,
+                retryable=True,
+                message="FFMPEG_TIMEOUT: media command exceeded its time limit",
+            ) from None
+        except asyncio.CancelledError:
+            await asyncio.shield(self._terminate_process(process))
+            raise
+        except OSError as error:
+            await asyncio.shield(self._terminate_process(process))
+            self._raise_media_storage_error(error)
+            raise AssertionError("unreachable")
+
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode if process.returncode is not None else 0,
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+        )
+
+    @staticmethod
+    async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_PROCESS_TERMINATION_TIMEOUT_SEC)
+        except TimeoutError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
 
     @staticmethod
     def _parse_probe(payload: Any) -> MediaProbe:
@@ -290,22 +378,47 @@ class MediaProcessor:
 
     @staticmethod
     def _temporary_path(destination: Path) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=destination.parent,
-            prefix=f".{destination.stem}.",
-            suffix=f".tmp{destination.suffix}",
-            delete=False,
-        ) as temporary:
-            return Path(temporary.name)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=f".{destination.stem}.",
+                suffix=f".tmp{destination.suffix}",
+                delete=False,
+            ) as temporary:
+                return Path(temporary.name)
+        except OSError as error:
+            MediaProcessor._raise_media_storage_error(error)
+            raise AssertionError("unreachable")
 
     @staticmethod
     def _publish_generated_file(temporary: Path, destination: Path) -> None:
-        if not temporary.is_file() or temporary.stat().st_size <= 0:
-            raise MediaProcessor._corrupt_media_error()
-        with temporary.open("rb+") as generated:
-            os.fsync(generated.fileno())
-        os.replace(temporary, destination)
+        try:
+            if not temporary.is_file() or temporary.stat().st_size <= 0:
+                raise MediaProcessor._corrupt_media_error()
+            with temporary.open("rb+") as generated:
+                os.fsync(generated.fileno())
+            os.replace(temporary, destination)
+        except OSError as error:
+            MediaProcessor._raise_media_storage_error(error)
+
+    @staticmethod
+    def _raise_media_storage_error(error: OSError) -> None:
+        raise_if_disk_full(error)
+        raise RecordedVideoError(
+            ErrorCode.CONFIGURATION,
+            retryable=False,
+            message="CONFIGURATION: media output could not be stored",
+        ) from error
+
+    @staticmethod
+    def _discard_temporary_file(temporary: Path, *, suppress_errors: bool = False) -> None:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            if suppress_errors:
+                return
+            MediaProcessor._raise_media_storage_error(error)
 
     def _require_store(self) -> LocalAssetStore:
         if self._store is None:

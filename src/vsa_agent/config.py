@@ -200,7 +200,7 @@ class RecordedVideoConfig(BaseModel):
     max_upload_bytes: int = Field(10_737_418_240, gt=0)
     allowed_extensions: set[str] = Field(default_factory=lambda: {"mp4", "mkv"})
     segment_duration_sec: int = Field(30, gt=0)
-    representative_frames: int = Field(4, gt=0)
+    representative_frames: int = Field(4, ge=1, le=16)
     worker_concurrency: int = Field(3, ge=1, le=5)
     lease_sec: int = Field(120, gt=0)
     max_attempts: int = Field(3, ge=1)

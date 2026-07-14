@@ -90,6 +90,7 @@ def test_provider_runtime_config_is_public_resolved_role_alias():
         ("max_upload_bytes", 0),
         ("segment_duration_sec", 0),
         ("representative_frames", 0),
+        ("representative_frames", 17),
         ("worker_concurrency", 0),
         ("worker_concurrency", 6),
         ("lease_sec", 0),

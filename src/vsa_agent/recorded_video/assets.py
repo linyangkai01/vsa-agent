@@ -23,6 +23,17 @@ _WINDOWS_DISK_FULL = 112
 _DISK_QUOTA_EXCEEDED = getattr(errno, "EDQUOT", 122)
 
 
+def raise_if_disk_full(error: OSError) -> None:
+    """Translate only recognized filesystem-capacity failures."""
+    disk_full_errnos = {errno.ENOSPC, _DISK_QUOTA_EXCEEDED}
+    if error.errno in disk_full_errnos or getattr(error, "winerror", None) == _WINDOWS_DISK_FULL:
+        raise RecordedVideoError(
+            ErrorCode.DISK_FULL,
+            retryable=False,
+            message="DISK_FULL: insufficient space for recorded-video asset",
+        ) from error
+
+
 class StorageUsage(NamedTuple):
     total: int
     used: int
@@ -369,13 +380,7 @@ class LocalAssetStore:
 
     @staticmethod
     def _raise_storage_error(error: OSError) -> None:
-        disk_full_errnos = {errno.ENOSPC, _DISK_QUOTA_EXCEEDED}
-        if error.errno in disk_full_errnos or getattr(error, "winerror", None) == _WINDOWS_DISK_FULL:
-            raise RecordedVideoError(
-                ErrorCode.DISK_FULL,
-                retryable=False,
-                message="DISK_FULL: insufficient space for recorded-video asset",
-            ) from error
+        raise_if_disk_full(error)
 
     @classmethod
     def _raise_hard_link_error(cls, error: OSError) -> None:

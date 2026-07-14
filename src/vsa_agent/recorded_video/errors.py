@@ -11,6 +11,7 @@ class ErrorCode(str, Enum):
     CORRUPT_MEDIA = "CORRUPT_MEDIA"
     UNSUPPORTED_MEDIA = "UNSUPPORTED_MEDIA"
     FFMPEG_MISSING = "FFMPEG_MISSING"
+    FFMPEG_TIMEOUT = "FFMPEG_TIMEOUT"
     CONFIGURATION = "CONFIGURATION"
     EMBEDDING_DIMENSION = "EMBEDDING_DIMENSION"
     MODEL_RATE_LIMIT = "MODEL_RATE_LIMIT"
@@ -34,6 +35,7 @@ PERMANENT_ERROR_CODES: frozenset[ErrorCode] = frozenset(
 RETRYABLE_ERROR_CODES: frozenset[ErrorCode] = frozenset(
     {
         ErrorCode.MODEL_RATE_LIMIT,
+        ErrorCode.FFMPEG_TIMEOUT,
         ErrorCode.MODEL_TIMEOUT,
         ErrorCode.MODEL_5XX,
         ErrorCode.ES_TIMEOUT,
