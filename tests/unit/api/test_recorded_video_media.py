@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from fastapi.requests import Request
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from tests.unit.api.test_recorded_video_vst import _seed_ready_asset
 from vsa_agent.config import AppConfig, RecordedVideoConfig
@@ -57,9 +61,39 @@ def test_media_supports_suffix_and_open_ended_ranges(media_client: tuple[TestCli
     )
 
 
+def test_media_range_unit_is_case_insensitive_and_unknown_units_are_ignored(
+    media_client: tuple[TestClient, str],
+) -> None:
+    http, asset_id = media_client
+    path = f"/api/v1/vst/v1/storage/file/{asset_id}"
+
+    case_insensitive = http.get(path, headers={"Range": "BYTES=2-4"})
+    unknown_unit = http.get(path, headers={"Range": "items=2-4"})
+
+    assert (
+        case_insensitive.status_code,
+        case_insensitive.headers["content-range"],
+        case_insensitive.content,
+    ) == (206, "bytes 2-4/10", b"234")
+    assert (unknown_unit.status_code, unknown_unit.content) == (200, b"0123456789")
+
+
 @pytest.mark.parametrize(
     "range_header",
-    ["items=0-1", "bytes=", "bytes=abc-def", "bytes=4-2", "bytes=0-1,3-4", "bytes=-0"],
+    [
+        "bytes=",
+        "bytes=abc-def",
+        "bytes=4-2",
+        "bytes=0-1,3-4",
+        "bytes=-0",
+        "bytes=+1-2",
+        "bytes=1-+2",
+        "bytes=1 -2",
+        "bytes=1- 2",
+        f"bytes={'9' * 4_301}-",
+        f"bytes=1-{'9' * 4_301}",
+        f"bytes=-{'9' * 4_301}",
+    ],
 )
 def test_media_rejects_malformed_or_unsupported_ranges(
     media_client: tuple[TestClient, str],
@@ -73,6 +107,58 @@ def test_media_rejects_malformed_or_unsupported_ranges(
     )
 
     assert (response.status_code, response.headers["content-range"]) == (416, "bytes */10")
+
+
+def test_media_closes_file_when_asgi_send_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video_vst
+
+    data_root = tmp_path / "recorded-video"
+    config = AppConfig(recorded_video=RecordedVideoConfig(data_root=data_root, max_upload_bytes=1_024))
+    monkeypatch.setattr(recorded_video_vst, "get_config", lambda: config)
+    asset_id = _seed_ready_asset(data_root)
+    real_open = Path.open
+    opened: list[Any] = []
+
+    def tracking_open(candidate: Path, *args: object, **kwargs: object) -> Any:
+        media = real_open(candidate, *args, **kwargs)
+        opened.append(media)
+        return media
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": f"/api/v1/vst/v1/storage/file/{asset_id}",
+        "raw_path": f"/api/v1/vst/v1/storage/file/{asset_id}".encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def run_response() -> None:
+        response = await recorded_video_vst.media(asset_id, Request(scope))
+
+        async def receive() -> dict[str, str]:
+            return {"type": "http.request"}
+
+        async def fail_on_body(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.body":
+                raise OSError("client disconnected")
+
+        with pytest.raises(ClientDisconnect):
+            await response(scope, receive, fail_on_body)
+
+    asyncio.run(run_response())
+
+    assert opened and opened[0].closed
 
 
 def test_empty_media_supports_full_response_and_rejects_range(

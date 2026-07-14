@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
+from starlette.types import Receive, Scope, Send
 
 from vsa_agent.config import get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
@@ -16,6 +21,27 @@ from vsa_agent.recorded_video.repository import JobRepository
 
 router = APIRouter(prefix="/api/v1/vst", tags=["recorded-video-vst"])
 _MILLISECONDS_PER_DAY = 86_400_000
+_RANGE_UNIT_PATTERN = re.compile(r"(?P<unit>[!#$%&'*+.^_`|~0-9A-Za-z-]+)=")
+_BYTE_RANGE_PATTERN = re.compile(r"(?:(?P<start>[0-9]+)-(?P<end>[0-9]*)|-(?P<suffix>[0-9]+))\Z")
+
+
+class _MediaStreamingResponse(StreamingResponse):
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        status_code: int = 200,
+        media_type: str | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._media_content = content
+        super().__init__(content, status_code=status_code, media_type=media_type, headers=headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._media_content.aclose()
 
 
 def _repository_and_store() -> tuple[JobRepository, LocalAssetStore]:
@@ -44,27 +70,49 @@ def _parse_timestamp(value: str, name: str) -> datetime:
 
 
 def _parse_byte_range(header: str, size: int) -> tuple[int, int] | None:
-    if not header.startswith("bytes=") or "," in header:
+    unit_match = _RANGE_UNIT_PATTERN.match(header)
+    if unit_match is None or unit_match.group("unit").casefold() != "bytes":
         return None
-    value = header.removeprefix("bytes=").strip()
-    if value.count("-") != 1:
+    value = header[unit_match.end() :]
+    match = _BYTE_RANGE_PATTERN.fullmatch(value)
+    if match is None:
         return None
-    start_value, end_value = value.split("-", maxsplit=1)
     try:
-        if not start_value:
-            suffix = int(end_value)
+        suffix_value = match.group("suffix")
+        if suffix_value is not None:
+            suffix = int(suffix_value)
             if suffix <= 0 or size <= 0:
                 return None
             return max(size - suffix, 0), size - 1
-        start = int(start_value)
-        if start < 0 or start >= size:
+        start = int(match.group("start"))
+        if start >= size:
             return None
+        end_value = match.group("end")
         end = size - 1 if not end_value else min(int(end_value), size - 1)
-        if end < start:
-            return None
-        return start, end
     except ValueError:
         return None
+    if end < start:
+        return None
+    return start, end
+
+
+def _has_unsupported_range_unit(header: str) -> bool:
+    match = _RANGE_UNIT_PATTERN.match(header)
+    return match is not None and match.group("unit").casefold() != "bytes"
+
+
+async def _media_chunks(
+    store: LocalAssetStore,
+    path: Path,
+    start: int,
+    end: int | None = None,
+) -> AsyncIterator[bytes]:
+    iterator = store.iter_media_range(path, start, end)
+    try:
+        async for chunk in iterate_in_threadpool(iterator):
+            yield chunk
+    finally:
+        iterator.close()
 
 
 def _stream_entry(asset: Asset) -> dict[str, object]:
@@ -196,9 +244,11 @@ async def media(asset_id: str, request: Request) -> Response:
     size = path.stat().st_size
     media_type = "video/mp4" if path.suffix.lower() == ".mp4" else asset.mime_type
     range_header = request.headers.get("range")
+    if range_header is not None and _has_unsupported_range_unit(range_header):
+        range_header = None
     if range_header is None:
-        return StreamingResponse(
-            store.iter_media_range(path, 0),
+        return _MediaStreamingResponse(
+            _media_chunks(store, path, 0),
             media_type=media_type,
             headers={"Accept-Ranges": "bytes", "Content-Length": str(size)},
         )
@@ -206,8 +256,8 @@ async def media(asset_id: str, request: Request) -> Response:
     if byte_range is None:
         return Response(status_code=416, headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{size}"})
     start, end = byte_range
-    return StreamingResponse(
-        store.iter_media_range(path, start, end + 1),
+    return _MediaStreamingResponse(
+        _media_chunks(store, path, start, end + 1),
         status_code=206,
         media_type=media_type,
         headers={

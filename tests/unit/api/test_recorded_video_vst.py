@@ -187,6 +187,56 @@ def test_vst_returns_same_origin_media_url_and_segment_thumbnail(client: tuple[T
     assert picture.content == b"thumbnail"
 
 
+def test_vst_thumbnail_uses_later_segment_at_boundary_and_includes_final_endpoint(
+    client: tuple[TestClient, str],
+) -> None:
+    http, asset_id = client
+    from vsa_agent.api import recorded_video_vst
+
+    data_root = Path(recorded_video_vst.get_config().recorded_video.data_root)
+    _run(LocalAssetStore(data_root).write_atomic(f"assets/{asset_id}/derived/v1/thumb-2.jpg", b"thumbnail-2"))
+    with sqlite3.connect(data_root / "recorded-video.sqlite3") as connection:
+        connection.execute(
+            "UPDATE segments SET end_offset_ms = ?, end_time = ? WHERE asset_id = ?",
+            (5_000, (NOW + timedelta(seconds=5)).isoformat(), asset_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO segments (
+                segment_id, asset_id, pipeline_version, ordinal, start_offset_ms, end_offset_ms,
+                start_time, end_time, description, thumbnail_key, model, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "segment-2",
+                asset_id,
+                "v1",
+                1,
+                5_000,
+                10_000,
+                (NOW + timedelta(seconds=5)).isoformat(),
+                (NOW + timedelta(seconds=10)).isoformat(),
+                "yard later",
+                "derived/v1/thumb-2.jpg",
+                None,
+                None,
+            ),
+        )
+        connection.commit()
+
+    at_boundary = http.get(
+        f"/api/v1/vst/v1/replay/stream/{asset_id}/picture",
+        params={"startTime": (NOW + timedelta(seconds=5)).isoformat()},
+    )
+    at_final_endpoint = http.get(
+        f"/api/v1/vst/v1/replay/stream/{asset_id}/picture",
+        params={"startTime": (NOW + timedelta(seconds=10)).isoformat()},
+    )
+
+    assert (at_boundary.status_code, at_boundary.content) == (200, b"thumbnail-2")
+    assert (at_final_endpoint.status_code, at_final_endpoint.content) == (200, b"thumbnail-2")
+
+
 def test_vst_clamps_requested_playback_offsets_to_asset_duration(client: tuple[TestClient, str]) -> None:
     http, asset_id = client
 

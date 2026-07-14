@@ -850,35 +850,31 @@ class JobRepository:
         return [self._row_to_segment(row) for row in rows]
 
     async def find_segment(self, asset_id: str, timestamp: datetime) -> Segment:
-        """Find the timeline segment containing one absolute playback time."""
+        """Find a segment using half-open intervals, with an inclusive final endpoint."""
         timestamp_iso = _to_iso(_require_aware(timestamp, "timestamp"), "timestamp")
         async with self._connect() as connection:
             row = await self._fetchone(
                 connection,
                 """
-                SELECT * FROM segments
-                WHERE asset_id = ? AND start_time <= ? AND end_time >= ?
-                ORDER BY start_offset_ms, ordinal, segment_id
+                WITH asset_segments AS (
+                    SELECT segments.*, MAX(end_time) OVER () AS terminal_end_time
+                    FROM segments
+                    WHERE asset_id = ?
+                )
+                SELECT * FROM asset_segments
+                WHERE start_time <= ?
+                  AND (
+                    end_time > ?
+                    OR (end_time = ? AND end_time = terminal_end_time)
+                  )
+                ORDER BY start_time DESC, start_offset_ms DESC, ordinal DESC, segment_id DESC
                 LIMIT 1
                 """,
-                (asset_id, timestamp_iso, timestamp_iso),
+                (asset_id, timestamp_iso, timestamp_iso, timestamp_iso),
             )
         if row is None:
             raise KeyError(f"no segment for asset {asset_id} at {timestamp_iso}")
         return self._row_to_segment(row)
-
-    async def ready_storage_bytes(self) -> int:
-        """Return the durable byte total for assets visible to VST readers."""
-        async with self._connect() as connection:
-            row = await self._fetchone(
-                connection,
-                """
-                SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes
-                FROM assets WHERE status = ? AND deleted_at IS NULL
-                """,
-                (AssetStatus.READY.value,),
-            )
-        return int(row["total_bytes"] if row is not None else 0)
 
     async def get_job(self, job_id: str) -> Job:
         """Load one durable job by identifier."""

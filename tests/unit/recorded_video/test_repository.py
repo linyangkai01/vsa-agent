@@ -155,7 +155,60 @@ async def test_ready_asset_and_segment_read_boundaries_exclude_deleted_assets(re
     assert [asset.asset_id for asset in await repo.list_ready_assets()] == ["ready"]
     assert [segment.segment_id for segment in await repo.list_segments("ready")] == ["segment-1"]
     assert (await repo.find_segment("ready", NOW)).segment_id == "segment-1"
-    assert await repo.ready_storage_bytes() == ready.size_bytes
+
+
+@pytest.mark.asyncio
+async def test_find_segment_uses_half_open_boundaries_except_for_final_endpoint(repo: JobRepository) -> None:
+    asset = _asset("ready")
+    await repo.create_upload_session(asset, _session("ready", identifier="ready-upload"))
+    await _record_all_chunks(repo, _session("ready", identifier="ready-upload"))
+    await repo.complete_upload("ready", "v1", now=NOW)
+    with sqlite3.connect(repo.database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO segments (
+                segment_id, asset_id, pipeline_version, ordinal, start_offset_ms, end_offset_ms,
+                start_time, end_time, description, thumbnail_key, model, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "segment-1",
+                    "ready",
+                    "v1",
+                    0,
+                    0,
+                    1_000,
+                    NOW.isoformat(),
+                    (NOW + timedelta(seconds=1)).isoformat(),
+                    "first",
+                    "derived/v1/thumbnails/segment-1.jpg",
+                    None,
+                    None,
+                ),
+                (
+                    "segment-2",
+                    "ready",
+                    "v1",
+                    1,
+                    1_000,
+                    2_000,
+                    (NOW + timedelta(seconds=1)).isoformat(),
+                    (NOW + timedelta(seconds=2)).isoformat(),
+                    "second",
+                    "derived/v1/thumbnails/segment-2.jpg",
+                    None,
+                    None,
+                ),
+            ],
+        )
+        connection.commit()
+
+    at_boundary = await repo.find_segment("ready", NOW + timedelta(seconds=1))
+    at_final_endpoint = await repo.find_segment("ready", NOW + timedelta(seconds=2))
+
+    assert at_boundary.segment_id == "segment-2"
+    assert at_final_endpoint.segment_id == "segment-2"
 
 
 @pytest.mark.asyncio
