@@ -102,11 +102,19 @@ class FakeAsyncProcess:
         stderr: bytes = b"",
         returncode: int = 0,
         block: bool = False,
+        communicate_error: BaseException | None = None,
+        terminate_error: BaseException | None = None,
+        kill_error: BaseException | None = None,
+        wait_effects: list[int | BaseException] | None = None,
     ) -> None:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode: int | None = None if block else returncode
         self.block = block
+        self.communicate_error = communicate_error
+        self.terminate_error = terminate_error
+        self.kill_error = kill_error
+        self.wait_effects = list(wait_effects or [])
         self.communicate_started = asyncio.Event()
         self.terminate_calls = 0
         self.kill_calls = 0
@@ -114,19 +122,31 @@ class FakeAsyncProcess:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         self.communicate_started.set()
+        if self.communicate_error is not None:
+            raise self.communicate_error
         if self.block:
             await asyncio.Event().wait()
         return self.stdout, self.stderr
 
     def terminate(self) -> None:
         self.terminate_calls += 1
+        if self.terminate_error is not None:
+            raise self.terminate_error
 
     def kill(self) -> None:
         self.kill_calls += 1
+        if self.kill_error is not None:
+            raise self.kill_error
         self.returncode = -9
 
     async def wait(self) -> int:
         self.wait_calls += 1
+        if self.wait_effects:
+            effect = self.wait_effects.pop(0)
+            if isinstance(effect, BaseException):
+                raise effect
+            self.returncode = effect
+            return effect
         self.returncode = -15
         return self.returncode
 
@@ -260,6 +280,106 @@ async def test_default_runner_terminates_and_awaits_process_on_cancellation(
 
     assert process.terminate_calls == 1
     assert process.wait_calls >= 1
+
+
+async def test_timeout_remains_primary_when_terminate_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"source")
+    process = FakeAsyncProcess(
+        block=True,
+        terminate_error=OSError(errno.EIO, "private terminate failure"),
+    )
+
+    async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
+        return process
+
+    monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+
+    with pytest.raises(RecordedVideoError) as timeout:
+        await MediaProcessor(timeout_sec=0.01).probe(source)
+
+    assert timeout.value.code is ErrorCode.FFMPEG_TIMEOUT
+    assert process.terminate_calls == 1
+    assert process.wait_calls == 1
+
+
+async def test_timeout_remains_primary_when_kill_or_final_wait_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"source")
+    process = FakeAsyncProcess(
+        block=True,
+        kill_error=OSError(errno.EIO, "private kill failure"),
+        wait_effects=[TimeoutError(), OSError(errno.EIO, "private wait failure")],
+    )
+
+    async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
+        return process
+
+    monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+
+    with pytest.raises(RecordedVideoError) as timeout:
+        await MediaProcessor(timeout_sec=0.01).probe(source)
+
+    assert timeout.value.code is ErrorCode.FFMPEG_TIMEOUT
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
+
+
+async def test_cancellation_remains_primary_when_kill_and_wait_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"source")
+    process = FakeAsyncProcess(
+        block=True,
+        kill_error=OSError(errno.EIO, "private kill failure"),
+        wait_effects=[TimeoutError(), OSError(errno.EIO, "private wait failure")],
+    )
+
+    async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
+        return process
+
+    monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+    task = asyncio.create_task(MediaProcessor().probe(source))
+    await process.communicate_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
+
+
+async def test_communication_storage_error_remains_primary_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"source")
+    process = FakeAsyncProcess(
+        block=True,
+        communicate_error=PermissionError(errno.EACCES, "private communication failure"),
+        terminate_error=OSError(errno.EIO, "private terminate failure"),
+    )
+
+    async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
+        return process
+
+    monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+
+    with pytest.raises(RecordedVideoError) as failure:
+        await MediaProcessor().probe(source)
+
+    assert failure.value.code is ErrorCode.CONFIGURATION
+    assert "private" not in str(failure.value)
 
 
 async def test_default_runner_uses_distinct_probe_and_ffmpeg_timeouts(
@@ -582,6 +702,48 @@ async def test_existing_proxy_with_mkv_container_is_rebuilt(store: LocalAssetSto
     assert playback == destination
     assert destination.read_bytes() == b"rebuilt-proxy"
     assert [args[0] for args in calls] == ["ffprobe", "ffprobe", "ffmpeg", "ffprobe"]
+
+
+@pytest.mark.parametrize(
+    ("existing_probe", "delete_error", "expected_code"),
+    [
+        ("not-json", PermissionError(errno.EACCES, "private proxy"), ErrorCode.CONFIGURATION),
+        (_probe_payload(container="matroska"), OSError(errno.EIO, "private proxy"), ErrorCode.CONFIGURATION),
+        ("not-json", OSError(errno.ENOSPC, "private proxy"), ErrorCode.DISK_FULL),
+        (
+            _probe_payload(container="matroska"),
+            OSError(getattr(errno, "EDQUOT", 122), "private proxy"),
+            ErrorCode.DISK_FULL,
+        ),
+        ("not-json", WindowsDiskFullError("private proxy"), ErrorCode.DISK_FULL),
+    ],
+)
+async def test_existing_proxy_deletion_maps_storage_errors_without_path_leaks(
+    store: LocalAssetStore,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_probe: str,
+    delete_error: OSError,
+    expected_code: ErrorCode,
+) -> None:
+    asset = _asset(extension="mkv")
+    await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
+    await store.write_atomic("assets/asset-uuid/playback/proxy.mp4", b"stale-proxy")
+    probe_outputs = iter([_probe_payload(), existing_probe])
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=next(probe_outputs), stderr="")
+
+    def fail_unlink(_path: Path, *, missing_ok: bool = False) -> None:
+        del missing_ok
+        raise delete_error
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    with pytest.raises(RecordedVideoError) as failure:
+        await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
+
+    assert failure.value.code is expected_code
+    assert "private proxy" not in str(failure.value)
 
 
 async def test_proxy_maps_only_first_video_and_optional_first_audio(store: LocalAssetStore) -> None:

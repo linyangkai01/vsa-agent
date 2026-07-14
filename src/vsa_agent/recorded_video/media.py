@@ -181,11 +181,11 @@ class MediaProcessor:
         except RecordedVideoError as error:
             if error.code is not ErrorCode.CORRUPT_MEDIA:
                 raise
-            destination.unlink(missing_ok=True)
+            self._discard_temporary_file(destination)
             return None
         if self._is_directly_playable(probe):
             return existing
-        destination.unlink(missing_ok=True)
+        self._discard_temporary_file(destination)
         return None
 
     def _proxy_command(self, source: Path, probe: MediaProbe, temporary: Path) -> list[str]:
@@ -282,17 +282,17 @@ class MediaProcessor:
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_sec)
         except TimeoutError:
-            await asyncio.shield(self._terminate_process(process))
+            await self._cleanup_failed_process(process)
             raise RecordedVideoError(
                 ErrorCode.FFMPEG_TIMEOUT,
                 retryable=True,
                 message="FFMPEG_TIMEOUT: media command exceeded its time limit",
             ) from None
         except asyncio.CancelledError:
-            await asyncio.shield(self._terminate_process(process))
+            await self._cleanup_failed_process(process)
             raise
         except OSError as error:
-            await asyncio.shield(self._terminate_process(process))
+            await self._cleanup_failed_process(process)
             self._raise_media_storage_error(error)
             raise AssertionError("unreachable")
 
@@ -303,13 +303,23 @@ class MediaProcessor:
             stderr=stderr.decode(errors="replace"),
         )
 
+    @classmethod
+    async def _cleanup_failed_process(cls, process: asyncio.subprocess.Process) -> None:
+        try:
+            await asyncio.shield(cls._terminate_process(process))
+        except (Exception, asyncio.CancelledError):
+            pass
+
     @staticmethod
     async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+        cleanup_errors: list[Exception] = []
         if process.returncode is None:
             try:
                 process.terminate()
             except ProcessLookupError:
                 pass
+            except Exception as error:
+                cleanup_errors.append(error)
         try:
             await asyncio.wait_for(process.wait(), timeout=_PROCESS_TERMINATION_TIMEOUT_SEC)
         except TimeoutError:
@@ -318,7 +328,16 @@ class MediaProcessor:
                     process.kill()
                 except ProcessLookupError:
                     pass
-            await process.wait()
+                except Exception as error:
+                    cleanup_errors.append(error)
+            try:
+                await process.wait()
+            except Exception as error:
+                cleanup_errors.append(error)
+        except Exception as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
     @staticmethod
     def _parse_probe(payload: Any) -> MediaProbe:
