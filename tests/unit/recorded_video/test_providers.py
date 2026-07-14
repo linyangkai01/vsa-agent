@@ -384,10 +384,29 @@ async def test_embedding_logs_required_asset_and_job_without_sensitive_data(
     [
         {"timeout_sec": 0},
         {"timeout_sec": -1},
+        {"timeout_sec": None},
+        {"timeout_sec": "30"},
+        {"timeout_sec": True},
+        {"timeout_sec": False},
+        {"timeout_sec": float("nan")},
+        {"timeout_sec": float("inf")},
+        {"timeout_sec": float("-inf")},
+        {"timeout_sec": 10**1000},
         {"concurrency": 0},
         {"concurrency": -1},
+        {"concurrency": None},
+        {"concurrency": "1"},
+        {"concurrency": True},
+        {"concurrency": False},
+        {"concurrency": 1.5},
+        {"concurrency": float("nan")},
+        {"concurrency": float("inf")},
+        {"concurrency": float("-inf")},
         {"model": ""},
         {"model": "   "},
+        {"model": None},
+        {"model": 1},
+        {"model": True},
     ],
 )
 def test_provider_rejects_invalid_constructor_configuration_as_permanent(
@@ -410,8 +429,11 @@ def test_provider_rejects_invalid_constructor_configuration_as_permanent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("expected_dims", [0, -1])
-async def test_embedding_rejects_invalid_expected_dimensions_before_request(expected_dims: int) -> None:
+@pytest.mark.parametrize(
+    "expected_dims",
+    [0, -1, None, "1", True, False, 1.5, float("nan"), float("inf"), float("-inf")],
+)
+async def test_embedding_rejects_invalid_expected_dimensions_before_request(expected_dims: object) -> None:
     request_count = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -429,7 +451,7 @@ async def test_embedding_rejects_invalid_expected_dimensions_before_request(expe
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
                 "forklift",
-                expected_dims=expected_dims,
+                expected_dims=expected_dims,  # type: ignore[arg-type]
                 asset_id="asset-1",
                 job_id="job-1",
             )
@@ -512,6 +534,9 @@ async def test_vision_rejects_blank_context_before_request(
     "base_url",
     [
         "",
+        None,
+        1,
+        True,
         "provider.example/v1",
         "/v1",
         "ftp://provider.example/v1",
@@ -519,15 +544,17 @@ async def test_vision_rejects_blank_context_before_request(
         "https://user:password@provider.example/v1",
         "https://provider.example/v1?api-version=2026-07-14",
         "https://provider.example/v1#embeddings",
+        "https://[v1.foo]/v1",
+        "https://provider.\nexample/v1",
     ],
 )
 async def test_provider_rejects_invalid_base_url_as_permanent_configuration(
-    base_url: str,
+    base_url: object,
 ) -> None:
     async with _client(httpx.MockTransport(lambda _: pytest.fail("request must not be sent"))) as client:
         with pytest.raises(RecordedVideoError) as caught:
             OpenAIEmbeddingProvider(
-                base_url=base_url,
+                base_url=base_url,  # type: ignore[arg-type]
                 api_key=None,
                 model="embedding-model",
                 client=client,
@@ -535,3 +562,29 @@ async def test_provider_rejects_invalid_base_url_as_permanent_configuration(
 
     assert caught.value.code is ErrorCode.CONFIGURATION
     assert caught.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_provider_normalizes_trailing_base_path_slashes() -> None:
+    captured_path = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_path
+        captured_path = request.url.path
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://provider.example/v1///",
+            api_key=None,
+            model="embedding-model",
+            client=client,
+        )
+        await provider.embed(
+            "forklift",
+            expected_dims=1,
+            asset_id="asset-1",
+            job_id="job-1",
+        )
+
+    assert captured_path == "/v1/embeddings"

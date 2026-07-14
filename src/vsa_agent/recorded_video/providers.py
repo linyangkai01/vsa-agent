@@ -9,9 +9,9 @@ import logging
 import math
 import time
 from collections.abc import Mapping, Sequence
+from numbers import Real
 from pathlib import Path
 from typing import Any, Self
-from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ValidationError
@@ -34,33 +34,11 @@ class _OpenAIProvider:
         concurrency: int = 1,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if timeout_sec <= 0:
-            raise _configuration_error("CONFIGURATION: timeout_sec must be positive")
-        if concurrency <= 0:
-            raise _configuration_error("CONFIGURATION: concurrency must be positive")
-        try:
-            endpoint = urlsplit(base_url)
-            hostname = endpoint.hostname
-            endpoint.port
-        except (TypeError, ValueError):
-            raise _configuration_error() from None
-        if (
-            endpoint.scheme not in {"http", "https"}
-            or not endpoint.netloc
-            or hostname is None
-            or not hostname.strip()
-            or endpoint.username is not None
-            or endpoint.password is not None
-            or endpoint.query
-            or endpoint.fragment
-        ):
-            raise _configuration_error()
-        if not model.strip():
-            raise _configuration_error("CONFIGURATION: model must not be blank")
-
-        self._base_url = base_url.rstrip("/")
+        timeout_sec = _positive_real(timeout_sec, "timeout_sec")
+        concurrency = _positive_int(concurrency, "concurrency")
+        self._base_url = _provider_base_url(base_url)
         self._api_key = api_key or None
-        self._model = model
+        self._model = _nonblank_string(model, "model")
         self._timeout = httpx.Timeout(timeout_sec)
         self._semaphore = asyncio.Semaphore(concurrency)
         self._owns_client = client is None
@@ -98,7 +76,7 @@ class _OpenAIProvider:
         try:
             async with self._semaphore:
                 response = await self._client.post(
-                    f"{self._base_url}/{path.lstrip('/')}",
+                    self._base_url.join(path.lstrip("/")),
                     json=payload,
                     headers=headers,
                     timeout=self._timeout,
@@ -244,8 +222,7 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
         asset_id: str,
         job_id: str,
     ) -> Embedding:
-        if expected_dims <= 0:
-            raise _configuration_error("CONFIGURATION: expected_dims must be positive")
+        expected_dims = _positive_int(expected_dims, "expected_dims")
         asset_id = _normalize_context_id(asset_id, "asset_id")
         job_id = _normalize_context_id(job_id, "job_id")
         if not text.strip():
@@ -279,6 +256,47 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
 
 def _schema_error(message: str = "MODEL_RESPONSE_SCHEMA: provider response failed validation") -> RecordedVideoError:
     return RecordedVideoError(ErrorCode.CONFIGURATION, retryable=False, message=message)
+
+
+def _provider_base_url(value: object) -> httpx.URL:
+    try:
+        endpoint = httpx.URL(value)
+        if (
+            endpoint.scheme not in {"http", "https"}
+            or not endpoint.host
+            or endpoint.userinfo
+            or endpoint.query
+            or b"?" in endpoint.raw_path
+            or endpoint.fragment
+        ):
+            raise _configuration_error()
+        return endpoint.copy_with(raw_path=endpoint.raw_path.rstrip(b"/") + b"/")
+    except (TypeError, httpx.InvalidURL):
+        raise _configuration_error() from None
+
+
+def _positive_real(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise _configuration_error(f"CONFIGURATION: {name} must be a finite positive number")
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise _configuration_error(f"CONFIGURATION: {name} must be a finite positive number") from None
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise _configuration_error(f"CONFIGURATION: {name} must be a finite positive number")
+    return normalized
+
+
+def _positive_int(value: object, name: str) -> int:
+    if type(value) is not int or value < 1:
+        raise _configuration_error(f"CONFIGURATION: {name} must be a positive integer")
+    return value
+
+
+def _nonblank_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise _configuration_error(f"CONFIGURATION: {name} must be a nonblank string")
+    return value
 
 
 def _normalize_context_id(value: str, name: str) -> str:
