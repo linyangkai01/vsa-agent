@@ -352,16 +352,16 @@ async def test_worker_limits_parallel_jobs_and_schedules_30_120_600_backoff(work
 **Interfaces:**
 - Produces: `recover_expired_jobs(now)`、`PipelineCancelled`、`cleanup_after_cancel()`。
 
-- [ ] **Step 1: 写 lease 过期恢复和 safe-point cancel 测试。**
+- [x] **Step 1: 写 lease 过期恢复和 safe-point cancel 测试。**
 ```python
 async def test_reclaimed_job_uses_checkpoint_and_honors_cancel_before_embedding(worker, repo):
     await repo.expire_lease("job"); await repo.request_cancel("job")
     assert (await worker.run_once()).status is JobStatus.CANCELLED
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_worker_recovery.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现恢复规则。** Worker 启动先将过期 `running` 任务回收为 queued，再验证 manifest/checksum；每 stage 前后查询 cancel；取消时不 publish、不写 ES，回收未引用 `.tmp`/chunk，保留 source；显式 retry 从 failed 创建/复用同一 pipeline job。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_worker_recovery.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/worker.py src/vsa_agent/recorded_video/pipeline.py src/vsa_agent/recorded_video/repository.py tests/unit/recorded_video/test_worker_recovery.py && git commit -m "feat: recover and cancel recorded video work"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_worker_recovery.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现恢复规则。** Worker 启动先将过期 `running` 任务回收为 queued，再验证 manifest/checksum；每 stage 前后查询 cancel；取消时不 publish、不写 ES，回收未引用 `.tmp`/chunk，保留 source；显式 retry 从 failed 创建/复用同一 pipeline job。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_worker_recovery.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/worker.py src/vsa_agent/recorded_video/pipeline.py src/vsa_agent/recorded_video/repository.py tests/unit/recorded_video/test_worker_recovery.py && git commit -m "feat: recover and cancel recorded video work"`。
 
 ### Task 15: 版本化 ES mapping 与 alias readiness（OpenSpec 5.1）
 
