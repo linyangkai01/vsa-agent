@@ -53,12 +53,24 @@ def _segment(*, start_offset_ms: int = 0, end_offset_ms: int = 8_000) -> Segment
     )
 
 
-def _probe_payload(*, container: str = "matroska", video_codec: str = "h264", audio_codec: str = "aac") -> str:
+def _probe_payload(
+    *,
+    container: str = "matroska",
+    video_codec: str = "h264",
+    audio_codec: str = "aac",
+    pixel_format: str = "yuv420p",
+) -> str:
     return json.dumps(
         {
             "format": {"format_name": container, "duration": "12.5"},
             "streams": [
-                {"codec_type": "video", "codec_name": video_codec, "width": 1920, "height": 1080},
+                {
+                    "codec_type": "video",
+                    "codec_name": video_codec,
+                    "pix_fmt": pixel_format,
+                    "width": 1920,
+                    "height": 1080,
+                },
                 {"codec_type": "audio", "codec_name": audio_codec},
             ],
         }
@@ -709,6 +721,27 @@ async def test_compatible_mp4_reuses_source_without_invoking_ffmpeg(store: Local
 
     assert playback == source
     assert [args[0] for args, _kwargs in runner.calls] == ["ffprobe"]
+
+
+@pytest.mark.parametrize("pixel_format", ["yuv422p", "yuv420p10le", "yuv422p10le"])
+async def test_h264_mp4_with_incompatible_pixel_format_is_transcoded(
+    store: LocalAssetStore,
+    pixel_format: str,
+) -> None:
+    asset = _asset(extension="mp4")
+    await store.write_atomic("assets/asset-uuid/source/original.mp4", b"source")
+    runner = FakeRunner(
+        _probe_payload(
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+            pixel_format=pixel_format,
+        )
+    )
+
+    await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
+
+    command = next(args for args, _kwargs in runner.calls if args[0] == "ffmpeg")
+    assert command[command.index("-c:v") + 1] == "libx264"
+    assert command[command.index("-pix_fmt") + 1] == "yuv420p"
 
 
 async def test_mkv_remuxes_or_transcodes_then_reuses_a_valid_proxy(store: LocalAssetStore) -> None:

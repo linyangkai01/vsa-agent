@@ -23,6 +23,7 @@ _PROCESS_TERMINATION_TIMEOUT_SEC = 5
 _MP4_FORMAT_NAMES = frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
 _BROWSER_VIDEO_CODECS = frozenset({"avc1", "h264"})
 _BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3"})
+_BROWSER_PIXEL_FORMATS = frozenset({"yuv420p"})
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -36,6 +37,7 @@ class MediaProbe:
     height: int
     format_names: frozenset[str]
     video_codec: str
+    pixel_format: str
     audio_codec: str | None
 
 
@@ -374,6 +376,7 @@ class MediaProcessor:
         width = int(raw_width)
         height = int(raw_height)
         video_codec = str(video_stream["codec_name"]).lower()
+        pixel_format = str(video_stream.get("pix_fmt", "")).lower()
         if width <= 0 or height <= 0 or not video_codec:
             raise ValueError("video stream is invalid")
         audio_stream = next(
@@ -384,12 +387,14 @@ class MediaProcessor:
         names = frozenset(name.strip().lower() for name in str(format_data.get("format_name", "")).split(",") if name)
         if not names:
             raise ValueError("container format is missing")
-        return MediaProbe(duration_ms, width, height, names, video_codec, audio_codec)
+        return MediaProbe(duration_ms, width, height, names, video_codec, pixel_format, audio_codec)
 
     @staticmethod
     def _has_browser_codecs(probe: MediaProbe) -> bool:
-        return probe.video_codec in _BROWSER_VIDEO_CODECS and (
-            probe.audio_codec is None or probe.audio_codec in _BROWSER_AUDIO_CODECS
+        return (
+            probe.video_codec in _BROWSER_VIDEO_CODECS
+            and probe.pixel_format in _BROWSER_PIXEL_FORMATS
+            and (probe.audio_codec is None or probe.audio_codec in _BROWSER_AUDIO_CODECS)
         )
 
     @classmethod
