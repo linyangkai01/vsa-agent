@@ -172,6 +172,7 @@ async def upload_recorded_video_chunk(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    session, asset = await repository.get_upload_context(upload_session_id)
     try:
         if reservation_token or not Path(path).is_file():
             await store.write_chunk(session, chunk_number, content)

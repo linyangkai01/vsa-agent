@@ -139,6 +139,21 @@ def test_chunk_protocol_rejects_invalid_chunk_number(client: TestClient) -> None
     assert response.status_code == 400
 
 
+def test_first_chunk_can_bind_total_without_being_chunk_one(client: TestClient) -> None:
+    created = _create_upload(client)
+
+    response = _upload_chunk(
+        client,
+        created["url"],
+        b"second",
+        chunk=2,
+        total=2,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"chunkCount": 1}
+
+
 def test_create_upload_removes_database_rows_when_session_directory_creation_fails(
     client: TestClient,
     tmp_path: Path,
