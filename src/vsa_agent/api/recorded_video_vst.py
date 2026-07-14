@@ -144,9 +144,7 @@ def _timeline_sizes(asset: Asset, segments: list[Segment]) -> list[float]:
 
 def _remaining_storage_days(assets: list[Asset], free_bytes: int) -> float:
     observed = [
-        asset
-        for asset in assets
-        if asset.size_bytes > 0 and asset.duration_ms is not None and asset.duration_ms > 0
+        asset for asset in assets if asset.size_bytes > 0 and asset.duration_ms is not None and asset.duration_ms > 0
     ]
     observed_bytes = sum(asset.size_bytes for asset in observed)
     observed_duration_ms = sum(asset.duration_ms or 0 for asset in observed)
