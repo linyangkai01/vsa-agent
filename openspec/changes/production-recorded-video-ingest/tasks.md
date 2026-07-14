@@ -12,7 +12,7 @@
 - [x] 2.3 实现 `POST /api/v1/videos/{asset_id}/complete` 的幂等任务创建，以及任务查询、重试和取消 API
 - [x] 2.4 实现原版 UI 所需的 VST facade 子集：视频列表、sensor 列表、storage size、缩略图和媒体 URL
 - [x] 2.5 实现支持 HTTP Range、时间 offset 和浏览器播放 proxy 的媒体响应，并覆盖 200/206/416、安全路径和取消请求测试
-- [ ] 2.6 实现 `DELETE /api/v1/videos/{asset_id}` 的取消、软删除、ES/派生文件/源文件清理和重复删除幂等行为
+- [x] 2.6 实现 `DELETE /api/v1/videos/{asset_id}` 的取消、软删除、ES/派生文件/源文件清理和重复删除幂等行为
 
 ## 3. 可替换录播分析流水线
 
@@ -28,7 +28,7 @@
 - [ ] 4.1 实现独立 Worker 入口、并发槽位、原子领取、租约续期、优雅停止和 heartbeat readiness
 - [ ] 4.2 实现 retryable/permanent 错误分类、30 秒/2 分钟/10 分钟退避、最大尝试次数和最后错误持久化
 - [ ] 4.3 实现 Worker 崩溃后租约回收、阶段恢复和不重复模型调用/ES 文档的故障注入测试
-- [ ] 4.4 实现处理中取消、失败后显式重试、孤儿 chunk/临时产物回收及磁盘空间不足处理
+- [x] 4.4 实现处理中取消、失败后显式重试、孤儿 chunk/临时产物回收及磁盘空间不足处理
 
 ## 5. Elasticsearch 生产索引与搜索
 
