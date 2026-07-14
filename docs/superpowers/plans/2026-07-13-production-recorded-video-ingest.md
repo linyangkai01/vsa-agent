@@ -161,12 +161,12 @@ async def test_store_never_uses_user_filename_in_physical_path(store):
 
 **Files:**
 - Create: `src/vsa_agent/api/recorded_video.py`, `tests/unit/api/test_recorded_video_upload.py`
-- Modify: `src/vsa_agent/api/routes.py`
+- Modify: `src/vsa_agent/api/routes.py`, `src/vsa_agent/recorded_video/repository.py`, `tests/unit/recorded_video/test_repository.py`
 
 **Interfaces:**
-- Produces: `POST /api/v1/videos -> {url,asset_id,upload_session_id}`；`POST /api/v1/vst/v1/storage/file` 接收 multipart `mediaFile` 和 nvstreamer headers。
+- Produces: `POST /api/v1/videos -> {url,asset_id,upload_session_id}`；`POST /api/v1/vst/v1/storage/file` 接收 multipart `mediaFile` 和 nvstreamer headers；repository 提供会话+资产读取、首次 identifier 原子绑定和已存字节读取，供 API 在写入前实施持久化配额检查。
 
-- [ ] **Step 1: 写名称预校验、累计大小和协议测试。**
+- [x] **Step 1: 写名称预校验、累计大小和协议测试。**
 ```python
 async def test_final_chunk_returns_same_sensor_and_stream_id(client):
     created = (await client.post("/api/v1/videos", json={"filename":"yard.mkv"})).json()
@@ -177,10 +177,10 @@ async def test_chunk_cumulative_size_limit_rejects_before_assembly(client, uploa
     response = await upload_chunk(client, upload_url, b"x" * 11, max_upload_bytes=10)
     assert response.status_code == 413
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_upload.py -q`。Expected: FAIL，404。
-- [ ] **Step 3: 实现输入契约。** `POST /videos` 请求体只有 `filename`，创建会话时只验证 basename、允许扩展和安全字符，绝不宣称可从该请求得知文件总大小；chunk handler 验证 `1 <= chunk <= total`、每块实际长度、identifier 一致性，并在写入前比较 `stored_bytes + incoming_bytes <= max_upload_bytes`。它调用 Task 3/4，重复同字节返回 200、同键不同摘要返回 409，最后块才返回 `sensorId/streamId/filePath/bytes/chunkCount`。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_upload.py -q`。Expected: PASS，含 400/409/413 与不发布半成品。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video.py src/vsa_agent/api/routes.py tests/unit/api/test_recorded_video_upload.py && git commit -m "feat: accept original ui recorded video chunks"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_upload.py -q`。Expected: FAIL，404。
+- [x] **Step 3: 实现输入契约。** `POST /videos` 请求体只有 `filename`，创建会话时只验证 basename、允许扩展和安全字符，绝不宣称可从该请求得知文件总大小；chunk handler 验证 `1 <= chunk <= total`、每块实际长度、identifier 一致性，并在写入前比较 `stored_bytes + incoming_bytes <= max_upload_bytes`。它调用 Task 3/4，重复同字节返回 200、同键不同摘要返回 409，最后块才返回 `sensorId/streamId/filePath/bytes/chunkCount`。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_upload.py -q`。Expected: PASS，含 400/409/413 与不发布半成品。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video.py src/vsa_agent/api/routes.py tests/unit/api/test_recorded_video_upload.py && git commit -m "feat: accept original ui recorded video chunks"`。
 
 ### Task 6: 完成、状态、重试和取消 API（OpenSpec 2.3）
 
