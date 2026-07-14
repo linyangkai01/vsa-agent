@@ -495,6 +495,48 @@ async def test_embedding_rejects_blank_context_before_request(asset_id: str, job
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["asset_id", "job_id"])
+@pytest.mark.parametrize(
+    "invalid_id",
+    [None, 1, True, b"context-id", "x" * 257, *[f"context{chr(code)}id" for code in (*range(32), 127)]],
+)
+async def test_embedding_rejects_nonstring_and_control_context_before_request_or_log(
+    field: str,
+    invalid_id: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://provider.example/v1",
+            api_key=None,
+            model="embedding-model",
+            client=client,
+        )
+        context: dict[str, object] = {"asset_id": "asset-1", "job_id": "job-1"}
+        context[field] = invalid_id
+        with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
+            with pytest.raises(RecordedVideoError) as caught:
+                await provider.embed(
+                    "forklift",
+                    expected_dims=1,
+                    asset_id=context["asset_id"],  # type: ignore[arg-type]
+                    job_id=context["job_id"],  # type: ignore[arg-type]
+                )
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False
+    assert request_count == 0
+    assert "provider.request" not in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("asset_id", "job_id"),
     [("", "job-1"), ("   ", "job-1"), ("asset-1", ""), ("asset-1", "   ")],
@@ -541,9 +583,12 @@ async def test_vision_rejects_blank_context_before_request(
         "/v1",
         "ftp://provider.example/v1",
         "https:///v1",
+        "https://@provider.example/v1",
         "https://user:password@provider.example/v1",
         "https://provider.example/v1?api-version=2026-07-14",
+        "https://provider.example/v1?",
         "https://provider.example/v1#embeddings",
+        "https://provider.example/v1#",
         "https://[v1.foo]/v1",
         "https://provider.\nexample/v1",
     ],
@@ -562,6 +607,40 @@ async def test_provider_rejects_invalid_base_url_as_permanent_configuration(
 
     assert caught.value.code is ErrorCode.CONFIGURATION
     assert caught.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_provider_closes_owned_client_via_async_context_manager() -> None:
+    provider = OpenAIEmbeddingProvider(
+        base_url="https://provider.example/v1",
+        api_key=None,
+        model="embedding-model",
+    )
+    owned_client = provider._client
+
+    async with provider as entered:
+        assert entered is provider
+        assert owned_client.is_closed is False
+
+    assert owned_client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_provider_context_manager_does_not_close_injected_client() -> None:
+    client = _client(httpx.MockTransport(lambda _: httpx.Response(200)))
+    provider = OpenAIEmbeddingProvider(
+        base_url="https://provider.example/v1",
+        api_key=None,
+        model="embedding-model",
+        client=client,
+    )
+
+    try:
+        async with provider as entered:
+            assert entered is provider
+        assert client.is_closed is False
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

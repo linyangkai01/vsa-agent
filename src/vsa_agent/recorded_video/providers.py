@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from numbers import Real
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ValidationError
@@ -21,6 +22,8 @@ from vsa_agent.recorded_video.models import Segment
 from vsa_agent.recorded_video.ports import Embedding, VisionDescription
 
 logger = logging.getLogger(__name__)
+
+_MAX_CONTEXT_ID_LENGTH = 256
 
 
 class _OpenAIProvider:
@@ -260,18 +263,21 @@ def _schema_error(message: str = "MODEL_RESPONSE_SCHEMA: provider response faile
 
 def _provider_base_url(value: object) -> httpx.URL:
     try:
+        if not isinstance(value, str) or "?" in value or "#" in value:
+            raise _configuration_error()
+        authority = urlsplit(value).netloc
         endpoint = httpx.URL(value)
         if (
             endpoint.scheme not in {"http", "https"}
             or not endpoint.host
+            or "@" in authority
             or endpoint.userinfo
             or endpoint.query
-            or b"?" in endpoint.raw_path
             or endpoint.fragment
         ):
             raise _configuration_error()
         return endpoint.copy_with(raw_path=endpoint.raw_path.rstrip(b"/") + b"/")
-    except (TypeError, httpx.InvalidURL):
+    except (TypeError, ValueError, httpx.InvalidURL):
         raise _configuration_error() from None
 
 
@@ -299,7 +305,13 @@ def _nonblank_string(value: object, name: str) -> str:
     return value
 
 
-def _normalize_context_id(value: str, name: str) -> str:
+def _normalize_context_id(value: object, name: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) > _MAX_CONTEXT_ID_LENGTH
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise _configuration_error(f"CONFIGURATION: {name} must be a safe bounded string")
     normalized = value.strip()
     if not normalized:
         raise _configuration_error(f"CONFIGURATION: {name} must not be blank")
