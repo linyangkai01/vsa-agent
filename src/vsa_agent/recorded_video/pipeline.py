@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import time
@@ -57,6 +58,16 @@ class PipelineResult(BaseModel):
     manifest_checksum: str
     segment_count: int
     projected_ids: tuple[str, ...]
+
+
+class PipelineCancelled(PermissionError):  # noqa: N818 - public workflow contract
+    """The current leased attempt observed a durable cancellation request."""
+
+    def __init__(self, job: Job) -> None:
+        self.job_id = job.job_id
+        self.asset_id = job.asset_id
+        self.attempt = job.attempt
+        super().__init__(f"job cancellation requested: {job.job_id} attempt {job.attempt}")
 
 
 def load_verified_checkpoint(
@@ -159,7 +170,10 @@ class RecordedVideoPipeline:
             )
         }
         source_path = await self._fenced_call(job, lambda: self._asset_store.resolve_source_path(asset))
-        if _sha256_file(source_path) != asset.sha256:
+        await self._cancel_point(job)
+        source_checksum = _sha256_file(source_path)
+        await self._cancel_point(job)
+        if source_checksum != asset.sha256:
             raise RecordedVideoError(
                 ErrorCode.CORRUPT_MEDIA,
                 retryable=False,
@@ -175,7 +189,7 @@ class RecordedVideoPipeline:
             model: str | None = None,
         ) -> tuple[dict[str, Any], str]:
             nonlocal stored_steps
-            await self._repository.assert_active_lease(job)
+            await self._cancel_point(job)
             stored = stored_steps.get(stage)
             candidate_path = manifest_path
             if stored is not None and stored.output_manifest is not None:
@@ -204,7 +218,7 @@ class RecordedVideoPipeline:
                         step = self._step(job, stage, manifest_key, output_checksum, entry, model=model)
                         await self._fenced_call(job, lambda: self._repository.checkpoint_step(job, step))
                         stored_steps[stage] = step
-                    await self._repository.assert_active_lease(job)
+                    await self._cancel_point(job)
                     return verified, output_checksum
 
             if stored is not None:
@@ -224,6 +238,7 @@ class RecordedVideoPipeline:
             monotonic_start = time.monotonic()
             output = await self._fenced_call(job, operation)
             validator(output)
+            await self._cancel_point(job)
             completed_at = self._now()
             output_checksum = _sha256_json(output)
             entry = {
@@ -239,7 +254,7 @@ class RecordedVideoPipeline:
             step = self._step(job, stage, manifest_key, output_checksum, entry, model=model)
             await self._fenced_call(job, lambda: self._repository.checkpoint_step(job, step))
             stored_steps[stage] = step
-            await self._repository.assert_active_lease(job)
+            await self._cancel_point(job)
             return output, output_checksum
 
         probe_output, probe_sha = await run_stage(
@@ -297,14 +312,14 @@ class RecordedVideoPipeline:
         publish_started_at = self._now()
         publish_monotonic_start = time.monotonic()
         try:
-            await self._repository.assert_active_lease(job)
+            await self._cancel_point(job)
             projection_started = True
             projection_result = await self._projection.project(
                 documents,
                 job_id=job.job_id,
                 attempt=job.attempt,
             )
-            await self._repository.assert_active_lease(job)
+            await self._cancel_point(job)
             expected_ids = [str(document["_id"]) for document in documents]
             if (
                 projection_result.failed_ids
@@ -336,12 +351,15 @@ class RecordedVideoPipeline:
                 publish_checksum,
                 publish_entry,
             )
+            await self._cancel_point(job)
             completed_job = await self._repository.complete_pipeline(
                 job,
                 probed_asset,
                 completed_segments,
                 publish_step,
             )
+        except PipelineCancelled:
+            raise
         except BaseException:
             if projection_started:
                 with suppress(Exception):
@@ -765,10 +783,73 @@ class RecordedVideoPipeline:
 
     async def _fenced_call(self, job: Job, operation: Callable[[], Awaitable[Any]]) -> Any:
         """Fence immediately around one awaited stage or external interaction."""
-        await self._repository.assert_active_lease(job)
+        await self._cancel_point(job)
         result = await operation()
-        await self._repository.assert_active_lease(job)
+        await self._cancel_point(job)
         return result
+
+    async def _cancel_point(self, job: Job) -> None:
+        is_cancel_requested = getattr(self._repository, "is_cancel_requested", None)
+        if is_cancel_requested is None:
+            await self._repository.assert_active_lease(job)
+            return
+        if not await is_cancel_requested(job, self._now()):
+            return
+        await self.cleanup_after_cancel(job)
+        raise PipelineCancelled(job)
+
+    async def cleanup_after_cancel(self, job: Job) -> None:
+        """Rollback one attempt and remove only repository-approved temporary data."""
+        await self._projection.delete_projection(job.asset_id, job.job_id, job.attempt)
+        asset_root = (
+            self._asset_store.root.resolve() / "assets" / _safe_path_component(job.asset_id, "asset_id")
+        ).resolve()
+        attempt_dir = (
+            asset_root
+            / "derived"
+            / _safe_path_component(job.pipeline_version, "pipeline_version")
+            / "attempts"
+            / str(job.attempt)
+        ).resolve()
+        if attempt_dir.is_relative_to(asset_root) and attempt_dir.is_dir():
+            referenced = self._referenced_artifacts(attempt_dir, asset_root)
+            for candidate in attempt_dir.rglob("*.tmp"):
+                resolved = candidate.resolve()
+                if resolved.is_file() and resolved.is_relative_to(attempt_dir) and resolved not in referenced:
+                    resolved.unlink()
+
+        cleanup_sessions = getattr(self._asset_store, "cleanup_expired_sessions", None)
+        if cleanup_sessions is not None:
+            try:
+                result = cleanup_sessions(self._now())
+                if inspect.isawaitable(result):
+                    await result
+            except RecordedVideoError as error:
+                if error.code is not ErrorCode.CONFIGURATION:
+                    raise
+
+    @staticmethod
+    def _referenced_artifacts(attempt_dir: Path, asset_root: Path) -> set[Path]:
+        referenced: set[Path] = set()
+        for manifest_path in attempt_dir.glob("manifest.json"):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                stages = manifest.get("stages", {})
+                if not isinstance(stages, dict):
+                    continue
+                for entry in stages.values():
+                    artifacts = entry.get("output", {}).get("artifacts", {})
+                    if not isinstance(artifacts, dict):
+                        continue
+                    for key in artifacts:
+                        if not isinstance(key, str):
+                            continue
+                        artifact = (asset_root / PurePosixPath(key)).resolve()
+                        if artifact.is_relative_to(asset_root):
+                            referenced.add(artifact)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return referenced
 
     @staticmethod
     def _checkpoint_path(asset_dir: Path, pipeline_version: str, key: str) -> Path:

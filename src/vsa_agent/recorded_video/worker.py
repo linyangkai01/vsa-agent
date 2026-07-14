@@ -16,7 +16,8 @@ from typing import Any, Protocol
 
 from vsa_agent.config import AppConfig, validate_recorded_video_runtime
 from vsa_agent.recorded_video.errors import LeaseLostError, RecordedVideoError
-from vsa_agent.recorded_video.models import Job
+from vsa_agent.recorded_video.models import Job, JobStatus
+from vsa_agent.recorded_video.pipeline import PipelineCancelled
 
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
 
@@ -97,6 +98,8 @@ class RecordedVideoWorker:
         self._output = output or print
         self._worker_id = worker_id or str(uuid.uuid4())
         self._semaphore = asyncio.Semaphore(worker_concurrency)
+        self._recovery_lock = asyncio.Lock()
+        self._recovery_complete = False
         self._stopping = asyncio.Event()
         self._active_jobs: dict[str, tuple[str, int]] = {}
 
@@ -127,6 +130,7 @@ class RecordedVideoWorker:
         async with self._semaphore:
             if self._stopping.is_set():
                 return None
+            await self._recover_once()
             owner = f"{self._worker_id}:{uuid.uuid4()}"
             job = await self._repository.claim_due_job(owner, self._now())
             if job is None:
@@ -155,6 +159,15 @@ class RecordedVideoWorker:
             except asyncio.CancelledError:
                 self._emit_job("job.interrupted", job, error_code="WORKER_CANCELLED")
                 raise
+            except PipelineCancelled:
+                finish_cancel = getattr(self._repository, "finish_cancel", None)
+                if finish_cancel is None:
+                    raise
+                cancelled = await finish_cancel(job, self._now())
+                if cancelled is None:
+                    raise RuntimeError("pipeline reported cancellation without a durable cancel request")
+                self._emit_job("job.cancelled", cancelled)
+                return cancelled
             except LeaseLostError:
                 self._emit_job("job.lease_lost", job, error_code="LEASE_LOST")
                 return None
@@ -167,6 +180,24 @@ class RecordedVideoWorker:
                 return result
             finally:
                 self._active_jobs.pop(job.job_id, None)
+
+    async def _recover_once(self) -> None:
+        if self._recovery_complete:
+            return
+        async with self._recovery_lock:
+            if self._recovery_complete:
+                return
+            recover = getattr(self._repository, "recover_expired_jobs", None)
+            recovered: list[Job] = [] if recover is None else list(await recover(self._now()))
+            for job in recovered:
+                if job.status is JobStatus.CANCELLED:
+                    cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
+                    if cleanup is not None:
+                        await cleanup(job)
+                event = "job.cancelled" if job.status is JobStatus.CANCELLED else "job.recovered"
+                self._emit_job(event, job)
+            self._recovery_complete = True
+            self._emit("worker.recovery_complete", recovered_jobs=len(recovered))
 
     async def run_until_idle(self) -> list[object | Job]:
         """Drain all jobs currently claimable without polling or sleeping."""

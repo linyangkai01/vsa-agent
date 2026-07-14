@@ -1239,6 +1239,62 @@ class JobRepository:
                 raise ValueError("asset deletion is in progress")
             raise ValueError(f"only failed jobs can be retried; current status is {current['status']}")
 
+    async def recover_expired_jobs(self, now: datetime) -> list[Job]:
+        """Atomically release expired attempts without consuming a new attempt."""
+        recovered_at = _require_aware(now, "now")
+        async with self._write_transaction() as connection:
+            rows = await self._recover_expired_jobs(connection, recovered_at)
+        return [self._row_to_job(row) for row in rows]
+
+    async def _recover_expired_jobs(
+        self,
+        connection: aiosqlite.Connection,
+        recovered_at: datetime,
+    ) -> list[aiosqlite.Row]:
+        recovered_iso = _to_iso(recovered_at)
+        cursor = await connection.execute(
+            """
+            UPDATE jobs
+            SET status = CASE
+                    WHEN cancel_requested = 1
+                        OR asset_id IN (SELECT asset_id FROM asset_deletion_requests)
+                    THEN ? ELSE ?
+                END,
+                next_run_at = CASE
+                    WHEN cancel_requested = 1
+                        OR asset_id IN (SELECT asset_id FROM asset_deletion_requests)
+                    THEN NULL ELSE ?
+                END,
+                lease_owner = NULL, lease_until = NULL, heartbeat_at = NULL,
+                cancel_requested = 0, updated_at = ?
+            WHERE status = ? AND lease_until IS NOT NULL AND lease_until <= ?
+            RETURNING *
+            """,
+            (
+                JobStatus.CANCELLED.value,
+                JobStatus.QUEUED.value,
+                recovered_iso,
+                recovered_iso,
+                JobStatus.RUNNING.value,
+                recovered_iso,
+            ),
+        )
+        try:
+            rows = list(await cursor.fetchall())
+        finally:
+            await cursor.close()
+        for row in rows:
+            if row["status"] != JobStatus.CANCELLED.value:
+                continue
+            await connection.execute(
+                """
+                UPDATE assets SET status = ?, updated_at = ?
+                WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
+                """,
+                (AssetStatus.READY.value, recovered_iso, row["asset_id"], row["job_id"]),
+            )
+        return rows
+
     async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
         """Atomically claim one due job using the caller's timezone-aware clock."""
         if not owner.strip():
@@ -1247,13 +1303,8 @@ class JobRepository:
         claimed_iso = _to_iso(claimed_at)
         lease_until = _to_iso(claimed_at + timedelta(seconds=self.lease_seconds))
         due = """
-            (
-                (
-                    status = 'queued'
-                    AND (next_run_at IS NULL OR next_run_at <= :now)
-                )
-                OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= :now)
-            )
+            status = 'queued'
+            AND (next_run_at IS NULL OR next_run_at <= :now)
             AND asset_id NOT IN (SELECT asset_id FROM asset_deletion_requests)
         """
         sql = f"""
@@ -1283,6 +1334,7 @@ class JobRepository:
         }
 
         async with self._write_transaction() as connection:
+            await self._recover_expired_jobs(connection, claimed_at)
             await connection.execute(
                 """
                 UPDATE jobs
@@ -1766,6 +1818,66 @@ class JobRepository:
             if row is None:
                 raise KeyError(f"unknown job: {job_id}")
             return self._row_to_job(row)
+
+    async def finish_cancel(self, job: Job, now: datetime | None = None) -> Job | None:
+        """Finalize cancellation only for the exact active leased attempt."""
+        if job.lease_owner is None:
+            raise PermissionError("cancellation requires a lease owner")
+        cancelled_at = _require_aware(now or self._now(), "now")
+        cancelled_iso = _to_iso(cancelled_at)
+        async with self._write_transaction() as connection:
+            current = await self._require_active_lease(
+                connection,
+                job,
+                cancelled_at,
+                allow_cancel_requested=True,
+            )
+            if not current["cancel_requested"]:
+                return None
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET status = ?, next_run_at = NULL, lease_owner = NULL,
+                    lease_until = NULL, heartbeat_at = NULL, cancel_requested = 0,
+                    updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                    AND cancel_requested = 1
+                RETURNING *
+                """,
+                (
+                    JobStatus.CANCELLED.value,
+                    cancelled_iso,
+                    job.job_id,
+                    JobStatus.RUNNING.value,
+                    job.lease_owner,
+                    job.attempt,
+                ),
+            )
+            if row is None:
+                raise LeaseLostError("job cancellation lost its attempt fence")
+            await connection.execute(
+                """
+                UPDATE assets SET status = ?, updated_at = ?
+                WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
+                """,
+                (AssetStatus.READY.value, cancelled_iso, job.asset_id, job.job_id),
+            )
+            return self._row_to_job(row)
+
+    async def is_cancel_requested(self, job: Job, now: datetime | None = None) -> bool:
+        """Read cancellation while fencing the exact active attempt."""
+        if job.lease_owner is None:
+            raise PermissionError("cancellation check requires a lease owner")
+        checked_at = _require_aware(now or self._now(), "now")
+        async with self._write_transaction() as connection:
+            current = await self._require_active_lease(
+                connection,
+                job,
+                checked_at,
+                allow_cancel_requested=True,
+            )
+            return bool(current["cancel_requested"])
 
     async def soft_delete_asset(self, asset_id: str, now: datetime) -> Asset:
         deleted_at = _require_aware(now, "now")
