@@ -23,6 +23,7 @@ from vsa_agent.recorded_video.models import (
     JobStatus,
     JobStep,
     PipelineVersion,
+    Segment,
     UploadSession,
 )
 
@@ -814,6 +815,71 @@ class JobRepository:
             raise KeyError(f"unknown asset: {asset_id}")
         return self._row_to_asset(row)
 
+    async def list_ready_assets(self) -> list[Asset]:
+        """Return assets exposed by the recorded-video read facade."""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM assets
+                WHERE status = ? AND deleted_at IS NULL
+                ORDER BY created_at, asset_id
+                """,
+                (AssetStatus.READY.value,),
+            )
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        return [self._row_to_asset(row) for row in rows]
+
+    async def list_segments(self, asset_id: str) -> list[Segment]:
+        """Return an asset's persisted timeline segments in playback order."""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM segments
+                WHERE asset_id = ?
+                ORDER BY start_offset_ms, ordinal, segment_id
+                """,
+                (asset_id,),
+            )
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        return [self._row_to_segment(row) for row in rows]
+
+    async def find_segment(self, asset_id: str, timestamp: datetime) -> Segment:
+        """Find the timeline segment containing one absolute playback time."""
+        timestamp_iso = _to_iso(_require_aware(timestamp, "timestamp"), "timestamp")
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                SELECT * FROM segments
+                WHERE asset_id = ? AND start_time <= ? AND end_time >= ?
+                ORDER BY start_offset_ms, ordinal, segment_id
+                LIMIT 1
+                """,
+                (asset_id, timestamp_iso, timestamp_iso),
+            )
+        if row is None:
+            raise KeyError(f"no segment for asset {asset_id} at {timestamp_iso}")
+        return self._row_to_segment(row)
+
+    async def ready_storage_bytes(self) -> int:
+        """Return the durable byte total for assets visible to VST readers."""
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                SELECT COALESCE(SUM(size_bytes), 0) AS total_bytes
+                FROM assets WHERE status = ? AND deleted_at IS NULL
+                """,
+                (AssetStatus.READY.value,),
+            )
+        return int(row["total_bytes"] if row is not None else 0)
+
     async def get_job(self, job_id: str) -> Job:
         """Load one durable job by identifier."""
         async with self._connect() as connection:
@@ -1304,4 +1370,21 @@ class JobRepository:
             created_at=_from_iso(row["created_at"]),
             updated_at=_from_iso(row["updated_at"]),
             deleted_at=_from_iso(row["deleted_at"]),
+        )
+
+    @staticmethod
+    def _row_to_segment(row: aiosqlite.Row) -> Segment:
+        return Segment(
+            segment_id=row["segment_id"],
+            asset_id=row["asset_id"],
+            pipeline_version=row["pipeline_version"],
+            ordinal=row["ordinal"],
+            start_offset_ms=row["start_offset_ms"],
+            end_offset_ms=row["end_offset_ms"],
+            start_time=_from_iso(row["start_time"]),
+            end_time=_from_iso(row["end_time"]),
+            description=row["description"],
+            thumbnail_key=row["thumbnail_key"],
+            model=row["model"],
+            prompt_version=row["prompt_version"],
         )

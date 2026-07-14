@@ -204,6 +204,36 @@ class LocalAssetStore:
             self._raise_storage_error(error)
             raise
 
+    async def resolve_source_path(self, asset: Asset) -> Path:
+        """Resolve an existing original source through the controlled asset layout."""
+        asset_root = self._asset_root(asset.asset_id)
+        extension = asset.source_extension.lower().removeprefix(".")
+        if extension not in _ALLOWED_SOURCE_EXTENSIONS:
+            raise self._unsafe_path_error(asset.source_extension)
+        source = asset_root / "source" / f"original.{extension}"
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        return source
+
+    async def resolve_playback_path(self, asset: Asset) -> Path:
+        """Prefer a published browser playback proxy, then fall back to the source."""
+        proxy = self._asset_root(asset.asset_id) / "playback" / "proxy.mp4"
+        if proxy.is_file():
+            return proxy
+        return await self.resolve_source_path(asset)
+
+    async def resolve_thumbnail_path(self, asset_id: str, thumbnail_key: str) -> Path:
+        """Resolve an existing segment thumbnail without allowing asset-root escapes."""
+        if not thumbnail_key or Path(thumbnail_key).is_absolute():
+            raise self._unsafe_path_error(thumbnail_key)
+        asset_root = self._asset_root(asset_id)
+        thumbnail = (asset_root / thumbnail_key).resolve()
+        if not thumbnail.is_relative_to(asset_root):
+            raise self._unsafe_path_error(thumbnail_key)
+        if not thumbnail.is_file():
+            raise FileNotFoundError(thumbnail)
+        return thumbnail
+
     async def free_bytes(self) -> int:
         try:
             return shutil.disk_usage(self.root).free
@@ -240,6 +270,9 @@ class LocalAssetStore:
 
     def _session_dir(self, session_id: str) -> Path:
         return self.root / "uploads" / self._validate_component(session_id, "session_id")
+
+    def _asset_root(self, asset_id: str) -> Path:
+        return self.root / "assets" / self._validate_component(asset_id, "asset_id")
 
     def _validate_component(self, value: str, name: str) -> str:
         if _SAFE_COMPONENT.fullmatch(value) is None or value in {".", ".."}:

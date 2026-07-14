@@ -124,6 +124,20 @@ async def test_store_never_uses_user_filename_in_physical_path(store: LocalAsset
     assert source.name == "original.mkv"
 
 
+async def test_media_resolvers_only_return_existing_controlled_asset_files(store: LocalAssetStore) -> None:
+    asset = _asset(asset_id="asset-1", extension="mp4")
+    source = await store.write_atomic("assets/asset-1/source/original.mp4", b"source")
+    thumbnail = await store.write_atomic("assets/asset-1/derived/v1/thumb.jpg", b"thumbnail")
+    playback = await store.write_atomic("assets/asset-1/playback/proxy.mp4", b"proxy")
+
+    assert await store.resolve_source_path(asset) == Path(source)
+    assert await store.resolve_playback_path(asset) == Path(playback)
+    assert await store.resolve_thumbnail_path(asset.asset_id, "derived/v1/thumb.jpg") == Path(thumbnail)
+    with pytest.raises(RecordedVideoError) as unsafe:
+        await store.resolve_thumbnail_path(asset.asset_id, "../../outside.jpg")
+    assert unsafe.value.code is ErrorCode.UNSUPPORTED_MEDIA
+
+
 async def test_duplicate_chunk_is_idempotent_but_conflicting_content_is_rejected(
     store: LocalAssetStore,
 ) -> None:

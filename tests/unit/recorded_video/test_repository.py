@@ -107,6 +107,48 @@ async def _record_all_chunks(repo: JobRepository, session: UploadSession) -> Non
 
 
 @pytest.mark.asyncio
+async def test_ready_asset_and_segment_read_boundaries_exclude_deleted_assets(repo: JobRepository) -> None:
+    ready = _asset("ready")
+    deleted = _asset("deleted")
+    deleted.status = AssetStatus.DELETED
+    deleted.deleted_at = NOW
+    await repo.create_upload_session(ready, _session("ready", identifier="ready-upload"))
+    await repo.create_upload_session(deleted, _session("deleted", identifier="deleted-upload"))
+    await _record_all_chunks(repo, _session("ready", identifier="ready-upload"))
+    await repo.complete_upload("ready", "v1", now=NOW)
+
+    with sqlite3.connect(repo.database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO segments (
+                segment_id, asset_id, pipeline_version, ordinal, start_offset_ms, end_offset_ms,
+                start_time, end_time, description, thumbnail_key, model, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "segment-1",
+                "ready",
+                "v1",
+                0,
+                0,
+                1_000,
+                NOW.isoformat(),
+                (NOW + timedelta(seconds=1)).isoformat(),
+                "yard",
+                "derived/v1/thumbnails/segment-1.jpg",
+                None,
+                None,
+            ),
+        )
+        connection.commit()
+
+    assert [asset.asset_id for asset in await repo.list_ready_assets()] == ["ready"]
+    assert [segment.segment_id for segment in await repo.list_segments("ready")] == ["segment-1"]
+    assert (await repo.find_segment("ready", NOW)).segment_id == "segment-1"
+    assert await repo.ready_storage_bytes() == ready.size_bytes
+
+
+@pytest.mark.asyncio
 async def test_initialize_enables_wal_and_applies_versioned_schema_idempotently(tmp_path: Path):
     db_path = tmp_path / "nested" / "jobs.sqlite3"
     repository = JobRepository(db_path)
