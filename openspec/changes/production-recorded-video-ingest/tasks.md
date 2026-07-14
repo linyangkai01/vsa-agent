@@ -9,7 +9,7 @@
 
 - [x] 2.1 实现 `POST /api/v1/videos` 上传会话 API、输入限制和同源 upload URL 返回契约
 - [x] 2.2 实现 nvstreamer 分块接收、块幂等校验、最终原子合并及 `sensorId/streamId` 兼容响应
-- [ ] 2.3 实现 `POST /api/v1/videos/{asset_id}/complete` 的幂等任务创建，以及任务查询、重试和取消 API
+- [x] 2.3 实现 `POST /api/v1/videos/{asset_id}/complete` 的幂等任务创建，以及任务查询、重试和取消 API
 - [ ] 2.4 实现原版 UI 所需的 VST facade 子集：视频列表、sensor 列表、storage size、缩略图和媒体 URL
 - [ ] 2.5 实现支持 HTTP Range、时间 offset 和浏览器播放 proxy 的媒体响应，并覆盖 200/206/416、安全路径和取消请求测试
 - [ ] 2.6 实现 `DELETE /api/v1/videos/{asset_id}` 的取消、软删除、ES/派生文件/源文件清理和重复删除幂等行为

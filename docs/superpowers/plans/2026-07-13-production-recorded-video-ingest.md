@@ -185,12 +185,12 @@ async def test_chunk_cumulative_size_limit_rejects_before_assembly(client, uploa
 ### Task 6: 完成、状态、重试和取消 API（OpenSpec 2.3）
 
 **Files:**
-- Modify: `src/vsa_agent/api/recorded_video.py`, `tests/unit/api/test_recorded_video_jobs.py`
+- Modify: `src/vsa_agent/api/recorded_video.py`, `src/vsa_agent/recorded_video/repository.py`, `src/vsa_agent/recorded_video/models.py`, `tests/unit/api/test_recorded_video_jobs.py`, `tests/unit/recorded_video/test_repository.py`, `tests/unit/recorded_video/test_models.py`
 
 **Interfaces:**
-- Produces: `POST /api/v1/videos/{asset_id}/complete -> {asset_id,job_id,status,status_url}`；`GET /api/v1/jobs/{job_id}`；`POST /api/v1/jobs/{job_id}/retry`；`POST /api/v1/jobs/{job_id}/cancel`。
+- Produces: `POST /api/v1/videos/{asset_id}/complete -> {asset_id,job_id,status,status_url}`；`GET /api/v1/jobs/{job_id}`；`POST /api/v1/jobs/{job_id}/retry`；`POST /api/v1/jobs/{job_id}/cancel`；repository 提供持久任务读取和仅允许 `failed -> queued` 的原子重试入口。
 
-- [ ] **Step 1: 写 complete 幂等与可见状态测试。**
+- [x] **Step 1: 写 complete 幂等与可见状态测试。**
 ```python
 async def test_repeated_complete_returns_same_job_and_status_url(client, ready_asset):
     one = await client.post(f"/api/v1/videos/{ready_asset}/complete", json={})
@@ -198,10 +198,10 @@ async def test_repeated_complete_returns_same_job_and_status_url(client, ready_a
     assert one.json()["job_id"] == two.json()["job_id"]
     assert (await client.get(one.json()["status_url"])).json()["status"] == "queued"
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_jobs.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 API。** complete 先确认所有 chunk/assemble 成功，再调用 repository 的唯一 `(asset_id,pipeline_version)` job 创建；状态仅返回安全 error 摘要、stage、attempt、timestamps；retry 只允许 failed，cancel 对 queued 立即生效、running 标记 `cancel_requested`。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_jobs.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video.py tests/unit/api/test_recorded_video_jobs.py && git commit -m "feat: expose recorded video job lifecycle"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_jobs.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 API。** complete 先确认所有 chunk/assemble 成功，再调用 repository 的唯一 `(asset_id,pipeline_version)` job 创建；状态仅返回安全 error 摘要、stage、attempt、timestamps；retry 只允许 failed，cancel 对 queued 立即生效、running 标记 `cancel_requested`。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_jobs.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video.py tests/unit/api/test_recorded_video_jobs.py && git commit -m "feat: expose recorded video job lifecycle"`。
 
 ### Task 7: VST 列表、缩略图和媒体 facade（OpenSpec 2.4、2.5）
 
