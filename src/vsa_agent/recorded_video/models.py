@@ -201,7 +201,7 @@ ALLOWED_JOB_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = MappingProxy
         ),
         JobStatus.RETRY_WAIT: frozenset({JobStatus.QUEUED}),
         JobStatus.COMPLETED: frozenset(),
-        JobStatus.FAILED: frozenset(),
+        JobStatus.FAILED: frozenset({JobStatus.QUEUED}),
         JobStatus.CANCELLED: frozenset(),
     }
 )

@@ -64,7 +64,7 @@ def test_job_status_graph_contains_only_the_supported_transitions() -> None:
         },
         JobStatus.RETRY_WAIT: {JobStatus.QUEUED},
         JobStatus.COMPLETED: set(),
-        JobStatus.FAILED: set(),
+        JobStatus.FAILED: {JobStatus.QUEUED},
         JobStatus.CANCELLED: set(),
     }
 
@@ -79,6 +79,7 @@ def test_job_status_graph_contains_only_the_supported_transitions() -> None:
         (JobStatus.RUNNING, JobStatus.FAILED),
         (JobStatus.RUNNING, JobStatus.CANCELLED),
         (JobStatus.RETRY_WAIT, JobStatus.QUEUED),
+        (JobStatus.FAILED, JobStatus.QUEUED),
     ],
 )
 def test_transition_job_returns_an_updated_copy(source: JobStatus, target: JobStatus) -> None:
@@ -99,6 +100,21 @@ def test_invalid_transition_reports_source_and_target() -> None:
     assert captured.value.target is JobStatus.RUNNING
     assert "completed" in str(captured.value)
     assert "running" in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        JobStatus.RUNNING,
+        JobStatus.RETRY_WAIT,
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    ],
+)
+def test_failed_job_only_transitions_back_to_queued(target: JobStatus) -> None:
+    with pytest.raises(InvalidStateTransition):
+        transition_job(_job(JobStatus.FAILED), target)
 
 
 def test_error_codes_are_partitioned_by_retryability() -> None:

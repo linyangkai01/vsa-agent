@@ -802,6 +802,65 @@ class JobRepository:
             )
             return job
 
+    async def get_asset(self, asset_id: str) -> Asset:
+        """Load one durable asset by identifier."""
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                "SELECT * FROM assets WHERE asset_id = ?",
+                (asset_id,),
+            )
+        if row is None:
+            raise KeyError(f"unknown asset: {asset_id}")
+        return self._row_to_asset(row)
+
+    async def get_job(self, job_id: str) -> Job:
+        """Load one durable job by identifier."""
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                "SELECT * FROM jobs WHERE job_id = ?",
+                (job_id,),
+            )
+        if row is None:
+            raise KeyError(f"unknown job: {job_id}")
+        return self._row_to_job(row)
+
+    async def retry_failed_job(self, job_id: str, now: datetime) -> Job:
+        """Atomically make one failed job eligible for another worker attempt."""
+        retried_at = _require_aware(now, "now")
+        retried_iso = _to_iso(retried_at)
+
+        async with self._write_transaction() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET status = ?, next_run_at = ?, lease_owner = NULL, lease_until = NULL,
+                    heartbeat_at = NULL, last_error = NULL, cancel_requested = 0,
+                    updated_at = ?
+                WHERE job_id = ? AND status = ?
+                RETURNING *
+                """,
+                (
+                    JobStatus.QUEUED.value,
+                    retried_iso,
+                    retried_iso,
+                    job_id,
+                    JobStatus.FAILED.value,
+                ),
+            )
+            if row is not None:
+                return self._row_to_job(row)
+            current = await self._fetchone(
+                connection,
+                "SELECT status FROM jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            if current is None:
+                raise KeyError(f"unknown job: {job_id}")
+            raise ValueError(f"only failed jobs can be retried; current status is {current['status']}")
+
     async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
         """Atomically claim one due job using the caller's timezone-aware clock."""
         if not owner.strip():

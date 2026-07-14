@@ -1093,3 +1093,108 @@ async def test_all_explicit_repository_clocks_reject_naive_datetimes(repo: JobRe
         await repo.request_cancel("missing", naive)
     with pytest.raises(ValueError, match="timezone-aware"):
         await repo.soft_delete_asset("asset", naive)
+
+
+@pytest.mark.asyncio
+async def test_get_job_reads_persisted_job_and_rejects_unknown_id(repo: JobRepository):
+    created = await _ready_job(repo)
+
+    persisted = await repo.get_job(created.job_id)
+
+    assert persisted == created
+    with pytest.raises(KeyError, match="unknown job"):
+        await repo.get_job("missing-job")
+
+
+@pytest.mark.asyncio
+async def test_get_asset_reads_persisted_asset_and_rejects_unknown_id(repo: JobRepository):
+    session = _session()
+    asset = _asset()
+    await repo.create_upload_session(asset, session)
+
+    persisted = await repo.get_asset(asset.asset_id)
+
+    assert persisted == asset
+    with pytest.raises(KeyError, match="unknown asset"):
+        await repo.get_asset("missing-asset")
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_job_atomically_requeues_and_clears_transient_state(repo: JobRepository):
+    created = await _ready_job(repo)
+    retry_at = NOW + timedelta(minutes=5)
+    connection = sqlite3.connect(repo.database_path)
+    try:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = ?, stage = ?, lease_owner = ?, lease_until = ?, heartbeat_at = ?,
+                last_error = ?, cancel_requested = 1
+            WHERE job_id = ?
+            """,
+            (
+                JobStatus.FAILED.value,
+                JobStage.ANALYZING.value,
+                "stale-worker",
+                (NOW + timedelta(minutes=1)).isoformat(),
+                NOW.isoformat(),
+                "provider failed with token=secret-value",
+                created.job_id,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    retried = await repo.retry_failed_job(created.job_id, retry_at)
+
+    assert retried.status is JobStatus.QUEUED
+    assert retried.stage is JobStage.ANALYZING
+    assert retried.next_run_at == retry_at
+    assert retried.lease_owner is None
+    assert retried.lease_until is None
+    assert retried.heartbeat_at is None
+    assert retried.last_error is None
+    stored = _fetch_one(
+        repo.database_path,
+        "SELECT cancel_requested FROM jobs WHERE job_id = ?",
+        (created.job_id,),
+    )
+    assert stored["cancel_requested"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_job_only_allows_one_atomic_failed_transition(repo: JobRepository):
+    created = await _ready_job(repo)
+    connection = sqlite3.connect(repo.database_path)
+    try:
+        connection.execute(
+            "UPDATE jobs SET status = ? WHERE job_id = ?",
+            (JobStatus.FAILED.value, created.job_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    contender = JobRepository(repo.database_path, clock=lambda: NOW)
+
+    results = await asyncio.gather(
+        repo.retry_failed_job(created.job_id, NOW),
+        contender.retry_failed_job(created.job_id, NOW),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(result, type(created)) for result in results) == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    assert (await repo.get_job(created.job_id)).status is JobStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_job_rejects_non_failed_unknown_and_naive_time(repo: JobRepository):
+    created = await _ready_job(repo)
+
+    with pytest.raises(ValueError, match="failed"):
+        await repo.retry_failed_job(created.job_id, NOW)
+    with pytest.raises(KeyError, match="unknown job"):
+        await repo.retry_failed_job("missing-job", NOW)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.retry_failed_job(created.job_id, NOW.replace(tzinfo=None))

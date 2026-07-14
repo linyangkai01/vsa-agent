@@ -13,18 +13,23 @@ from pydantic import BaseModel, ConfigDict
 from vsa_agent.config import get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
-from vsa_agent.recorded_video.models import Asset, AssetStatus, UploadSession
+from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, UploadSession
 from vsa_agent.recorded_video.repository import JobRepository
 
 router = APIRouter()
 _ALLOWED_EXTENSIONS = frozenset({"mp4", "mkv"})
 _SESSION_TTL = timedelta(days=1)
+_PIPELINE_VERSION = "v1"
 
 
 class CreateRecordedVideoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     filename: str
+
+
+class CompleteRecordedVideoRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
 
 def _safe_filename(filename: str) -> tuple[str, str]:
@@ -43,6 +48,31 @@ def _repository_and_store() -> tuple[JobRepository, LocalAssetStore, int]:
     store = LocalAssetStore(recorded_video.data_root)
     repository = JobRepository(recorded_video.data_root / "recorded-video.sqlite3")
     return repository, store, recorded_video.max_upload_bytes
+
+
+def _assembled_source_exists(store: LocalAssetStore, asset_id: str) -> bool:
+    try:
+        if str(uuid.UUID(asset_id)) != asset_id:
+            return False
+    except ValueError:
+        return False
+    source_root = store.root / "assets" / asset_id / "source"
+    return any((source_root / f"original.{extension}").is_file() for extension in _ALLOWED_EXTENSIONS)
+
+
+def _public_job(job: Job) -> dict[str, object]:
+    return {
+        "asset_id": job.asset_id,
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "stage": job.stage.value if job.stage else None,
+        "attempt": job.attempt,
+        "error": "Recorded video processing failed" if job.last_error else None,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "next_run_at": job.next_run_at,
+        "heartbeat_at": job.heartbeat_at,
+    }
 
 
 def _header_int(request: Request, name: str) -> int:
@@ -210,3 +240,66 @@ async def upload_recorded_video_chunk(
         "bytes": await repository.stored_upload_bytes(upload_session_id),
         "chunkCount": session.received_chunks,
     }
+
+
+@router.post("/api/v1/videos/{asset_id}/complete", status_code=202)
+async def complete_recorded_video(
+    asset_id: str,
+    payload: CompleteRecordedVideoRequest,
+) -> dict[str, str]:
+    del payload
+    repository, store, _ = _repository_and_store()
+    await repository.initialize()
+    try:
+        await repository.get_asset(asset_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="asset not found") from exc
+    if not _assembled_source_exists(store, asset_id):
+        raise HTTPException(status_code=409, detail="upload is not assembled")
+    try:
+        job = await repository.complete_upload(asset_id, _PIPELINE_VERSION)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="asset not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "asset_id": job.asset_id,
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "status_url": f"/api/v1/jobs/{job.job_id}",
+    }
+
+
+@router.get("/api/v1/jobs/{job_id}")
+async def get_recorded_video_job(job_id: str) -> dict[str, object]:
+    repository, _, _ = _repository_and_store()
+    await repository.initialize()
+    try:
+        job = await repository.get_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    return _public_job(job)
+
+
+@router.post("/api/v1/jobs/{job_id}/retry")
+async def retry_recorded_video_job(job_id: str) -> dict[str, object]:
+    repository, _, _ = _repository_and_store()
+    await repository.initialize()
+    try:
+        job = await repository.retry_failed_job(job_id, datetime.now(UTC))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _public_job(job)
+
+
+@router.post("/api/v1/jobs/{job_id}/cancel")
+async def cancel_recorded_video_job(job_id: str) -> dict[str, object]:
+    repository, _, _ = _repository_and_store()
+    await repository.initialize()
+    try:
+        job = await repository.request_cancel(job_id, datetime.now(UTC))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    return _public_job(job)
