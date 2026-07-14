@@ -1217,6 +1217,12 @@ class JobRepository:
                     heartbeat_at = NULL, last_error = NULL, cancel_requested = 0,
                     updated_at = ?
                 WHERE job_id = ? AND status = ?
+                    AND EXISTS (
+                        SELECT 1 FROM assets
+                        WHERE assets.asset_id = jobs.asset_id
+                            AND assets.current_job_id = jobs.job_id
+                            AND assets.deleted_at IS NULL
+                    )
                     AND NOT EXISTS (
                         SELECT 1 FROM asset_deletion_requests
                         WHERE asset_id = jobs.asset_id
@@ -1236,12 +1242,13 @@ class JobRepository:
             current = await self._fetchone(
                 connection,
                 """
-                SELECT jobs.status,
+                SELECT jobs.status, assets.current_job_id,
                     EXISTS (
                         SELECT 1 FROM asset_deletion_requests
                         WHERE asset_id = jobs.asset_id
                     ) AS deletion_requested
-                FROM jobs WHERE job_id = ?
+                FROM jobs JOIN assets ON assets.asset_id = jobs.asset_id
+                WHERE jobs.job_id = ?
                 """,
                 (job_id,),
             )
@@ -1249,6 +1256,8 @@ class JobRepository:
                 raise KeyError(f"unknown job: {job_id}")
             if current["deletion_requested"]:
                 raise ValueError("asset deletion is in progress")
+            if current["current_job_id"] != job_id:
+                raise ValueError("only the asset current job can be retried")
             raise ValueError(f"only failed jobs can be retried; current status is {current['status']}")
 
     async def recover_expired_jobs(self, now: datetime) -> list[Job]:
@@ -1412,6 +1421,47 @@ class JobRepository:
                 return self._row_to_job(row)
             await self._raise_lease_error(connection, job_id, owner, attempt, renewed_at)
             raise AssertionError("unreachable")
+
+    async def renew_cleanup_lease(
+        self,
+        job: Job,
+        now: datetime,
+        lease_until: datetime,
+    ) -> Job:
+        """Renew the exact leased cancellation cleanup attempt."""
+        if job.lease_owner is None:
+            raise PermissionError("cancel cleanup renewal requires a lease owner")
+        renewed_at = _require_aware(now, "now")
+        renewed_until = _require_aware(lease_until, "lease_until")
+        if renewed_until <= renewed_at:
+            raise ValueError("lease_until must be later than now")
+        renewed_iso = _to_iso(renewed_at)
+
+        async with self._write_transaction() as connection:
+            await self._require_cancel_cleanup_lease(connection, job, renewed_at)
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET lease_until = ?, heartbeat_at = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                    AND cancel_requested = 1 AND lease_until > ?
+                RETURNING *
+                """,
+                (
+                    _to_iso(renewed_until),
+                    renewed_iso,
+                    renewed_iso,
+                    job.job_id,
+                    JobStatus.RUNNING.value,
+                    job.lease_owner,
+                    job.attempt,
+                    renewed_iso,
+                ),
+            )
+            if row is None:
+                raise LeaseLostError("job has no active cancel cleanup lease")
+            return self._row_to_job(row)
 
     async def release_claim(
         self,

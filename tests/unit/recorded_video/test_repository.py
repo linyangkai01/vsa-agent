@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 
 import vsa_agent.recorded_video.repository as repository_module
+from vsa_agent.recorded_video.errors import LeaseLostError
 from vsa_agent.recorded_video.models import (
     Asset,
     AssetStatus,
@@ -1211,6 +1212,46 @@ async def test_cancel_cleanup_is_reclaimed_when_the_running_worker_lease_expires
 
 
 @pytest.mark.asyncio
+async def test_renew_cleanup_lease_allows_deletion_of_noncurrent_pipeline_job(repo: JobRepository) -> None:
+    older = await _ready_job(repo, pipeline_version="v1")
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None and claimed.job_id == older.job_id
+    newer = await repo.complete_upload(older.asset_id, "v2", now=NOW + timedelta(seconds=1))
+    await repo.prepare_asset_deletion(older.asset_id, NOW + timedelta(seconds=2))
+    assert (await repo.get_asset(older.asset_id)).current_job_id == newer.job_id
+
+    renewed = await repo.renew_cleanup_lease(
+        claimed,
+        NOW + timedelta(seconds=3),
+        NOW + timedelta(seconds=33),
+    )
+
+    assert renewed.job_id == claimed.job_id
+    assert renewed.attempt == claimed.attempt
+    assert renewed.lease_owner == claimed.lease_owner
+    assert renewed.heartbeat_at == NOW + timedelta(seconds=3)
+    assert renewed.lease_until == NOW + timedelta(seconds=33)
+    for mismatched in (
+        claimed.model_copy(update={"lease_owner": "other-worker"}),
+        claimed.model_copy(update={"attempt": claimed.attempt + 1}),
+        claimed.model_copy(update={"asset_id": "other-asset"}),
+        claimed.model_copy(update={"pipeline_version": "other-pipeline"}),
+    ):
+        with pytest.raises(LeaseLostError):
+            await repo.renew_cleanup_lease(
+                mismatched,
+                NOW + timedelta(seconds=4),
+                NOW + timedelta(seconds=34),
+            )
+    with pytest.raises(LeaseLostError, match="active cancel cleanup lease"):
+        await repo.renew_cleanup_lease(
+            renewed,
+            NOW + timedelta(seconds=33),
+            NOW + timedelta(seconds=63),
+        )
+
+
+@pytest.mark.asyncio
 async def test_cancel_cleanup_claim_is_prioritized_without_claiming_queued_sibling(repo: JobRepository):
     cleanup_job = await _ready_job(repo, "cleanup-asset")
     active = await repo.claim_due_job("worker-1", NOW)
@@ -1489,6 +1530,39 @@ async def test_retry_failed_job_only_allows_one_atomic_failed_transition(repo: J
     assert sum(isinstance(result, type(created)) for result in results) == 1
     assert sum(isinstance(result, ValueError) for result in results) == 1
     assert (await repo.get_job(created.job_id)).status is JobStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_job_rejects_older_noncurrent_pipeline_job(repo: JobRepository) -> None:
+    older = await _ready_job(repo, pipeline_version="v1")
+    claimed_older = await repo.claim_due_job("older-worker", NOW)
+    assert claimed_older is not None and claimed_older.job_id == older.job_id
+    failed_older = await repo.mark_failed(
+        claimed_older.job_id,
+        claimed_older.lease_owner or "",
+        "CORRUPT_MEDIA",
+        attempt=claimed_older.attempt,
+        now=NOW + timedelta(seconds=1),
+    )
+    newer = await repo.complete_upload(older.asset_id, "v2", now=NOW + timedelta(seconds=2))
+
+    with pytest.raises(ValueError, match="current job"):
+        await repo.retry_failed_job(failed_older.job_id, NOW + timedelta(seconds=3))
+    assert (await repo.get_job(failed_older.job_id)).status is JobStatus.FAILED
+
+    claimed_newer = await repo.claim_due_job("newer-worker", NOW + timedelta(seconds=3))
+    assert claimed_newer is not None and claimed_newer.job_id == newer.job_id
+    failed_newer = await repo.mark_failed(
+        claimed_newer.job_id,
+        claimed_newer.lease_owner or "",
+        "CORRUPT_MEDIA",
+        attempt=claimed_newer.attempt,
+        now=NOW + timedelta(seconds=4),
+    )
+    retried = await repo.retry_failed_job(failed_newer.job_id, NOW + timedelta(seconds=5))
+
+    assert retried.job_id == newer.job_id
+    assert retried.status is JobStatus.QUEUED
 
 
 @pytest.mark.asyncio

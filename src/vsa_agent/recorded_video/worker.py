@@ -27,6 +27,13 @@ class WorkerRepository(Protocol):
 
     async def renew_lease(self, job_id: str, owner: str, now: datetime, *, attempt: int) -> Job: ...
 
+    async def renew_cleanup_lease(
+        self,
+        job: Job,
+        now: datetime,
+        lease_until: datetime,
+    ) -> Job: ...
+
     async def release_claim(
         self,
         job_id: str,
@@ -151,11 +158,10 @@ class RecordedVideoWorker:
             self._emit_job("job.claimed", job)
             try:
                 if await self._cancel_requested(job):
-                    cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
-                    if cleanup is None:
-                        raise RuntimeError("cancel cleanup requires pipeline cleanup support")
                     try:
-                        await cleanup(job)
+                        await self._run_cleanup_with_renewal(job)
+                    except LeaseLostError:
+                        raise
                     except Exception:
                         self._emit_job("job.cleanup_failed", job, error_code="CLEANUP_FAILED")
                         return None
@@ -241,10 +247,7 @@ class RecordedVideoWorker:
             pipeline_task.cancel()
             await asyncio.gather(pipeline_task, return_exceptions=True)
             if isinstance(renewal_error, LeaseLostError) and await self._cancel_requested(job):
-                cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
-                if cleanup is None:
-                    raise renewal_error
-                await cleanup(job)
+                await self._run_cleanup_with_renewal(job)
                 raise PipelineCancelled(job)
             raise renewal_error
         finally:
@@ -264,6 +267,42 @@ class RecordedVideoWorker:
                 owner,
                 self._now(),
                 attempt=job.attempt,
+            )
+            self._emit_job("job.heartbeat", renewed)
+
+    async def _run_cleanup_with_renewal(self, job: Job) -> None:
+        cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
+        if cleanup is None:
+            raise RuntimeError("cancel cleanup requires pipeline cleanup support")
+        cleanup_task = asyncio.create_task(cleanup(job))
+        renewal_task = asyncio.create_task(self._renew_cleanup_lease(job))
+        try:
+            done, _ = await asyncio.wait(
+                {cleanup_task, renewal_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if renewal_task in done:
+                renewal_error = renewal_task.exception()
+                if renewal_error is None:
+                    raise RuntimeError("cleanup lease renewal stopped before cleanup completed")
+                cleanup_task.cancel()
+                await asyncio.gather(cleanup_task, return_exceptions=True)
+                raise renewal_error
+            await cleanup_task
+        finally:
+            for task in (cleanup_task, renewal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(cleanup_task, renewal_task, return_exceptions=True)
+
+    async def _renew_cleanup_lease(self, job: Job) -> None:
+        while True:
+            await self._wait(self._renewal_interval)
+            now = self._now()
+            renewed = await self._repository.renew_cleanup_lease(
+                job,
+                now,
+                now + timedelta(seconds=self._lease_sec),
             )
             self._emit_job("job.heartbeat", renewed)
 

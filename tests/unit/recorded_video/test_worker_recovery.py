@@ -17,6 +17,7 @@ from tests.unit.recorded_video.test_pipeline import (
     _pipeline,
 )
 from vsa_agent.recorded_video.assets import LocalAssetStore
+from vsa_agent.recorded_video.errors import LeaseLostError
 from vsa_agent.recorded_video.models import AssetStatus, JobStatus
 from vsa_agent.recorded_video.segmenter import FixedDurationSegmenter
 from vsa_agent.recorded_video.worker import RecordedVideoWorker
@@ -236,6 +237,127 @@ async def test_cleanup_failure_remains_reclaimable_after_lease_expiry(tmp_path: 
     assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
     assert cancelled.attempt == claimed.attempt
     assert (await repository.get_job(claimed.job_id)).status is JobStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_blocked_cleanup_renews_lease_across_multiple_expiries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [NOW]
+    repository, _store, claimed = await _claimed_job(tmp_path, clock)
+    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+    clock[0] += timedelta(seconds=31)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_calls = 0
+
+    class BlockingCleanupPipeline:
+        async def run(self, job) -> None:
+            raise AssertionError("cancel cleanup must not run the active pipeline")
+
+        async def cleanup_after_cancel(self, job) -> None:
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+    renewals: list[tuple[object, object]] = []
+    renew_cleanup_lease = repository.renew_cleanup_lease
+
+    async def track_renewal(job, now, lease_until):
+        renewals.append((now, lease_until))
+        return await renew_cleanup_lease(job, now, lease_until)
+
+    monkeypatch.setattr(repository, "renew_cleanup_lease", track_renewal)
+    waits: list[float] = []
+
+    async def advance_clock(seconds: float) -> None:
+        await cleanup_started.wait()
+        waits.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+        if len(waits) == 7:
+            release_cleanup.set()
+        await asyncio.sleep(0)
+
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=BlockingCleanupPipeline(),
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+        wait=advance_clock,
+    )
+
+    cancelled = await asyncio.wait_for(worker.run_once(), timeout=1)
+
+    assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
+    assert cleanup_calls == 1
+    assert waits == [pytest.approx(10)] * 7
+    assert len(renewals) >= 6
+    assert all(lease_until - now == timedelta(seconds=30) for now, lease_until in renewals)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_renewal_loss_keeps_durable_marker_reclaimable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [NOW]
+    repository, _store, claimed = await _claimed_job(tmp_path, clock)
+    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+    clock[0] += timedelta(seconds=31)
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+
+    class BlockingCleanupPipeline:
+        async def run(self, job) -> None:
+            raise AssertionError("cancel cleanup must not run the active pipeline")
+
+        async def cleanup_after_cancel(self, job) -> None:
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+
+    async def lose_cleanup_lease(job, now, lease_until):
+        del job, now, lease_until
+        raise LeaseLostError("cleanup lease was reassigned")
+
+    monkeypatch.setattr(repository, "renew_cleanup_lease", lose_cleanup_lease)
+
+    async def advance_to_renewal(seconds: float) -> None:
+        await cleanup_started.wait()
+        clock[0] += timedelta(seconds=seconds)
+
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=BlockingCleanupPipeline(),
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+        wait=advance_to_renewal,
+    )
+
+    assert await asyncio.wait_for(worker.run_once(), timeout=1) is None
+    await asyncio.wait_for(cleanup_cancelled.wait(), timeout=1)
+
+    durable = await repository.get_job(claimed.job_id)
+    assert durable.status is JobStatus.RUNNING
+    with sqlite3.connect(repository.database_path) as connection:
+        marker = connection.execute(
+            "SELECT cancel_requested FROM jobs WHERE job_id = ?",
+            (claimed.job_id,),
+        ).fetchone()
+    assert marker is not None and marker[0] == 1
+    clock[0] += timedelta(seconds=31)
+    reclaimed = await repository.claim_due_job("cleanup-reclaimer", clock[0])
+    assert reclaimed is not None and reclaimed.job_id == claimed.job_id
+    assert reclaimed.attempt == claimed.attempt
 
 
 @pytest.mark.asyncio
