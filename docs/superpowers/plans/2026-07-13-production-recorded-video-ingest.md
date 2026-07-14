@@ -331,17 +331,17 @@ async def test_valid_analysis_checkpoint_skips_second_vision_call(pipeline, repo
 **Interfaces:**
 - Produces: `RecordedVideoWorker.run()`、`run_once()`、`readiness()`；CLI `python scripts/recorded-video-worker.py --config PATH`。
 
-- [ ] **Step 1: 写并发上限、heartbeat/backoff 测试。**
+- [x] **Step 1: 写并发上限、heartbeat/backoff 测试。**
 ```python
 async def test_worker_limits_parallel_jobs_and_schedules_30_120_600_backoff(worker, repo):
     await worker.run_until_idle()
     assert worker.max_observed_jobs <= 3
     assert await repo.retry_delays("job") == [30, 120, 600]
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_worker.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 Worker。** 通过 `asyncio.Semaphore(worker_concurrency)` 调用 Task 3 原子 claim，后台每 `lease_sec//3` renew，失败以 attempt 选择 30/120/600 秒，超过 `max_attempts` 终态 failed；stdout 写 JSON heartbeat/readiness。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_worker.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/worker.py scripts/recorded-video-worker.py tests/unit/recorded_video/test_worker.py && git commit -m "feat: run recorded video jobs in worker"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_worker.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 Worker。** 通过 `asyncio.Semaphore(worker_concurrency)` 调用 Task 3 原子 claim，后台每 `lease_sec//3` renew，失败以 attempt 选择 30/120/600 秒，超过 `max_attempts` 终态 failed；stdout 写 JSON heartbeat/readiness。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_worker.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/worker.py scripts/recorded-video-worker.py tests/unit/recorded_video/test_worker.py && git commit -m "feat: run recorded video jobs in worker"`。
 
 ### Task 14: 崩溃恢复、取消和临时产物回收（OpenSpec 4.3、4.4）
 
