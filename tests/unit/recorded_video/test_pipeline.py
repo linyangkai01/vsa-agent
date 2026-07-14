@@ -297,6 +297,37 @@ async def test_valid_analysis_checkpoint_skips_second_vision_call(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_pipeline_version_named_derived_reuses_valid_analysis_checkpoint(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(
+        tmp_path,
+        clock,
+        pipeline_version="derived",
+    )
+    vision = FakeVisionProvider()
+    pipeline = _pipeline(
+        repository,
+        store,
+        vision=vision,
+        embedding=FakeEmbeddingProvider(failures=1),
+        clock=clock,
+    )
+
+    with pytest.raises(RuntimeError, match="temporary embedding failure"):
+        await pipeline.run(job)
+
+    manifest_path = store.root / "assets/asset-1/derived/derived/attempts/1/manifest.json"
+    assert load_verified_checkpoint(manifest_path, JobStage.ANALYZING) is not None
+
+    clock[0] += timedelta(seconds=31)
+    reclaimed_job = await repository.claim_due_job("worker-2", clock[0])
+    assert reclaimed_job is not None
+    await pipeline.run(reclaimed_job)
+
+    assert len(vision.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_manifest_records_versions_checksums_and_deterministic_projection(tmp_path: Path) -> None:
     clock = [NOW]
     repository, store, job = await _claimed_job(tmp_path, clock)

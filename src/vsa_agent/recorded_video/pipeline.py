@@ -826,14 +826,24 @@ def _manifest_key(pipeline_version: str, attempt: int) -> str:
 
 def _asset_dir_from_manifest_path(path: Path) -> Path:
     resolved = path.resolve()
-    parts = resolved.parts
+    attempt_dir = resolved.parent
+    attempts_dir = attempt_dir.parent
+    pipeline_dir = attempts_dir.parent
+    derived_dir = pipeline_dir.parent
     try:
-        derived_index = max(index for index, part in enumerate(parts) if part == "derived")
-    except ValueError as error:
-        raise ValueError("manifest is not beneath an asset derived directory") from error
-    if derived_index < 1:
-        raise ValueError("manifest has no asset directory")
-    return Path(*parts[:derived_index]).resolve()
+        attempt = int(attempt_dir.name)
+        _safe_path_component(pipeline_dir.name, "pipeline_version")
+    except (RecordedVideoError, ValueError) as error:
+        raise ValueError("manifest path has invalid pipeline or attempt identity") from error
+    if (
+        resolved.name != "manifest.json"
+        or attempts_dir.name != "attempts"
+        or derived_dir.name != "derived"
+        or not attempt_dir.name.isdigit()
+        or attempt <= 0
+    ):
+        raise ValueError("manifest path is not in the canonical derived layout")
+    return derived_dir.parent.resolve()
 
 
 def _safe_path_component(value: str, name: str) -> str:
