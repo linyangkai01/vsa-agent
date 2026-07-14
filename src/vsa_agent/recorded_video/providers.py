@@ -35,9 +35,9 @@ class _OpenAIProvider:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if timeout_sec <= 0:
-            raise ValueError("timeout_sec must be positive")
+            raise _configuration_error("CONFIGURATION: timeout_sec must be positive")
         if concurrency <= 0:
-            raise ValueError("concurrency must be positive")
+            raise _configuration_error("CONFIGURATION: concurrency must be positive")
         try:
             endpoint = urlsplit(base_url)
             hostname = endpoint.hostname
@@ -51,10 +51,12 @@ class _OpenAIProvider:
             or not hostname.strip()
             or endpoint.username is not None
             or endpoint.password is not None
+            or endpoint.query
+            or endpoint.fragment
         ):
             raise _configuration_error()
         if not model.strip():
-            raise ValueError("model must not be blank")
+            raise _configuration_error("CONFIGURATION: model must not be blank")
 
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key or None
@@ -170,6 +172,8 @@ class OpenAIVisionProvider(_OpenAIProvider):
         *,
         job_id: str,
     ) -> VisionDescription:
+        asset_id = _normalize_context_id(segment.asset_id, "asset_id")
+        job_id = _normalize_context_id(job_id, "job_id")
         if not frame_keys:
             raise _schema_error("MODEL_INPUT: at least one representative frame is required")
 
@@ -213,7 +217,7 @@ class OpenAIVisionProvider(_OpenAIProvider):
                 "response_format": {"type": "json_object"},
             },
             stage="analyzing",
-            asset_id=segment.asset_id,
+            asset_id=asset_id,
             job_id=job_id,
         )
         payload = self._response_json(response)
@@ -241,7 +245,9 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
         job_id: str,
     ) -> Embedding:
         if expected_dims <= 0:
-            raise ValueError("expected_dims must be positive")
+            raise _configuration_error("CONFIGURATION: expected_dims must be positive")
+        asset_id = _normalize_context_id(asset_id, "asset_id")
+        job_id = _normalize_context_id(job_id, "job_id")
         if not text.strip():
             raise _schema_error("MODEL_INPUT: embedding text must not be blank")
 
@@ -275,9 +281,20 @@ def _schema_error(message: str = "MODEL_RESPONSE_SCHEMA: provider response faile
     return RecordedVideoError(ErrorCode.CONFIGURATION, retryable=False, message=message)
 
 
-def _configuration_error() -> RecordedVideoError:
+def _normalize_context_id(value: str, name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise _configuration_error(f"CONFIGURATION: {name} must not be blank")
+    return normalized
+
+
+def _configuration_error(
+    message: str = (
+        "CONFIGURATION: provider base_url must be an absolute HTTP(S) URL without userinfo, query, or fragment"
+    ),
+) -> RecordedVideoError:
     return RecordedVideoError(
         ErrorCode.CONFIGURATION,
         retryable=False,
-        message="CONFIGURATION: provider base_url must be an absolute HTTP(S) URL without userinfo",
+        message=message,
     )

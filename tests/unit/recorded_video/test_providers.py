@@ -328,14 +328,17 @@ async def test_provider_logs_exclude_authorization_frames_and_response_body(
             model="vision-model",
             client=client,
         )
+        segment = _segment().model_copy(update={"asset_id": "  asset-1  "})
         with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
             with pytest.raises(RecordedVideoError):
-                await provider.describe([frame], _segment(), job_id="job-vision")
+                await provider.describe([frame], segment, job_id="  job-vision  ")
 
     assert "provider.request" in caplog.text
     assert "vision-model" in caplog.text
     assert "asset-1" in caplog.text
     assert "job-vision" in caplog.text
+    assert "asset_id=  asset-1  " not in caplog.text
+    assert "job_id=  job-vision  " not in caplog.text
     assert "top-secret-token" not in caplog.text
     assert "Authorization" not in caplog.text
     assert "sensitive-frame-bytes" not in caplog.text
@@ -360,8 +363,8 @@ async def test_embedding_logs_required_asset_and_job_without_sensitive_data(
             await provider.embed(
                 "sensitive-embedding-text",
                 expected_dims=1,
-                asset_id="asset-embedding",
-                job_id="job-embedding",
+                asset_id="  asset-embedding  ",
+                job_id="  job-embedding  ",
             )
 
     assert "model=embedding-model" in caplog.text
@@ -369,26 +372,139 @@ async def test_embedding_logs_required_asset_and_job_without_sensitive_data(
     assert "stage=embedding" in caplog.text
     assert "asset_id=asset-embedding" in caplog.text
     assert "job_id=job-embedding" in caplog.text
+    assert "asset_id=  asset-embedding  " not in caplog.text
+    assert "job_id=  job-embedding  " not in caplog.text
     assert "top-secret-token" not in caplog.text
     assert "Authorization" not in caplog.text
     assert "sensitive-embedding-text" not in caplog.text
 
 
-def test_provider_rejects_invalid_runtime_limits() -> None:
-    with pytest.raises(ValueError, match="timeout_sec"):
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"timeout_sec": 0},
+        {"timeout_sec": -1},
+        {"concurrency": 0},
+        {"concurrency": -1},
+        {"model": ""},
+        {"model": "   "},
+    ],
+)
+def test_provider_rejects_invalid_constructor_configuration_as_permanent(
+    overrides: dict[str, object],
+) -> None:
+    configuration: dict[str, object] = {
+        "base_url": "https://provider.example/v1",
+        "api_key": None,
+        "model": "embedding-model",
+        **overrides,
+    }
+
+    with pytest.raises(RecordedVideoError) as caught:
         OpenAIEmbeddingProvider(
+            **configuration,  # type: ignore[arg-type]
+        )
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expected_dims", [0, -1])
+async def test_embedding_rejects_invalid_expected_dimensions_before_request(expected_dims: int) -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        provider = OpenAIEmbeddingProvider(
             base_url="https://provider.example/v1",
             api_key=None,
             model="embedding-model",
-            timeout_sec=0,
+            client=client,
         )
-    with pytest.raises(ValueError, match="concurrency"):
-        OpenAIVisionProvider(
+        with pytest.raises(RecordedVideoError) as caught:
+            await provider.embed(
+                "forklift",
+                expected_dims=expected_dims,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False
+    assert request_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_id", "job_id"),
+    [("", "job-1"), ("   ", "job-1"), ("asset-1", ""), ("asset-1", "   ")],
+)
+async def test_embedding_rejects_blank_context_before_request(asset_id: str, job_id: str) -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://provider.example/v1",
+            api_key=None,
+            model="embedding-model",
+            client=client,
+        )
+        with pytest.raises(RecordedVideoError) as caught:
+            await provider.embed(
+                "forklift",
+                expected_dims=1,
+                asset_id=asset_id,
+                job_id=job_id,
+            )
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False
+    assert request_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_id", "job_id"),
+    [("", "job-1"), ("   ", "job-1"), ("asset-1", ""), ("asset-1", "   ")],
+)
+async def test_vision_rejects_blank_context_before_request(
+    asset_id: str,
+    job_id: str,
+    tmp_path: Path,
+) -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json={})
+
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"jpeg-frame")
+    segment = _segment().model_copy(update={"asset_id": asset_id})
+    async with _client(httpx.MockTransport(handler)) as client:
+        provider = OpenAIVisionProvider(
             base_url="https://provider.example/v1",
             api_key=None,
             model="vision-model",
-            concurrency=0,
+            client=client,
         )
+        with pytest.raises(RecordedVideoError) as caught:
+            await provider.describe([frame], segment, job_id=job_id)
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False
+    assert request_count == 0
 
 
 @pytest.mark.asyncio
@@ -401,6 +517,8 @@ def test_provider_rejects_invalid_runtime_limits() -> None:
         "ftp://provider.example/v1",
         "https:///v1",
         "https://user:password@provider.example/v1",
+        "https://provider.example/v1?api-version=2026-07-14",
+        "https://provider.example/v1#embeddings",
     ],
 )
 async def test_provider_rejects_invalid_base_url_as_permanent_configuration(
