@@ -207,22 +207,22 @@ async def test_repeated_complete_returns_same_job_and_status_url(client, ready_a
 
 **Files:**
 - Create: `src/vsa_agent/api/recorded_video_vst.py`, `tests/unit/api/test_recorded_video_vst.py`, `tests/unit/api/test_recorded_video_media.py`
-- Modify: `src/vsa_agent/api/routes.py`
+- Modify: `src/vsa_agent/api/routes.py`, `src/vsa_agent/recorded_video/repository.py`, `src/vsa_agent/recorded_video/assets.py`, `tests/unit/recorded_video/test_repository.py`, `tests/unit/recorded_video/test_assets.py`
 
 **Interfaces:**
 - Produces: `/api/v1/vst/v1/replay/streams`、`/sensor/list`、`/storage/size`、`/storage/file/{asset}/url`、`/storage/file/{asset}`、`/replay/stream/{asset}/picture`。
 
-- [ ] **Step 1: 写 VST 响应和 Range 边界测试。**
+- [x] **Step 1: 写 VST 响应和 Range 边界测试。**
 ```python
 async def test_media_range_returns_206_and_rejects_unsatisfiable(client, ready_asset):
     ok = await client.get(f"/api/v1/vst/v1/storage/file/{ready_asset}", headers={"Range":"bytes=2-4"})
     assert (ok.status_code, ok.headers["content-range"], ok.content) == (206, "bytes 2-4/10", b"234")
     assert (await client.get(f"/api/v1/vst/v1/storage/file/{ready_asset}", headers={"Range":"bytes=20-"})).status_code == 416
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_vst.py tests/unit/api/test_recorded_video_media.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 facade。** 仅列出 ready 资产；storage URL 生成同源带 `startTime/endTime` 的 URL；picture 返回该 segment thumbnail；媒体端点支持无 Range 的 200、单范围 206、`Accept-Ranges: bytes`、正确 `Content-Range`，资产不存在/软删返回 404。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_vst.py tests/unit/api/test_recorded_video_media.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video_vst.py src/vsa_agent/api/routes.py tests/unit/api/test_recorded_video_vst.py tests/unit/api/test_recorded_video_media.py && git commit -m "feat: serve recorded video through vst facade"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/api/test_recorded_video_vst.py tests/unit/api/test_recorded_video_media.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 facade。** 仅列出 ready 资产；storage URL 生成同源带 `startTime/endTime` 的 URL；picture 返回该 segment thumbnail；媒体端点支持无 Range 的 200、单范围 206、`Accept-Ranges: bytes`、正确 `Content-Range`，资产不存在/软删返回 404。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/api/test_recorded_video_vst.py tests/unit/api/test_recorded_video_media.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/api/recorded_video_vst.py src/vsa_agent/api/routes.py tests/unit/api/test_recorded_video_vst.py tests/unit/api/test_recorded_video_media.py && git commit -m "feat: serve recorded video through vst facade"`。
 
 ### Task 8: 级联删除与恢复安全（OpenSpec 2.6、4.4）
 
