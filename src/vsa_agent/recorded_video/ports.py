@@ -9,7 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from vsa_agent.recorded_video.models import Asset, Job, JobStep, Segment, UploadSession
+from vsa_agent.recorded_video.models import Asset, Job, JobStage, JobStep, Segment, UploadSession
 
 Embedding = tuple[float, ...]
 
@@ -49,9 +49,15 @@ class ProjectionResult(BaseModel):
 
 @runtime_checkable
 class AssetStore(Protocol):
+    root: Path
+
     async def write_chunk(self, session: UploadSession, ordinal: int, data: bytes) -> str: ...
 
     async def assemble_source(self, session: UploadSession, asset: Asset) -> str: ...
+
+    async def write_atomic(self, destination: str | Path, data: bytes) -> str: ...
+
+    async def resolve_source_path(self, asset: Asset) -> Path: ...
 
 
 @runtime_checkable
@@ -62,6 +68,22 @@ class JobRepository(Protocol):
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None: ...
 
+    async def get_asset(self, asset_id: str) -> Asset: ...
+
+    async def list_job_steps(self, job_id: str) -> list[JobStep]: ...
+
+    async def start_pipeline(self, job: Job) -> None: ...
+
+    async def reset_steps_from(self, job: Job, stage: JobStage) -> None: ...
+
+    async def complete_pipeline(
+        self,
+        job: Job,
+        asset: Asset,
+        segments: Sequence[Segment],
+        step: JobStep,
+    ) -> Job: ...
+
 
 @runtime_checkable
 class Segmenter(Protocol):
@@ -70,6 +92,9 @@ class Segmenter(Protocol):
 
 @runtime_checkable
 class VisionProvider(Protocol):
+    @property
+    def model(self) -> str: ...
+
     async def describe(
         self,
         frame_keys: Sequence[str | Path],
@@ -81,6 +106,9 @@ class VisionProvider(Protocol):
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):
+    @property
+    def model(self) -> str: ...
+
     async def embed(
         self,
         text: str,

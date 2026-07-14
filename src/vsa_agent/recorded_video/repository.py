@@ -936,6 +936,216 @@ class JobRepository:
             raise KeyError(f"unknown job: {job_id}")
         return self._row_to_job(row)
 
+    async def list_job_steps(self, job_id: str) -> list[JobStep]:
+        """Load durable stage checkpoints in pipeline order."""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM job_steps WHERE job_id = ?",
+                (job_id,),
+            )
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        steps = [
+            JobStep(
+                job_id=row["job_id"],
+                stage=JobStage(row["stage"]),
+                status=JobStatus(row["status"]),
+                output_manifest=row["output_manifest"],
+                output_checksum=row["output_checksum"],
+                model=row["model"],
+                elapsed_ms=row["elapsed_ms"],
+            )
+            for row in rows
+        ]
+        return sorted(steps, key=lambda step: _STAGE_ORDER[step.stage])
+
+    async def start_pipeline(self, job: Job) -> None:
+        """Fence a pipeline attempt and hide its asset until publish succeeds."""
+        if job.lease_owner is None:
+            raise PermissionError("pipeline start requires a lease owner")
+        started_at = self._now()
+        async with self._write_transaction() as connection:
+            await self._require_active_lease(
+                connection,
+                job.job_id,
+                job.lease_owner,
+                job.attempt,
+                started_at,
+            )
+            await connection.execute(
+                """
+                UPDATE assets SET status = ?, updated_at = ?
+                WHERE asset_id = ? AND deleted_at IS NULL
+                """,
+                (AssetStatus.PROCESSING.value, _to_iso(started_at), job.asset_id),
+            )
+
+    async def reset_steps_from(self, job: Job, stage: JobStage) -> None:
+        """Discard an invalid checkpoint and all outputs that depend on it."""
+        if job.lease_owner is None:
+            raise PermissionError("checkpoint reset requires a lease owner")
+        reset_at = self._now()
+        affected = [candidate.value for candidate in JobStage if _STAGE_ORDER[candidate] >= _STAGE_ORDER[stage]]
+        placeholders = ",".join("?" for _ in affected)
+        async with self._write_transaction() as connection:
+            await self._require_active_lease(
+                connection,
+                job.job_id,
+                job.lease_owner,
+                job.attempt,
+                reset_at,
+            )
+            await connection.execute(
+                f"DELETE FROM job_steps WHERE job_id = ? AND stage IN ({placeholders})",
+                (job.job_id, *affected),
+            )
+            remaining_stages = []
+            cursor = await connection.execute("SELECT stage FROM job_steps WHERE job_id = ?", (job.job_id,))
+            try:
+                remaining_stages = [JobStage(row["stage"]) for row in await cursor.fetchall()]
+            finally:
+                await cursor.close()
+            latest = max(remaining_stages, key=_STAGE_ORDER.__getitem__).value if remaining_stages else None
+            await connection.execute(
+                "UPDATE jobs SET stage = ?, updated_at = ? WHERE job_id = ?",
+                (latest, _to_iso(reset_at), job.job_id),
+            )
+
+    async def complete_pipeline(
+        self,
+        job: Job,
+        asset: Asset,
+        segments: Collection[Segment],
+        step: JobStep,
+    ) -> Job:
+        """Atomically publish durable segments and the searchable terminal state."""
+        if job.lease_owner is None:
+            raise PermissionError("pipeline completion requires a lease owner")
+        if asset.asset_id != job.asset_id or step.job_id != job.job_id:
+            raise ValueError("pipeline completion identifiers do not match")
+        if step.stage is not JobStage.PUBLISH or step.status is not JobStatus.COMPLETED:
+            raise ValueError("pipeline completion requires a completed publish step")
+        completed_at = self._now()
+        async with self._write_transaction() as connection:
+            current = await self._require_active_lease(
+                connection,
+                job.job_id,
+                job.lease_owner,
+                job.attempt,
+                completed_at,
+            )
+            if current["cancel_requested"]:
+                raise PermissionError("job cancellation requested")
+            existing = await self._fetchone(
+                connection,
+                "SELECT * FROM job_steps WHERE job_id = ? AND stage = ?",
+                (job.job_id, JobStage.PUBLISH.value),
+            )
+            incoming = (
+                step.status.value,
+                step.output_manifest,
+                step.output_checksum,
+                step.model,
+                step.elapsed_ms,
+            )
+            if existing is not None:
+                stored = (
+                    existing["status"],
+                    existing["output_manifest"],
+                    existing["output_checksum"],
+                    existing["model"],
+                    existing["elapsed_ms"],
+                )
+                if stored != incoming:
+                    raise ValueError(f"checkpoint conflict for {job.job_id}:{JobStage.PUBLISH.value}")
+            else:
+                await connection.execute(
+                    """
+                    INSERT INTO job_steps (
+                        job_id, stage, status, output_manifest, output_checksum, model, elapsed_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        step.job_id,
+                        step.stage.value,
+                        step.status.value,
+                        step.output_manifest,
+                        step.output_checksum,
+                        step.model,
+                        step.elapsed_ms,
+                    ),
+                )
+            for segment in segments:
+                if segment.asset_id != asset.asset_id or segment.pipeline_version != job.pipeline_version:
+                    raise ValueError("segment does not belong to the completing pipeline")
+                await connection.execute(
+                    """
+                    INSERT INTO segments (
+                        segment_id, asset_id, pipeline_version, ordinal, start_offset_ms, end_offset_ms,
+                        start_time, end_time, description, thumbnail_key, model, prompt_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(segment_id) DO UPDATE SET
+                        description = excluded.description,
+                        thumbnail_key = excluded.thumbnail_key,
+                        model = excluded.model,
+                        prompt_version = excluded.prompt_version
+                    """,
+                    (
+                        segment.segment_id,
+                        segment.asset_id,
+                        segment.pipeline_version,
+                        segment.ordinal,
+                        segment.start_offset_ms,
+                        segment.end_offset_ms,
+                        _to_iso(segment.start_time),
+                        _to_iso(segment.end_time),
+                        segment.description,
+                        segment.thumbnail_key,
+                        segment.model,
+                        segment.prompt_version,
+                    ),
+                )
+            await connection.execute(
+                """
+                UPDATE assets
+                SET duration_ms = ?, width = ?, height = ?, status = ?, updated_at = ?
+                WHERE asset_id = ? AND deleted_at IS NULL
+                """,
+                (
+                    asset.duration_ms,
+                    asset.width,
+                    asset.height,
+                    AssetStatus.READY.value,
+                    _to_iso(completed_at),
+                    asset.asset_id,
+                ),
+            )
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET status = ?, stage = ?, next_run_at = NULL, lease_owner = NULL,
+                    lease_until = NULL, heartbeat_at = NULL, last_error = NULL,
+                    updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                RETURNING *
+                """,
+                (
+                    JobStatus.COMPLETED.value,
+                    JobStage.PUBLISH.value,
+                    _to_iso(completed_at),
+                    job.job_id,
+                    JobStatus.RUNNING.value,
+                    job.lease_owner,
+                    job.attempt,
+                ),
+            )
+            if row is None:
+                raise PermissionError("job lost its active lease before completion")
+            return self._row_to_job(row)
+
     async def retry_failed_job(self, job_id: str, now: datetime) -> Job:
         """Atomically make one failed job eligible for another worker attempt."""
         retried_at = _require_aware(now, "now")

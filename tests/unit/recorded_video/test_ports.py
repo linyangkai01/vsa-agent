@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_type_hints
 
-from vsa_agent.recorded_video.models import Asset, Job, JobStep, Segment, UploadSession
+from vsa_agent.recorded_video.models import Asset, Job, JobStage, JobStep, Segment, UploadSession
 from vsa_agent.recorded_video.ports import (
     AssetStore,
     Embedding,
@@ -22,11 +22,20 @@ from vsa_agent.recorded_video.ports import (
 
 
 class FakeAssetStore:
+    root = Path(".")
+
     async def write_chunk(self, session: UploadSession, ordinal: int, data: bytes) -> str:
         return f"{session.session_id}/{ordinal}"
 
     async def assemble_source(self, session: UploadSession, asset: Asset) -> str:
         return asset.asset_id
+
+    async def write_atomic(self, destination: str | Path, data: bytes) -> str:
+        del data
+        return str(destination)
+
+    async def resolve_source_path(self, asset: Asset) -> Path:
+        return Path(asset.asset_id)
 
 
 class FakeJobRepository:
@@ -36,6 +45,27 @@ class FakeJobRepository:
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
         return None
 
+    async def get_asset(self, asset_id: str) -> Asset:
+        raise KeyError(asset_id)
+
+    async def list_job_steps(self, job_id: str) -> list[JobStep]:
+        return []
+
+    async def start_pipeline(self, job: Job) -> None:
+        return None
+
+    async def reset_steps_from(self, job: Job, stage: JobStage) -> None:
+        return None
+
+    async def complete_pipeline(
+        self,
+        job: Job,
+        asset: Asset,
+        segments: Sequence[Segment],
+        step: JobStep,
+    ) -> Job:
+        return job
+
 
 class FakeSegmenter:
     async def plan(self, asset: Asset, pipeline_version: str) -> Sequence[Segment]:
@@ -43,6 +73,8 @@ class FakeSegmenter:
 
 
 class FakeVisionProvider:
+    model = "vision-model"
+
     async def describe(
         self,
         frame_keys: Sequence[str | Path],
@@ -54,6 +86,8 @@ class FakeVisionProvider:
 
 
 class FakeEmbeddingProvider:
+    model = "embedding-model"
+
     async def embed(
         self,
         text: str,
