@@ -158,7 +158,7 @@ class MediaProcessor:
             command = self._proxy_command(source, source_probe, temporary)
             await self._run_ffmpeg(command)
             proxy_probe = await self.probe(temporary)
-            if not self._has_browser_codecs(proxy_probe):
+            if not self._is_directly_playable(proxy_probe):
                 raise self._corrupt_media_error()
             self._publish_generated_file(temporary, destination)
         except BaseException:

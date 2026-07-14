@@ -738,6 +738,24 @@ async def test_mkv_remuxes_or_transcodes_then_reuses_a_valid_proxy(store: LocalA
     assert transcode_call[transcode_call.index("-c:a") + 1] == "aac"
 
 
+async def test_generated_proxy_with_mkv_container_is_rejected_and_cleaned(store: LocalAssetStore) -> None:
+    asset = _asset(extension="mkv")
+    await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
+    processor = MediaProcessor(
+        store=store,
+        runner=FakeRunner(generated_payload=_probe_payload(container="matroska")),
+    )
+    destination = store.root / "assets" / asset.asset_id / "playback" / "proxy.mp4"
+
+    with pytest.raises(RecordedVideoError, match="CORRUPT_MEDIA") as corrupt:
+        await processor.ensure_playback_proxy(asset)
+
+    assert corrupt.value.code is ErrorCode.CORRUPT_MEDIA
+    assert corrupt.value.retryable is False
+    assert not destination.exists()
+    assert list(destination.parent.glob("*.tmp.mp4")) == []
+
+
 async def test_existing_proxy_with_mkv_container_is_rebuilt(store: LocalAssetStore) -> None:
     asset = _asset(extension="mkv")
     await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
