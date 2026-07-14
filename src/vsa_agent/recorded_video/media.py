@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -75,7 +76,7 @@ class MediaProcessor:
         try:
             payload = json.loads(result.stdout)
             return self._parse_probe(payload)
-        except (TypeError, ValueError, KeyError):
+        except (TypeError, ValueError, OverflowError, KeyError):
             raise self._corrupt_media_error() from None
 
     async def extract_representative_frames(
@@ -170,13 +171,26 @@ class MediaProcessor:
                 raise
             destination.unlink(missing_ok=True)
             return None
-        if self._has_browser_codecs(probe):
+        if self._is_directly_playable(probe):
             return existing
         destination.unlink(missing_ok=True)
         return None
 
     def _proxy_command(self, source: Path, probe: MediaProbe, temporary: Path) -> list[str]:
-        common = [self._ffmpeg_path, "-v", "error", "-y", "-i", str(source), "-map", "0"]
+        common = [
+            self._ffmpeg_path,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-sn",
+            "-dn",
+        ]
         if self._has_browser_codecs(probe):
             return [*common, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", str(temporary)]
         return [
@@ -226,7 +240,13 @@ class MediaProcessor:
         streams = payload.get("streams")
         if not isinstance(format_data, dict) or not isinstance(streams, list):
             raise ValueError("ffprobe payload is incomplete")
-        duration_ms = round(float(format_data["duration"]) * 1_000)
+        duration_seconds = float(format_data["duration"])
+        if not math.isfinite(duration_seconds):
+            raise ValueError("media duration must be finite")
+        duration_ms_value = duration_seconds * 1_000
+        if not math.isfinite(duration_ms_value):
+            raise ValueError("media duration must be finite")
+        duration_ms = round(duration_ms_value)
         if duration_ms <= 0:
             raise ValueError("media duration must be positive")
         video_stream = next(
@@ -235,8 +255,12 @@ class MediaProcessor:
         )
         if video_stream is None:
             raise ValueError("media has no video stream")
-        width = int(video_stream["width"])
-        height = int(video_stream["height"])
+        raw_width = video_stream["width"]
+        raw_height = video_stream["height"]
+        if not math.isfinite(float(raw_width)) or not math.isfinite(float(raw_height)):
+            raise ValueError("video dimensions must be finite")
+        width = int(raw_width)
+        height = int(raw_height)
         video_codec = str(video_stream["codec_name"]).lower()
         if width <= 0 or height <= 0 or not video_codec:
             raise ValueError("video stream is invalid")

@@ -57,6 +57,17 @@ def _probe_payload(*, container: str = "matroska", video_codec: str = "h264", au
     )
 
 
+def _probe_payload_with_values(*, duration: object = "12.5", width: object = 1920, height: object = 1080) -> str:
+    return json.dumps(
+        {
+            "format": {"format_name": "matroska", "duration": duration},
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "width": width, "height": height},
+            ],
+        }
+    )
+
+
 class FakeRunner:
     def __init__(self, payload: str | None = None, generated_payload: str | None = None) -> None:
         self.payload = payload or _probe_payload()
@@ -121,6 +132,34 @@ async def test_probe_classifies_missing_binary_and_corrupt_media(tmp_path: Path)
     assert corrupt.value.retryable is False
 
 
+@pytest.mark.parametrize(
+    ("duration", "width", "height"),
+    [
+        ("NaN", 1920, 1080),
+        ("Infinity", 1920, 1080),
+        ("-Infinity", 1920, 1080),
+        ("12.5", float("nan"), 1080),
+        ("12.5", float("inf"), 1080),
+        ("12.5", 1920, float("-inf")),
+    ],
+)
+async def test_probe_rejects_nonfinite_numeric_values_as_corrupt_media(
+    tmp_path: Path,
+    duration: object,
+    width: object,
+    height: object,
+) -> None:
+    source = tmp_path / "nonfinite.mkv"
+    source.write_bytes(b"source")
+    runner = FakeRunner(_probe_payload_with_values(duration=duration, width=width, height=height))
+
+    with pytest.raises(RecordedVideoError, match="CORRUPT_MEDIA") as corrupt:
+        await MediaProcessor(runner=runner).probe(source)
+
+    assert corrupt.value.code is ErrorCode.CORRUPT_MEDIA
+    assert corrupt.value.retryable is False
+
+
 async def test_extract_representative_frames_is_evenly_spaced_and_bounded(tmp_path: Path) -> None:
     source = tmp_path / "original.mkv"
     source.write_bytes(b"source")
@@ -179,3 +218,57 @@ async def test_mkv_remuxes_or_transcodes_then_reuses_a_valid_proxy(store: LocalA
     transcode_call = next(args for args, _kwargs in incompatible.calls if args[0] == "ffmpeg")
     assert transcode_call[transcode_call.index("-c:v") + 1] == "libx264"
     assert transcode_call[transcode_call.index("-c:a") + 1] == "aac"
+
+
+async def test_existing_proxy_with_mkv_container_is_rebuilt(store: LocalAssetStore) -> None:
+    asset = _asset(extension="mkv")
+    await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
+    destination = Path(await store.write_atomic("assets/asset-uuid/playback/proxy.mp4", b"stale-proxy"))
+    calls: list[list[str]] = []
+    probe_outputs = iter(
+        [
+            _probe_payload(),
+            _probe_payload(container="matroska"),
+            _probe_payload(container="mov,mp4,m4a,3gp,3g2,mj2"),
+        ]
+    )
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[0] == "ffprobe":
+            return subprocess.CompletedProcess(args, 0, stdout=next(probe_outputs), stderr="")
+        Path(args[-1]).write_bytes(b"rebuilt-proxy")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    playback = await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
+
+    assert playback == destination
+    assert destination.read_bytes() == b"rebuilt-proxy"
+    assert [args[0] for args in calls] == ["ffprobe", "ffprobe", "ffmpeg", "ffprobe"]
+
+
+async def test_proxy_maps_only_first_video_and_optional_first_audio(store: LocalAssetStore) -> None:
+    asset = _asset(extension="mkv")
+    await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
+    payload = json.dumps(
+        {
+            "format": {"format_name": "matroska", "duration": "12.5"},
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+                {"codec_type": "audio", "codec_name": "aac"},
+                {"codec_type": "subtitle", "codec_name": "subrip"},
+                {"codec_type": "data", "codec_name": "bin_data"},
+                {"codec_type": "attachment", "codec_name": "ttf"},
+            ],
+        }
+    )
+    runner = FakeRunner(payload)
+
+    await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
+
+    command = next(args for args, _kwargs in runner.calls if args[0] == "ffmpeg")
+    mapped_streams = [command[index + 1] for index, argument in enumerate(command) if argument == "-map"]
+    assert mapped_streams == ["0:v:0", "0:a:0?"]
+    assert "-sn" in command
+    assert "-dn" in command
+    assert "0" not in mapped_streams
