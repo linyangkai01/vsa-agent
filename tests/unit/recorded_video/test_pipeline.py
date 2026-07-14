@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -37,7 +38,7 @@ class FakeMediaProcessor:
         self.extract_calls = 0
 
     async def probe(self, path: str | Path) -> MediaProbe:
-        assert Path(path).read_bytes() == b"recorded-video"
+        assert Path(path).is_file()
         self.probe_calls += 1
         return MediaProbe(
             duration_ms=5_000,
@@ -57,7 +58,7 @@ class FakeMediaProcessor:
         *,
         frame_count: int,
     ) -> list[Path]:
-        assert Path(source_path).read_bytes() == b"recorded-video"
+        assert Path(source_path).is_file()
         self.extract_calls += 1
         directory = Path(destination_dir)
         directory.mkdir(parents=True, exist_ok=True)
@@ -72,9 +73,14 @@ class FakeMediaProcessor:
 class FakeVisionProvider:
     model = "vision-model-v1"
 
-    def __init__(self) -> None:
+    def __init__(self, *, endpoint: str = "https://vision.example/v1") -> None:
         self.calls: list[tuple[list[str], str, str]] = []
         self.api_key = "vision-secret-must-not-leak"
+        self.checkpoint_identity = {
+            "provider": "fake-openai-vision",
+            "endpoint": endpoint,
+            "model": self.model,
+        }
 
     async def describe(
         self,
@@ -90,10 +96,17 @@ class FakeVisionProvider:
 class FakeEmbeddingProvider:
     model = "embedding-model-v1"
 
-    def __init__(self, *, failures: int = 0) -> None:
+    def __init__(self, *, failures: int = 0, vector: tuple[float, ...] | None = None) -> None:
         self.failures = failures
         self.calls: list[str] = []
         self.api_key = "embedding-secret-must-not-leak"
+        self.vector = vector
+        self.expected_dims: list[int] = []
+        self.checkpoint_identity = {
+            "provider": "fake-openai-embedding",
+            "endpoint": "https://embedding.example/v1",
+            "model": self.model,
+        }
 
     async def embed(
         self,
@@ -105,26 +118,35 @@ class FakeEmbeddingProvider:
     ) -> tuple[float, ...]:
         del asset_id, job_id
         self.calls.append(text)
+        self.expected_dims.append(expected_dims)
         if self.failures:
             self.failures -= 1
             raise RuntimeError("temporary embedding failure")
-        assert expected_dims == 3
-        return (0.1, 0.2, 0.3)
+        if self.vector is not None:
+            return self.vector
+        return tuple(0.1 + ordinal / 10 for ordinal in range(expected_dims))
 
 
 class FakeProjectionStore:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, partial: bool = False) -> None:
         self.fail = fail
+        self.partial = partial
         self.calls: list[list[dict[str, Any]]] = []
+        self.deleted_assets: list[str] = []
 
     async def project(self, documents: list[dict[str, Any]]) -> ProjectionResult:
         self.calls.append(documents)
         if self.fail:
             raise RuntimeError("projection unavailable")
+        if self.partial:
+            return ProjectionResult(
+                indexed_ids=[],
+                failed_ids=[str(document["_id"]) for document in documents],
+            )
         return ProjectionResult(indexed_ids=[str(document["_id"]) for document in documents])
 
     async def delete_asset(self, asset_id: str) -> None:
-        del asset_id
+        self.deleted_assets.append(asset_id)
 
 
 async def _claimed_job(
@@ -182,20 +204,24 @@ def _pipeline(
     vision: FakeVisionProvider | None = None,
     embedding: FakeEmbeddingProvider | None = None,
     projection: FakeProjectionStore | None = None,
+    segmenter: FixedDurationSegmenter | None = None,
+    expected_embedding_dims: int = 3,
+    representative_frames: int = 2,
+    segmenter_version: str = "fixed-10s-v1",
     clock: list[datetime] | None = None,
 ) -> RecordedVideoPipeline:
     return RecordedVideoPipeline(
         repository=repository,
         asset_store=store,
         media=media or FakeMediaProcessor(),
-        segmenter=FixedDurationSegmenter(10),
+        segmenter=segmenter or FixedDurationSegmenter(10),
         vision=vision or FakeVisionProvider(),
         embedding=embedding or FakeEmbeddingProvider(),
         projection=projection or FakeProjectionStore(),
-        expected_embedding_dims=3,
-        representative_frames=2,
+        expected_embedding_dims=expected_embedding_dims,
+        representative_frames=representative_frames,
         prompt_version="prompt-v1",
-        segmenter_version="fixed-10s-v1",
+        segmenter_version=segmenter_version,
         clock=(lambda: clock[0]) if clock is not None else (lambda: NOW),
     )
 
@@ -242,13 +268,26 @@ async def test_manifest_records_versions_checksums_and_deterministic_projection(
 
     manifest_path = Path(result.manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest_path == store.root / "assets/asset-1/derived/pipeline-v1/manifest.json"
+    assert manifest_path == store.root / "assets/asset-1/derived/pipeline-v1/attempts/1/manifest.json"
     assert manifest["pipeline_version"] == "pipeline-v1"
-    assert manifest["versions"] == {
-        "embedding_model": "embedding-model-v1",
-        "prompt": "prompt-v1",
-        "segmenter": "fixed-10s-v1",
-        "vision_model": "vision-model-v1",
+    assert manifest["checkpoint_identity"] == {
+        "embedding": {
+            "endpoint": "https://embedding.example/v1",
+            "model": "embedding-model-v1",
+            "provider": "fake-openai-embedding",
+        },
+        "expected_embedding_dims": 3,
+        "prompt_version": "prompt-v1",
+        "representative_frames": 2,
+        "segmenter": {
+            "config": {"duration_ms": 10_000, "type": "fixed-duration"},
+            "version": "fixed-10s-v1",
+        },
+        "vision": {
+            "endpoint": "https://vision.example/v1",
+            "model": "vision-model-v1",
+            "provider": "fake-openai-vision",
+        },
     }
     assert set(manifest["stages"]) == {stage.value for stage in JobStage}
     assert all(stage["input_sha256"] and stage["output_sha256"] for stage in manifest["stages"].values())
@@ -261,6 +300,31 @@ async def test_manifest_records_versions_checksums_and_deterministic_projection(
     segments = await repository.list_segments("asset-1")
     assert [document["_id"] for document in documents] == [segment.segment_id for segment in segments]
     assert all(document["_id"] == document["segment_id"] for document in documents)
+    assert all(document["job_id"] == job.job_id for document in documents)
+    assert all(document["job_attempt"] == job.attempt for document in documents)
+    assert all(
+        document["readiness"]
+        == {
+            "asset_id": job.asset_id,
+            "job_id": job.job_id,
+            "pipeline_version": job.pipeline_version,
+            "attempt": job.attempt,
+            "authority": "sqlite",
+        }
+        for document in documents
+    )
+    assert not await repository.is_asset_search_ready(
+        job.asset_id,
+        job.job_id,
+        job.pipeline_version,
+        job.attempt + 1,
+    )
+    assert await repository.is_asset_search_ready(
+        job.asset_id,
+        job.job_id,
+        job.pipeline_version,
+        job.attempt,
+    )
     assert result.projected_ids == tuple(document["_id"] for document in documents)
     assert [step.stage for step in await repository.list_job_steps(job.job_id)] == list(JobStage)
 
@@ -275,7 +339,7 @@ async def test_corrupt_analysis_checkpoint_is_not_reused(tmp_path: Path) -> None
 
     with pytest.raises(RuntimeError, match="temporary embedding failure"):
         await pipeline.run(job)
-    manifest_path = store.root / "assets/asset-1/derived/pipeline-v1/manifest.json"
+    manifest_path = store.root / "assets/asset-1/derived/pipeline-v1/attempts/1/manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["stages"]["analyzing"]["output"]["segments"][0]["description"] = "tampered"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -293,7 +357,8 @@ async def test_corrupt_analysis_checkpoint_is_not_reused(tmp_path: Path) -> None
 async def test_projection_failure_does_not_publish_completed_state(tmp_path: Path) -> None:
     clock = [NOW]
     repository, store, job = await _claimed_job(tmp_path, clock)
-    pipeline = _pipeline(repository, store, projection=FakeProjectionStore(fail=True), clock=clock)
+    projection = FakeProjectionStore(fail=True)
+    pipeline = _pipeline(repository, store, projection=projection, clock=clock)
 
     with pytest.raises(RuntimeError, match="projection unavailable"):
         await pipeline.run(job)
@@ -304,6 +369,7 @@ async def test_projection_failure_does_not_publish_completed_state(tmp_path: Pat
     assert await repository.list_segments(job.asset_id) == []
     steps = await repository.list_job_steps(job.job_id)
     assert [step.stage for step in steps] == list(JobStage)[:-1]
+    assert projection.deleted_assets == [job.asset_id]
 
 
 @pytest.mark.asyncio
@@ -359,14 +425,211 @@ async def test_cancel_requested_during_projection_prevents_publish(tmp_path: Pat
             await repository.request_cancel(job.job_id, clock[0] + timedelta(seconds=1))
             return await super().project(documents)
 
+    projection = CancellingProjectionStore()
     with pytest.raises(PermissionError, match="cancellation requested"):
         await _pipeline(
             repository,
             store,
-            projection=CancellingProjectionStore(),
+            projection=projection,
             clock=clock,
         ).run(job)
 
     assert (await repository.get_job(job.job_id)).status is JobStatus.RUNNING
     assert await repository.list_ready_assets() == []
     assert await repository.list_segments(job.asset_id) == []
+    assert projection.deleted_assets == [job.asset_id]
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_write_manifest_after_provider_await(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+
+    class ReclaimingVision(FakeVisionProvider):
+        async def describe(self, frame_keys, segment, *, job_id):
+            result = await super().describe(frame_keys, segment, job_id=job_id)
+            clock[0] += timedelta(seconds=31)
+            reclaimed = await repository.claim_due_job("worker-2", clock[0])
+            assert reclaimed is not None and reclaimed.attempt == 2
+            return result
+
+    with pytest.raises(PermissionError, match="active lease"):
+        await _pipeline(repository, store, vision=ReclaimingVision(), clock=clock).run(job)
+
+    manifest_path = store.root / "assets/asset-1/derived/pipeline-v1/attempts/1/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert JobStage.ANALYZING.value not in manifest["stages"]
+
+
+@pytest.mark.asyncio
+async def test_partial_projection_is_compensated_and_never_ready(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+    projection = FakeProjectionStore(partial=True)
+
+    with pytest.raises(RecordedVideoError) as failure:
+        await _pipeline(repository, store, projection=projection, clock=clock).run(job)
+
+    assert failure.value.code is ErrorCode.ES_5XX
+    assert projection.deleted_assets == [job.asset_id]
+    assert not await repository.is_asset_search_ready(
+        job.asset_id,
+        job.job_id,
+        job.pipeline_version,
+        job.attempt,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vector", [(0.1, 0.2), (0.1, math.nan, 0.3)])
+async def test_projection_rejects_invalid_embedding_manifest(
+    tmp_path: Path,
+    vector: tuple[float, ...],
+) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+    projection = FakeProjectionStore()
+
+    with pytest.raises(RecordedVideoError) as failure:
+        await _pipeline(
+            repository,
+            store,
+            embedding=FakeEmbeddingProvider(vector=vector),
+            projection=projection,
+            clock=clock,
+        ).run(job)
+
+    assert failure.value.code is ErrorCode.EMBEDDING_DIMENSION
+    assert projection.calls == []
+
+
+@pytest.mark.asyncio
+async def test_projection_rejects_non_deterministic_segment_identity(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+
+    class InvalidSegmenter(FixedDurationSegmenter):
+        checkpoint_identity: ClassVar[dict[str, Any]] = {"type": "invalid-test"}
+
+        async def plan(self, asset, pipeline_version):
+            segments = list(await super().plan(asset, pipeline_version))
+            return [segments[0].model_copy(update={"segment_id": "not-deterministic"})]
+
+    projection = FakeProjectionStore()
+    with pytest.raises(RecordedVideoError, match="segment"):
+        await _pipeline(
+            repository,
+            store,
+            segmenter=InvalidSegmenter(10),
+            projection=projection,
+            clock=clock,
+        ).run(job)
+
+    assert projection.calls == []
+
+
+@pytest.mark.asyncio
+async def test_representative_frame_tamper_invalidates_checkpoint_reuse(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+    media = FakeMediaProcessor()
+    pipeline = _pipeline(
+        repository,
+        store,
+        media=media,
+        embedding=FakeEmbeddingProvider(failures=1),
+        clock=clock,
+    )
+    with pytest.raises(RuntimeError, match="temporary embedding failure"):
+        await pipeline.run(job)
+    frame = next((store.root / "assets/asset-1/derived/pipeline-v1/attempts/1/frames").glob("*.jpg"))
+    frame.write_bytes(b"tampered-frame")
+
+    clock[0] += timedelta(seconds=31)
+    reclaimed = await repository.claim_due_job("worker-2", clock[0])
+    assert reclaimed is not None
+    await pipeline.run(reclaimed)
+
+    assert media.extract_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_identity_includes_runtime_frame_and_segmenter_config(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+    first_media = FakeMediaProcessor()
+    first_projection = FakeProjectionStore(fail=True)
+    with pytest.raises(RuntimeError, match="projection unavailable"):
+        await _pipeline(
+            repository,
+            store,
+            media=first_media,
+            projection=first_projection,
+            clock=clock,
+        ).run(job)
+
+    clock[0] += timedelta(seconds=31)
+    reclaimed = await repository.claim_due_job("worker-2", clock[0])
+    assert reclaimed is not None
+    second_media = FakeMediaProcessor()
+    projection = FakeProjectionStore()
+    await _pipeline(
+        repository,
+        store,
+        media=second_media,
+        segmenter=FixedDurationSegmenter(2),
+        representative_frames=3,
+        projection=projection,
+        clock=clock,
+    ).run(reclaimed)
+
+    assert second_media.extract_calls == 3
+    assert len(projection.calls[0]) == 3
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_identity_includes_expected_embedding_dimensions(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+    with pytest.raises(RuntimeError, match="projection unavailable"):
+        await _pipeline(
+            repository,
+            store,
+            projection=FakeProjectionStore(fail=True),
+            clock=clock,
+        ).run(job)
+
+    clock[0] += timedelta(seconds=31)
+    reclaimed = await repository.claim_due_job("worker-2", clock[0])
+    assert reclaimed is not None
+    embedding = FakeEmbeddingProvider()
+    await _pipeline(
+        repository,
+        store,
+        embedding=embedding,
+        expected_embedding_dims=4,
+        clock=clock,
+    ).run(reclaimed)
+
+    assert embedding.expected_dims == [4]
+
+
+@pytest.mark.asyncio
+async def test_source_and_artifact_hashing_never_uses_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [NOW]
+    repository, store, job = await _claimed_job(tmp_path, clock)
+    original_read_bytes = Path.read_bytes
+
+    def reject_large_artifact_reads(path: Path) -> bytes:
+        if path.name == "original.mp4" or path.suffix == ".jpg":
+            raise AssertionError("pipeline hashing must stream files")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_large_artifact_reads)
+
+    result = await _pipeline(repository, store, clock=clock).run(job)
+
+    assert result.status is JobStatus.COMPLETED

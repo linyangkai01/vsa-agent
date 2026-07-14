@@ -42,6 +42,8 @@ class _OpenAIProvider:
         self._base_url = _provider_base_url(base_url)
         self._api_key = api_key or None
         self._model = _nonblank_string(model, "model")
+        self._timeout_sec = timeout_sec
+        self._concurrency = concurrency
         self._timeout = httpx.Timeout(timeout_sec)
         self._semaphore = asyncio.Semaphore(concurrency)
         self._owns_client = client is None
@@ -50,6 +52,17 @@ class _OpenAIProvider:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def checkpoint_identity(self) -> Mapping[str, Any]:
+        """Return replay-relevant provider configuration without credentials."""
+        return {
+            "provider": f"{type(self).__module__}.{type(self).__qualname__}",
+            "base_url": str(self._base_url),
+            "model": self._model,
+            "timeout_sec": self._timeout_sec,
+            "concurrency": self._concurrency,
+        }
 
     async def aclose(self) -> None:
         if self._owns_client:

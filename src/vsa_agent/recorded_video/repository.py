@@ -965,38 +965,33 @@ class JobRepository:
         """Fence a pipeline attempt and hide its asset until publish succeeds."""
         if job.lease_owner is None:
             raise PermissionError("pipeline start requires a lease owner")
-        started_at = self._now()
         async with self._write_transaction() as connection:
-            await self._require_active_lease(
-                connection,
-                job.job_id,
-                job.lease_owner,
-                job.attempt,
-                started_at,
-            )
+            started_at = self._now()
+            await self._require_active_lease(connection, job, started_at)
             await connection.execute(
                 """
                 UPDATE assets SET status = ?, updated_at = ?
-                WHERE asset_id = ? AND deleted_at IS NULL
+                WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
                 """,
-                (AssetStatus.PROCESSING.value, _to_iso(started_at), job.asset_id),
+                (AssetStatus.PROCESSING.value, _to_iso(started_at), job.asset_id, job.job_id),
             )
+
+    async def assert_active_lease(self, job: Job) -> None:
+        """Fence an external side effect against the current leased SQLite identity."""
+        if job.lease_owner is None:
+            raise PermissionError("active lease requires a lease owner")
+        async with self._write_transaction() as connection:
+            await self._require_active_lease(connection, job, self._now())
 
     async def reset_steps_from(self, job: Job, stage: JobStage) -> None:
         """Discard an invalid checkpoint and all outputs that depend on it."""
         if job.lease_owner is None:
             raise PermissionError("checkpoint reset requires a lease owner")
-        reset_at = self._now()
         affected = [candidate.value for candidate in JobStage if _STAGE_ORDER[candidate] >= _STAGE_ORDER[stage]]
         placeholders = ",".join("?" for _ in affected)
         async with self._write_transaction() as connection:
-            await self._require_active_lease(
-                connection,
-                job.job_id,
-                job.lease_owner,
-                job.attempt,
-                reset_at,
-            )
+            reset_at = self._now()
+            await self._require_active_lease(connection, job, reset_at)
             await connection.execute(
                 f"DELETE FROM job_steps WHERE job_id = ? AND stage IN ({placeholders})",
                 (job.job_id, *affected),
@@ -1027,17 +1022,28 @@ class JobRepository:
             raise ValueError("pipeline completion identifiers do not match")
         if step.stage is not JobStage.PUBLISH or step.status is not JobStatus.COMPLETED:
             raise ValueError("pipeline completion requires a completed publish step")
-        completed_at = self._now()
+        canonical_publish_manifest = f"derived/{job.pipeline_version}/attempts/{job.attempt}/manifest.json"
+        if step.output_manifest != canonical_publish_manifest:
+            raise ValueError("pipeline completion requires the canonical publish manifest key")
         async with self._write_transaction() as connection:
-            current = await self._require_active_lease(
-                connection,
-                job.job_id,
-                job.lease_owner,
-                job.attempt,
-                completed_at,
+            completed_at = self._now()
+            await self._require_active_lease(connection, job, completed_at)
+            prerequisite_stages = tuple(stage.value for stage in JobStage if stage is not JobStage.PUBLISH)
+            placeholders = ",".join("?" for _ in prerequisite_stages)
+            cursor = await connection.execute(
+                f"""
+                SELECT stage FROM job_steps
+                WHERE job_id = ? AND status = ? AND output_manifest IS NOT NULL
+                    AND output_checksum IS NOT NULL AND stage IN ({placeholders})
+                """,
+                (job.job_id, JobStatus.COMPLETED.value, *prerequisite_stages),
             )
-            if current["cancel_requested"]:
-                raise PermissionError("job cancellation requested")
+            try:
+                completed_prerequisites = {row["stage"] for row in await cursor.fetchall()}
+            finally:
+                await cursor.close()
+            if completed_prerequisites != set(prerequisite_stages):
+                raise ValueError("pipeline completion requires all six prerequisite steps")
             existing = await self._fetchone(
                 connection,
                 "SELECT * FROM job_steps WHERE job_id = ? AND stage = ?",
@@ -1111,7 +1117,7 @@ class JobRepository:
                 """
                 UPDATE assets
                 SET duration_ms = ?, width = ?, height = ?, status = ?, updated_at = ?
-                WHERE asset_id = ? AND deleted_at IS NULL
+                WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
                 """,
                 (
                     asset.duration_ms,
@@ -1120,6 +1126,7 @@ class JobRepository:
                     AssetStatus.READY.value,
                     _to_iso(completed_at),
                     asset.asset_id,
+                    job.job_id,
                 ),
             )
             row = await self._fetchone(
@@ -1129,7 +1136,8 @@ class JobRepository:
                 SET status = ?, stage = ?, next_run_at = NULL, lease_owner = NULL,
                     lease_until = NULL, heartbeat_at = NULL, last_error = NULL,
                     updated_at = ?
-                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                WHERE job_id = ? AND asset_id = ? AND pipeline_version = ?
+                    AND status = ? AND lease_owner = ? AND attempt = ?
                 RETURNING *
                 """,
                 (
@@ -1137,6 +1145,8 @@ class JobRepository:
                     JobStage.PUBLISH.value,
                     _to_iso(completed_at),
                     job.job_id,
+                    job.asset_id,
+                    job.pipeline_version,
                     JobStatus.RUNNING.value,
                     job.lease_owner,
                     job.attempt,
@@ -1145,6 +1155,40 @@ class JobRepository:
             if row is None:
                 raise PermissionError("job lost its active lease before completion")
             return self._row_to_job(row)
+
+    async def is_asset_search_ready(
+        self,
+        asset_id: str,
+        job_id: str,
+        pipeline_version: str,
+        attempt: int,
+    ) -> bool:
+        """Return whether a projected document identity is publishable by SQLite state."""
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                SELECT 1 AS ready
+                FROM assets
+                JOIN jobs ON jobs.job_id = assets.current_job_id
+                JOIN job_steps ON job_steps.job_id = jobs.job_id AND job_steps.stage = ?
+                WHERE assets.asset_id = ? AND assets.status = ? AND assets.deleted_at IS NULL
+                    AND jobs.job_id = ? AND jobs.asset_id = assets.asset_id
+                    AND jobs.pipeline_version = ? AND jobs.attempt = ? AND jobs.status = ?
+                    AND job_steps.status = ?
+                """,
+                (
+                    JobStage.PUBLISH.value,
+                    asset_id,
+                    AssetStatus.READY.value,
+                    job_id,
+                    pipeline_version,
+                    attempt,
+                    JobStatus.COMPLETED.value,
+                    JobStatus.COMPLETED.value,
+                ),
+            )
+        return row is not None
 
     async def retry_failed_job(self, job_id: str, now: datetime) -> Job:
         """Atomically make one failed job eligible for another worker attempt."""
@@ -1300,15 +1344,13 @@ class JobRepository:
             raise ValueError("job and checkpoint must refer to the same job_id")
         if job.lease_owner is None:
             raise PermissionError("checkpoint requires a lease owner")
-        checkpoint_at = self._now()
-
         async with self._write_transaction() as connection:
+            checkpoint_at = self._now()
             current = await self._require_active_lease(
                 connection,
-                job.job_id,
-                job.lease_owner,
-                job.attempt,
+                job,
                 checkpoint_at,
+                allow_cancel_requested=True,
             )
 
             existing = await self._fetchone(
@@ -1720,21 +1762,38 @@ class JobRepository:
     async def _require_active_lease(
         cls,
         connection: aiosqlite.Connection,
-        job_id: str,
-        owner: str,
-        attempt: int,
+        job: Job,
         now: datetime,
+        *,
+        allow_cancel_requested: bool = False,
     ) -> aiosqlite.Row:
-        current = await cls._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        current = await cls._fetchone(
+            connection,
+            """
+            SELECT jobs.*, assets.current_job_id AS asset_current_job_id,
+                assets.deleted_at AS asset_deleted_at
+            FROM jobs JOIN assets ON assets.asset_id = jobs.asset_id
+            WHERE jobs.job_id = ?
+            """,
+            (job.job_id,),
+        )
         if current is None:
-            raise KeyError(f"unknown job: {job_id}")
-        if current["lease_owner"] != owner:
-            raise PermissionError("lease owner does not match")
-        if current["attempt"] != attempt:
-            raise PermissionError("job attempt does not match")
+            raise KeyError(f"unknown job: {job.job_id}")
+        if current["asset_id"] != job.asset_id:
+            raise PermissionError("leased job asset identity does not match")
+        if current["pipeline_version"] != job.pipeline_version:
+            raise PermissionError("leased job pipeline identity does not match")
+        if current["asset_current_job_id"] != job.job_id or current["asset_deleted_at"] is not None:
+            raise PermissionError("asset current job does not match leased job")
+        if current["lease_owner"] != job.lease_owner:
+            raise PermissionError("job has no active lease: lease owner does not match")
+        if current["attempt"] != job.attempt:
+            raise PermissionError("job has no active lease: job attempt does not match")
         lease_until = _from_iso(current["lease_until"])
         if current["status"] != JobStatus.RUNNING.value or lease_until is None or lease_until <= now:
             raise PermissionError("job has no active lease")
+        if current["cancel_requested"] and not allow_cancel_requested:
+            raise PermissionError("job cancellation requested")
         return current
 
     @classmethod
@@ -1746,7 +1805,16 @@ class JobRepository:
         attempt: int,
         now: datetime,
     ) -> None:
-        current = await cls._require_active_lease(connection, job_id, owner, attempt, now)
+        current = await cls._fetchone(connection, "SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        if current is None:
+            raise KeyError(f"unknown job: {job_id}")
+        if current["lease_owner"] != owner:
+            raise PermissionError("lease owner does not match")
+        if current["attempt"] != attempt:
+            raise PermissionError("job attempt does not match")
+        lease_until = _from_iso(current["lease_until"])
+        if current["status"] != JobStatus.RUNNING.value or lease_until is None or lease_until <= now:
+            raise PermissionError("job has no active lease")
         if current["cancel_requested"]:
             raise PermissionError("job cancellation requested")
         raise PermissionError("job has no active lease")

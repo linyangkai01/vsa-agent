@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
+from typing import Any
 
 from vsa_agent.recorded_video.models import Asset, Segment, segment_id
 from vsa_agent.recorded_video.ports import Segmenter
@@ -16,6 +17,11 @@ class FixedDurationSegmenter(Segmenter):
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be positive")
         self._duration_ms = duration_seconds * 1_000
+
+    @property
+    def checkpoint_identity(self) -> Mapping[str, Any]:
+        """Return the non-secret configuration that determines segment output."""
+        return {"type": "fixed-duration", "duration_ms": self._duration_ms}
 
     async def plan(self, asset: Asset, pipeline_version: str) -> Sequence[Segment]:
         """Return ordered half-open segments covering the complete asset duration."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -47,6 +47,18 @@ class ProjectionResult(BaseModel):
     failed_ids: list[str] = Field(default_factory=list)
 
 
+class ProjectionReadiness(BaseModel):
+    """SQLite identity a search hit must verify before production exposure."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_id: str
+    job_id: str
+    pipeline_version: str
+    attempt: int = Field(gt=0)
+    authority: Literal["sqlite"] = "sqlite"
+
+
 @runtime_checkable
 class AssetStore(Protocol):
     root: Path
@@ -68,6 +80,8 @@ class JobRepository(Protocol):
 
     async def checkpoint_step(self, job: Job, step: JobStep) -> None: ...
 
+    async def assert_active_lease(self, job: Job) -> None: ...
+
     async def get_asset(self, asset_id: str) -> Asset: ...
 
     async def list_job_steps(self, job_id: str) -> list[JobStep]: ...
@@ -84,9 +98,20 @@ class JobRepository(Protocol):
         step: JobStep,
     ) -> Job: ...
 
+    async def is_asset_search_ready(
+        self,
+        asset_id: str,
+        job_id: str,
+        pipeline_version: str,
+        attempt: int,
+    ) -> bool: ...
+
 
 @runtime_checkable
 class Segmenter(Protocol):
+    @property
+    def checkpoint_identity(self) -> Mapping[str, Any]: ...
+
     async def plan(self, asset: Asset, pipeline_version: str) -> Sequence[Segment]: ...
 
 
@@ -94,6 +119,9 @@ class Segmenter(Protocol):
 class VisionProvider(Protocol):
     @property
     def model(self) -> str: ...
+
+    @property
+    def checkpoint_identity(self) -> Mapping[str, Any]: ...
 
     async def describe(
         self,
@@ -108,6 +136,9 @@ class VisionProvider(Protocol):
 class EmbeddingProvider(Protocol):
     @property
     def model(self) -> str: ...
+
+    @property
+    def checkpoint_identity(self) -> Mapping[str, Any]: ...
 
     async def embed(
         self,

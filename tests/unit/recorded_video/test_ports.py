@@ -13,6 +13,7 @@ from vsa_agent.recorded_video.ports import (
     Embedding,
     EmbeddingProvider,
     JobRepository,
+    ProjectionReadiness,
     ProjectionResult,
     SearchProjectionStore,
     Segmenter,
@@ -45,6 +46,9 @@ class FakeJobRepository:
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
         return None
 
+    async def assert_active_lease(self, job: Job) -> None:
+        return None
+
     async def get_asset(self, asset_id: str) -> Asset:
         raise KeyError(asset_id)
 
@@ -66,14 +70,26 @@ class FakeJobRepository:
     ) -> Job:
         return job
 
+    async def is_asset_search_ready(
+        self,
+        asset_id: str,
+        job_id: str,
+        pipeline_version: str,
+        attempt: int,
+    ) -> bool:
+        return False
+
 
 class FakeSegmenter:
+    checkpoint_identity = {"type": "fake"}
+
     async def plan(self, asset: Asset, pipeline_version: str) -> Sequence[Segment]:
         return []
 
 
 class FakeVisionProvider:
     model = "vision-model"
+    checkpoint_identity = {"provider": "fake", "model": model}
 
     async def describe(
         self,
@@ -87,6 +103,7 @@ class FakeVisionProvider:
 
 class FakeEmbeddingProvider:
     model = "embedding-model"
+    checkpoint_identity = {"provider": "fake", "model": model}
 
     async def embed(
         self,
@@ -140,6 +157,23 @@ def test_projection_result_keeps_successes_and_failures_separate() -> None:
 
     assert result.indexed_ids == ["segment-1"]
     assert result.failed_ids == ["segment-2"]
+
+
+def test_projection_readiness_carries_sqlite_filter_identity() -> None:
+    readiness = ProjectionReadiness(
+        asset_id="asset-1",
+        job_id="job-1",
+        pipeline_version="pipeline-v1",
+        attempt=2,
+    )
+
+    assert readiness.model_dump() == {
+        "asset_id": "asset-1",
+        "job_id": "job-1",
+        "pipeline_version": "pipeline-v1",
+        "attempt": 2,
+        "authority": "sqlite",
+    }
 
 
 def test_claim_due_job_accepts_owner_and_explicit_clock() -> None:

@@ -17,7 +17,9 @@ from vsa_agent.recorded_video.models import (
     JobStage,
     JobStatus,
     JobStep,
+    Segment,
     UploadSession,
+    segment_id,
 )
 from vsa_agent.recorded_video.repository import JobRepository
 
@@ -1450,3 +1452,184 @@ async def test_retry_failed_job_rejects_non_failed_unknown_and_naive_time(repo: 
         await repo.retry_failed_job("missing-job", NOW)
     with pytest.raises(ValueError, match="timezone-aware"):
         await repo.retry_failed_job(created.job_id, NOW.replace(tzinfo=None))
+
+
+@pytest.mark.asyncio
+async def test_assert_active_lease_fences_full_job_and_asset_identity(repo: JobRepository) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+
+    await repo.assert_active_lease(claimed)
+
+    with pytest.raises(PermissionError, match="asset identity"):
+        await repo.assert_active_lease(claimed.model_copy(update={"asset_id": "other-asset"}))
+    with pytest.raises(PermissionError, match="pipeline identity"):
+        await repo.assert_active_lease(claimed.model_copy(update={"pipeline_version": "v2"}))
+
+    connection = sqlite3.connect(repo.database_path)
+    try:
+        connection.execute("UPDATE assets SET current_job_id = NULL WHERE asset_id = ?", (claimed.asset_id,))
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(PermissionError, match="current job"):
+        await repo.assert_active_lease(claimed)
+
+
+@pytest.mark.asyncio
+async def test_assert_active_lease_reads_clock_after_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = [NOW]
+    repository = JobRepository(
+        tmp_path / "lock-clock.sqlite3",
+        lease_seconds=30,
+        clock=lambda: current_time[0],
+    )
+    await repository.initialize()
+    await _ready_job(repository)
+    claimed = await repository.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+    original_write_transaction = JobRepository._write_transaction
+
+    @asynccontextmanager
+    async def advance_after_lock(self):
+        async with original_write_transaction(self) as connection:
+            current_time[0] = NOW + timedelta(seconds=31)
+            yield connection
+
+    monkeypatch.setattr(JobRepository, "_write_transaction", advance_after_lock)
+
+    with pytest.raises(PermissionError, match="active lease"):
+        await repository.assert_active_lease(claimed)
+
+
+def _completed_step(job_id: str, stage: JobStage) -> JobStep:
+    return JobStep(
+        job_id=job_id,
+        stage=stage,
+        status=JobStatus.COMPLETED,
+        output_manifest="derived/v1/attempts/1/manifest.json",
+        output_checksum=f"checksum-{stage.value}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_readiness_requires_matching_completed_sqlite_identity(repo: JobRepository) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+
+    assert not await repo.is_asset_search_ready(
+        claimed.asset_id,
+        claimed.job_id,
+        claimed.pipeline_version,
+        claimed.attempt,
+    )
+    assert not await repo.is_asset_search_ready(
+        claimed.asset_id,
+        claimed.job_id,
+        claimed.pipeline_version,
+        claimed.attempt + 1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_pipeline_requires_all_six_prerequisite_steps(repo: JobRepository) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+    await repo.start_pipeline(claimed)
+    for stage in list(JobStage)[:5]:
+        await repo.checkpoint_step(claimed, _completed_step(claimed.job_id, stage))
+
+    with pytest.raises(ValueError, match="prerequisite"):
+        await repo.complete_pipeline(
+            claimed,
+            await repo.get_asset(claimed.asset_id),
+            [],
+            _completed_step(claimed.job_id, JobStage.PUBLISH),
+        )
+
+    assert (await repo.get_job(claimed.job_id)).status is JobStatus.RUNNING
+    assert [step.stage for step in await repo.list_job_steps(claimed.job_id)] == list(JobStage)[:5]
+    assert await repo.list_segments(claimed.asset_id) == []
+
+
+@pytest.mark.asyncio
+async def test_complete_pipeline_rolls_back_all_publication_writes(repo: JobRepository) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+    await repo.start_pipeline(claimed)
+    for stage in list(JobStage)[:-1]:
+        await repo.checkpoint_step(claimed, _completed_step(claimed.job_id, stage))
+    asset = (await repo.get_asset(claimed.asset_id)).model_copy(
+        update={"duration_ms": 1_000, "width": 640, "height": 360}
+    )
+    valid = Segment(
+        segment_id=segment_id(asset.asset_id, claimed.pipeline_version, 0),
+        asset_id=asset.asset_id,
+        pipeline_version=claimed.pipeline_version,
+        ordinal=0,
+        start_offset_ms=0,
+        end_offset_ms=1_000,
+        start_time=NOW,
+        end_time=NOW + timedelta(seconds=1),
+    )
+    invalid = valid.model_copy(update={"segment_id": "wrong", "ordinal": 1, "pipeline_version": "v2"})
+
+    with pytest.raises(ValueError, match="segment"):
+        await repo.complete_pipeline(
+            claimed,
+            asset,
+            [valid, invalid],
+            _completed_step(claimed.job_id, JobStage.PUBLISH),
+        )
+
+    assert await repo.list_segments(asset.asset_id) == []
+    assert JobStage.PUBLISH not in {step.stage for step in await repo.list_job_steps(claimed.job_id)}
+    assert (await repo.get_asset(asset.asset_id)).status is AssetStatus.PROCESSING
+    assert (await repo.get_job(claimed.job_id)).status is JobStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_complete_pipeline_allows_only_one_concurrent_completion(repo: JobRepository) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+    await repo.start_pipeline(claimed)
+    for stage in list(JobStage)[:-1]:
+        await repo.checkpoint_step(claimed, _completed_step(claimed.job_id, stage))
+    step = _completed_step(claimed.job_id, JobStage.PUBLISH)
+    asset = await repo.get_asset(claimed.asset_id)
+
+    results = await asyncio.gather(
+        repo.complete_pipeline(claimed, asset, [], step),
+        repo.complete_pipeline(claimed, asset, [], step),
+        return_exceptions=True,
+    )
+
+    assert sum(getattr(result, "status", None) is JobStatus.COMPLETED for result in results) == 1
+    assert sum(isinstance(result, PermissionError) for result in results) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_pipeline_rejects_noncanonical_publish_manifest_key(repo: JobRepository) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-1", NOW)
+    assert claimed is not None
+    await repo.start_pipeline(claimed)
+    for stage in list(JobStage)[:-1]:
+        await repo.checkpoint_step(claimed, _completed_step(claimed.job_id, stage))
+    invalid_publish = _completed_step(claimed.job_id, JobStage.PUBLISH).model_copy(
+        update={"output_manifest": "derived/v1/manifest.json"}
+    )
+
+    with pytest.raises(ValueError, match="canonical"):
+        await repo.complete_pipeline(claimed, await repo.get_asset(claimed.asset_id), [], invalid_publish)
+
+    assert (await repo.get_job(claimed.job_id)).status is JobStatus.RUNNING
+    assert JobStage.PUBLISH not in {step.stage for step in await repo.list_job_steps(claimed.job_id)}
