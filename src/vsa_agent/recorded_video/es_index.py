@@ -7,11 +7,12 @@ import math
 import re
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
-from vsa_agent.recorded_video.ports import ProjectionReadiness
+from vsa_agent.recorded_video.models import segment_id as build_segment_id
 
 _CONTRACT_NAME = "vsa-recorded-video-segment"
 _CONTRACT_VERSION = 1
@@ -25,6 +26,15 @@ INDEX_SETTINGS: dict[str, Any] = {
         "mapping": {"total_fields": {"limit": 64}},
     }
 }
+
+
+class _ESProjectionReadiness(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_id: str
+    job_id: str
+    pipeline_version: str
+    attempt: int = Field(gt=0)
 
 
 class SegmentDocument(BaseModel):
@@ -41,7 +51,7 @@ class SegmentDocument(BaseModel):
     source_type: str
     job_id: str
     job_attempt: int = Field(gt=0)
-    readiness: ProjectionReadiness
+    readiness: _ESProjectionReadiness
     pipeline_version: str
     embedding_model: str
     vision_model: str
@@ -71,8 +81,17 @@ class SegmentDocument(BaseModel):
     def validate_identity_and_ranges(self) -> SegmentDocument:
         if self.id != self.segment_id:
             raise ValueError("_id must equal segment_id")
+        try:
+            UUID(self.asset_id)
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("asset_id must be a valid UUID") from None
         if self.asset_id != self.video_id:
             raise ValueError("video_id must equal asset_id")
+        if self.asset_id != self.sensor_id:
+            raise ValueError("sensor_id must equal asset_id")
+        expected_segment_id = build_segment_id(self.asset_id, self.pipeline_version, self.ordinal)
+        if self.segment_id != expected_segment_id:
+            raise ValueError("segment_id must equal the stable segment_id")
         if self.readiness.asset_id != self.asset_id or self.readiness.job_id != self.job_id:
             raise ValueError("readiness identity does not match the segment document")
         if self.readiness.pipeline_version != self.pipeline_version or self.readiness.attempt != self.job_attempt:
@@ -113,7 +132,6 @@ def build_segment_mapping(*, model: str, version: str, dims: int) -> dict[str, A
                     "job_id": dict(keyword),
                     "pipeline_version": dict(keyword),
                     "attempt": dict(long),
-                    "authority": dict(keyword),
                 },
             },
             "pipeline_version": dict(keyword),
@@ -279,7 +297,7 @@ class RecordedVideoIndex:
             dims=expected_dims,
         )
         expected_name = self.index_name(model=expected_model, dims=expected_dims)
-        if index_name != expected_name or mapping != expected_mapping:
+        if index_name != expected_name or _normalized_mapping(mapping) != _normalized_mapping(expected_mapping):
             raise _configuration_error("INDEX_MAPPING_CONFLICT: recorded-video mapping metadata or fields differ")
 
         settings_response = await client.indices.get_settings(index=index_name, flat_settings=True)
@@ -326,6 +344,15 @@ def _normalized_contract_settings(settings: Mapping[str, Any]) -> dict[str, str 
     }
 
 
+def _normalized_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in mapping.items():
+        normalized[key] = _normalized_mapping(value) if isinstance(value, Mapping) else value
+    if normalized.get("type") == "object" and isinstance(normalized.get("properties"), Mapping):
+        normalized.pop("type")
+    return normalized
+
+
 def _expected_contract_settings() -> dict[str, str]:
     index = INDEX_SETTINGS["index"]
     return {
@@ -340,7 +367,16 @@ def _as_setting(value: Any) -> str | None:
 
 
 def _require_acknowledged(response: Any, *, operation: str) -> None:
-    if not isinstance(response, Mapping) or response.get("acknowledged") is not True:
+    if not isinstance(response, Mapping) or "acknowledged" not in response:
+        raise _configuration_error(f"INDEX_RESPONSE_INVALID: Elasticsearch {operation} response is incomplete")
+    acknowledged = response.get("acknowledged")
+    if acknowledged is False:
+        raise RecordedVideoError(
+            ErrorCode.ES_TIMEOUT,
+            retryable=True,
+            message=f"ES_TIMEOUT: Elasticsearch did not acknowledge {operation}",
+        )
+    if acknowledged is not True:
         raise _configuration_error(f"INDEX_NOT_ACKNOWLEDGED: Elasticsearch did not acknowledge {operation}")
 
 
