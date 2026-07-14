@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -104,8 +105,33 @@ async def test_startup_finalizes_crashed_cancel_and_rolls_back_only_that_attempt
     attempt_dir.mkdir(parents=True, exist_ok=True)
     orphan_tmp = attempt_dir / ".crashed.tmp"
     orphan_tmp.write_bytes(b"partial")
-    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
-    clock[0] += timedelta(seconds=31)
+    orphan_image = attempt_dir / "frame.tmp.jpg"
+    orphan_image.write_bytes(b"partial-image")
+    orphan_video = attempt_dir / "clip.tmp.mp4"
+    orphan_video.write_bytes(b"partial-video")
+    referenced_tmp = attempt_dir / "referenced.tmp.jpg"
+    referenced_tmp.write_bytes(b"referenced")
+    final_output = attempt_dir / "final.jpg"
+    final_output.write_bytes(b"final")
+    (attempt_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "stages": {
+                    "extracting": {
+                        "output": {
+                            "artifacts": {
+                                "derived/pipeline-v1/attempts/1/referenced.tmp.jpg": {},
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    other_attempt_tmp = store.root / "assets/asset-1/derived/pipeline-v1/attempts/2/keep.tmp.mp4"
+    other_attempt_tmp.parent.mkdir(parents=True)
+    other_attempt_tmp.write_bytes(b"other-attempt")
     pipeline = _pipeline(repository, store, projection=projection, clock=clock)
     worker = RecordedVideoWorker(
         repository=repository,
@@ -116,14 +142,235 @@ async def test_startup_finalizes_crashed_cancel_and_rolls_back_only_that_attempt
         clock=lambda: clock[0],
     )
 
+    # Complete startup recovery before the cancellation becomes reclaimable.
     assert await worker.run_once() is None
+    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+    clock[0] += timedelta(seconds=31)
 
+    cancelled = await worker.run_once()
+
+    assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
     assert (await repository.get_job(claimed.job_id)).status is JobStatus.CANCELLED
     assert (await repository.get_asset(claimed.asset_id)).status is AssetStatus.READY
     assert projection.documents == {}
     assert projection.deleted_projections == [(claimed.asset_id, claimed.job_id, claimed.attempt)]
     assert not orphan_tmp.exists()
+    assert not orphan_image.exists()
+    assert not orphan_video.exists()
+    assert referenced_tmp.read_bytes() == b"referenced"
+    assert final_output.read_bytes() == b"final"
+    assert other_attempt_tmp.read_bytes() == b"other-attempt"
     assert (store.root / "assets/asset-1/source/original.mp4").is_file()
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_claim_is_exclusive_and_keeps_the_original_attempt(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, _store, claimed = await _claimed_job(tmp_path, clock)
+    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+    clock[0] += timedelta(seconds=31)
+    contender = type(repository)(
+        repository.database_path,
+        lease_seconds=30,
+        clock=lambda: clock[0],
+    )
+
+    first, second = await asyncio.gather(
+        repository.claim_due_job("cleanup-owner-1", clock[0]),
+        contender.claim_due_job("cleanup-owner-2", clock[0]),
+    )
+
+    cleanup_claims = [job for job in (first, second) if job is not None]
+    assert len(cleanup_claims) == 1
+    assert cleanup_claims[0].status is JobStatus.RUNNING
+    assert cleanup_claims[0].attempt == claimed.attempt
+    assert cleanup_claims[0].lease_owner in {"cleanup-owner-1", "cleanup-owner-2"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_remains_reclaimable_after_lease_expiry(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, claimed = await _claimed_job(tmp_path, clock)
+    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+    clock[0] += timedelta(seconds=31)
+
+    class FailsFirstCleanupProjection(FakeProjectionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_failures = 1
+
+        async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+            if self.cleanup_failures:
+                self.cleanup_failures -= 1
+                raise RuntimeError("cleanup unavailable")
+            await super().delete_projection(asset_id, job_id, attempt)
+
+    projection = FailsFirstCleanupProjection()
+    pipeline = _pipeline(repository, store, projection=projection, clock=clock)
+    first_worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=pipeline,
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+    )
+
+    assert await first_worker.run_once() is None
+    after_failure = await repository.get_job(claimed.job_id)
+    assert after_failure.status is JobStatus.RUNNING
+    assert after_failure.attempt == claimed.attempt
+    assert after_failure.lease_owner is not None
+
+    clock[0] += timedelta(seconds=31)
+    restarted_worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=pipeline,
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+    )
+    cancelled = await restarted_worker.run_once()
+
+    assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
+    assert cancelled.attempt == claimed.attempt
+    assert (await repository.get_job(claimed.job_id)).status is JobStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_renewal_cancel_race_runs_cleanup_and_finishes_cancel(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, _store, claimed = await _claimed_job(tmp_path, clock)
+    await repository.release_claim(
+        claimed.job_id,
+        claimed.lease_owner or "",
+        attempt=claimed.attempt,
+        now=clock[0],
+    )
+    pipeline_started = asyncio.Event()
+    cleanup_calls: list[tuple[str, int]] = []
+
+    class BlockedPipeline:
+        async def run(self, job):
+            pipeline_started.set()
+            await asyncio.Event().wait()
+
+        async def cleanup_after_cancel(self, job) -> None:
+            cleanup_calls.append((job.job_id, job.attempt))
+
+    cancel_sent = False
+
+    async def renewal_barrier(_seconds: float) -> None:
+        nonlocal cancel_sent
+        await pipeline_started.wait()
+        if not cancel_sent:
+            cancel_sent = True
+            await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=BlockedPipeline(),
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+        wait=renewal_barrier,
+    )
+
+    result = await worker.run_once()
+
+    assert result is not None and result.status is JobStatus.CANCELLED
+    assert cleanup_calls == [(claimed.job_id, claimed.attempt)]
+
+
+@pytest.mark.asyncio
+async def test_projection_replay_keeps_stable_visible_segment_documents(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, first_attempt = await _claimed_job(tmp_path, clock)
+
+    class CrashesAfterProjection(FakeProjectionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.crash_after_projection = True
+            self.fail_cleanup = True
+
+        async def project(self, documents, *, job_id=None, attempt=None):
+            result = await super().project(documents, job_id=job_id, attempt=attempt)
+            if self.crash_after_projection:
+                self.crash_after_projection = False
+                raise RuntimeError("crash after projection")
+            return result
+
+        async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+            if self.fail_cleanup:
+                self.fail_cleanup = False
+                raise RuntimeError("process died before projection rollback")
+            await super().delete_projection(asset_id, job_id, attempt)
+
+    projection = CrashesAfterProjection()
+    pipeline = _pipeline(
+        repository,
+        store,
+        projection=projection,
+        segmenter=FixedDurationSegmenter(2),
+        clock=clock,
+    )
+
+    with pytest.raises(RuntimeError, match="crash after projection"):
+        await pipeline.run(first_attempt)
+    first_ids = set(projection.documents)
+    assert len(first_ids) == 3
+    assert {document["job_attempt"] for document in projection.documents.values()} == {first_attempt.attempt}
+
+    clock[0] += timedelta(seconds=31)
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=pipeline,
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+    )
+    result = await worker.run_once()
+
+    assert result is not None and result.status is JobStatus.COMPLETED
+    assert set(projection.documents) == first_ids
+    assert len(projection.documents) == len(await repository.list_segments(first_attempt.asset_id)) == 3
+    assert {document["job_attempt"] for document in projection.documents.values()} == {first_attempt.attempt + 1}
+    assert {document["readiness"]["attempt"] for document in projection.documents.values()} == {
+        first_attempt.attempt + 1
+    }
+    assert len(projection.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_deletion_requested_cancel_never_restores_ready_or_read_facade(tmp_path: Path) -> None:
+    clock = [NOW]
+    repository, store, claimed = await _claimed_job(tmp_path, clock)
+    await repository.start_pipeline(claimed)
+    _asset, running = await repository.prepare_asset_deletion(
+        claimed.asset_id,
+        clock[0] + timedelta(seconds=1),
+    )
+    assert running is True
+    clock[0] += timedelta(seconds=31)
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=_pipeline(repository, store, clock=clock),
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+    )
+
+    cancelled = await worker.run_once()
+
+    assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
+    assert (await repository.get_asset(claimed.asset_id)).status is not AssetStatus.READY
+    assert await repository.list_ready_assets() == []
+    await repository.finalize_asset_deletion(claimed.asset_id, clock[0] + timedelta(seconds=1))
+    assert (await repository.get_asset(claimed.asset_id)).status is AssetStatus.DELETED
 
 
 @pytest.mark.asyncio

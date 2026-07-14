@@ -813,7 +813,9 @@ class RecordedVideoPipeline:
         ).resolve()
         if attempt_dir.is_relative_to(asset_root) and attempt_dir.is_dir():
             referenced = self._referenced_artifacts(attempt_dir, asset_root)
-            for candidate in attempt_dir.rglob("*.tmp"):
+            for candidate in attempt_dir.rglob("*"):
+                if ".tmp" not in candidate.suffixes:
+                    continue
                 resolved = candidate.resolve()
                 if resolved.is_file() and resolved.is_relative_to(attempt_dir) and resolved not in referenced:
                     resolved.unlink()

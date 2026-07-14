@@ -1030,7 +1030,7 @@ async def test_checkpoint_rejects_content_conflicts_and_stage_regression(repo: J
 
 
 @pytest.mark.asyncio
-async def test_identical_older_checkpoint_replay_finalizes_cancel_without_stage_regression(repo: JobRepository):
+async def test_identical_older_checkpoint_replay_preserves_cancel_cleanup_and_stage(repo: JobRepository):
     await _ready_job(repo)
     claimed = await repo.claim_due_job("worker-1", NOW)
     assert claimed is not None
@@ -1044,9 +1044,15 @@ async def test_identical_older_checkpoint_replay_finalizes_cancel_without_stage_
 
     await repo.checkpoint_step(claimed, probing)
 
-    stored = _fetch_one(repo.database_path, "SELECT status, stage FROM jobs WHERE job_id = ?", (claimed.job_id,))
-    assert stored["status"] == JobStatus.CANCELLED.value
+    stored = _fetch_one(
+        repo.database_path,
+        "SELECT status, stage, cancel_requested, lease_owner FROM jobs WHERE job_id = ?",
+        (claimed.job_id,),
+    )
+    assert stored["status"] == JobStatus.RUNNING.value
     assert stored["stage"] == JobStage.ANALYZING.value
+    assert stored["cancel_requested"] == 1
+    assert stored["lease_owner"] == claimed.lease_owner
 
 
 @pytest.mark.asyncio
@@ -1176,29 +1182,49 @@ async def test_cancel_is_immediate_when_queued_and_deferred_to_running_checkpoin
         claimed,
         JobStep(job_id=claimed.job_id, stage=JobStage.PROBING, status=JobStatus.RUNNING),
     )
-    row = _fetch_one(repo.database_path, "SELECT status, lease_owner FROM jobs WHERE job_id = ?", (running.job_id,))
-    assert row["status"] == JobStatus.CANCELLED.value
-    assert row["lease_owner"] is None
+    row = _fetch_one(
+        repo.database_path,
+        "SELECT status, cancel_requested, lease_owner FROM jobs WHERE job_id = ?",
+        (running.job_id,),
+    )
+    assert row["status"] == JobStatus.RUNNING.value
+    assert row["cancel_requested"] == 1
+    assert row["lease_owner"] == claimed.lease_owner
 
 
 @pytest.mark.asyncio
-async def test_cancel_request_is_finalized_when_the_running_worker_lease_expires(repo: JobRepository):
+async def test_cancel_cleanup_is_reclaimed_when_the_running_worker_lease_expires(repo: JobRepository):
     running = await _ready_job(repo)
     claimed = await repo.claim_due_job("worker-1", NOW)
     assert claimed is not None
     requested = await repo.request_cancel(running.job_id, NOW + timedelta(seconds=1))
     assert requested.status is JobStatus.RUNNING
 
-    assert await repo.claim_due_job("worker-2", NOW + timedelta(seconds=30)) is None
+    cleanup_claim = await repo.claim_due_job("worker-2", NOW + timedelta(seconds=30))
 
-    row = _fetch_one(
-        repo.database_path,
-        "SELECT status, cancel_requested, lease_owner FROM jobs WHERE job_id = ?",
-        (running.job_id,),
-    )
-    assert row["status"] == JobStatus.CANCELLED.value
-    assert row["cancel_requested"] == 0
-    assert row["lease_owner"] is None
+    assert cleanup_claim is not None
+    assert cleanup_claim.status is JobStatus.RUNNING
+    assert cleanup_claim.attempt == claimed.attempt
+    assert cleanup_claim.lease_owner == "worker-2"
+    cancelled = await repo.finish_cancel(cleanup_claim, NOW + timedelta(seconds=31))
+    assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_claim_is_prioritized_without_claiming_queued_sibling(repo: JobRepository):
+    cleanup_job = await _ready_job(repo, "cleanup-asset")
+    active = await repo.claim_due_job("worker-1", NOW)
+    assert active is not None and active.job_id == cleanup_job.job_id
+    await repo.request_cancel(cleanup_job.job_id, NOW + timedelta(seconds=1))
+    queued = await _ready_job(repo, "queued-asset")
+
+    cleanup_claim = await repo.claim_due_job("cleanup-owner", NOW + timedelta(seconds=30))
+
+    assert cleanup_claim is not None and cleanup_claim.job_id == cleanup_job.job_id
+    queued_after_claim = await repo.get_job(queued.job_id)
+    assert queued_after_claim.status is JobStatus.QUEUED
+    assert queued_after_claim.attempt == 0
+    assert queued_after_claim.lease_owner is None
 
 
 @pytest.mark.asyncio

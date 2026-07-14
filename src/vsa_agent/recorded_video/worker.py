@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 from vsa_agent.config import AppConfig, validate_recorded_video_runtime
 from vsa_agent.recorded_video.errors import LeaseLostError, RecordedVideoError
-from vsa_agent.recorded_video.models import Job, JobStatus
+from vsa_agent.recorded_video.models import Job
 from vsa_agent.recorded_video.pipeline import PipelineCancelled
 
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
@@ -98,8 +98,6 @@ class RecordedVideoWorker:
         self._output = output or print
         self._worker_id = worker_id or str(uuid.uuid4())
         self._semaphore = asyncio.Semaphore(worker_concurrency)
-        self._recovery_lock = asyncio.Lock()
-        self._recovery_complete = False
         self._stopping = asyncio.Event()
         self._active_jobs: dict[str, tuple[str, int]] = {}
 
@@ -130,7 +128,6 @@ class RecordedVideoWorker:
         async with self._semaphore:
             if self._stopping.is_set():
                 return None
-            await self._recover_once()
             owner = f"{self._worker_id}:{uuid.uuid4()}"
             job = await self._repository.claim_due_job(owner, self._now())
             if job is None:
@@ -180,24 +177,6 @@ class RecordedVideoWorker:
                 return result
             finally:
                 self._active_jobs.pop(job.job_id, None)
-
-    async def _recover_once(self) -> None:
-        if self._recovery_complete:
-            return
-        async with self._recovery_lock:
-            if self._recovery_complete:
-                return
-            recover = getattr(self._repository, "recover_expired_jobs", None)
-            recovered: list[Job] = [] if recover is None else list(await recover(self._now()))
-            for job in recovered:
-                if job.status is JobStatus.CANCELLED:
-                    cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
-                    if cleanup is not None:
-                        await cleanup(job)
-                event = "job.cancelled" if job.status is JobStatus.CANCELLED else "job.recovered"
-                self._emit_job(event, job)
-            self._recovery_complete = True
-            self._emit("worker.recovery_complete", recovered_jobs=len(recovered))
 
     async def run_until_idle(self) -> list[object | Job]:
         """Drain all jobs currently claimable without polling or sleeping."""
@@ -251,6 +230,12 @@ class RecordedVideoWorker:
                 raise RuntimeError("lease renewal stopped before the pipeline completed")
             pipeline_task.cancel()
             await asyncio.gather(pipeline_task, return_exceptions=True)
+            if isinstance(renewal_error, LeaseLostError) and await self._cancel_requested(job):
+                cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
+                if cleanup is None:
+                    raise renewal_error
+                await cleanup(job)
+                raise PipelineCancelled(job)
             raise renewal_error
         finally:
             for task in (pipeline_task, renewal_task):
@@ -271,6 +256,15 @@ class RecordedVideoWorker:
                 attempt=job.attempt,
             )
             self._emit_job("job.heartbeat", renewed)
+
+    async def _cancel_requested(self, job: Job) -> bool:
+        check = getattr(self._repository, "is_cancel_requested", None)
+        if check is None:
+            return False
+        try:
+            return bool(await check(job, self._now()))
+        except LeaseLostError:
+            return False
 
     async def _record_failure(self, job: Job, error_code: str, *, retryable: bool) -> Job | None:
         owner = job.lease_owner

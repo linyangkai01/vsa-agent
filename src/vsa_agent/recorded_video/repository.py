@@ -871,6 +871,10 @@ class JobRepository:
                 """
                 SELECT * FROM assets
                 WHERE status = ? AND deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM asset_deletion_requests
+                        WHERE asset_deletion_requests.asset_id = assets.asset_id
+                    )
                 ORDER BY created_at, asset_id
                 """,
                 (AssetStatus.READY.value,),
@@ -1258,7 +1262,7 @@ class JobRepository:
             SET status = CASE
                     WHEN cancel_requested = 1
                         OR asset_id IN (SELECT asset_id FROM asset_deletion_requests)
-                    THEN ? ELSE ?
+                    THEN 'running' ELSE 'queued'
                 END,
                 next_run_at = CASE
                     WHEN cancel_requested = 1
@@ -1266,13 +1270,16 @@ class JobRepository:
                     THEN NULL ELSE ?
                 END,
                 lease_owner = NULL, lease_until = NULL, heartbeat_at = NULL,
-                cancel_requested = 0, updated_at = ?
+                cancel_requested = CASE
+                    WHEN cancel_requested = 1
+                        OR asset_id IN (SELECT asset_id FROM asset_deletion_requests)
+                    THEN 1 ELSE 0
+                END,
+                updated_at = ?
             WHERE status = ? AND lease_until IS NOT NULL AND lease_until <= ?
             RETURNING *
             """,
             (
-                JobStatus.CANCELLED.value,
-                JobStatus.QUEUED.value,
                 recovered_iso,
                 recovered_iso,
                 JobStatus.RUNNING.value,
@@ -1283,16 +1290,6 @@ class JobRepository:
             rows = list(await cursor.fetchall())
         finally:
             await cursor.close()
-        for row in rows:
-            if row["status"] != JobStatus.CANCELLED.value:
-                continue
-            await connection.execute(
-                """
-                UPDATE assets SET status = ?, updated_at = ?
-                WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
-                """,
-                (AssetStatus.READY.value, recovered_iso, row["asset_id"], row["job_id"]),
-            )
         return rows
 
     async def claim_due_job(self, owner: str, now: datetime) -> Job | None:
@@ -1303,30 +1300,46 @@ class JobRepository:
         claimed_iso = _to_iso(claimed_at)
         lease_until = _to_iso(claimed_at + timedelta(seconds=self.lease_seconds))
         due = """
-            status = 'queued'
-            AND (next_run_at IS NULL OR next_run_at <= :now)
-            AND asset_id NOT IN (SELECT asset_id FROM asset_deletion_requests)
+            (
+                (
+                    status = 'running'
+                    AND cancel_requested = 1
+                    AND (lease_until IS NULL OR lease_until <= :now)
+                )
+                OR (
+                    status = 'queued'
+                    AND (next_run_at IS NULL OR next_run_at <= :now)
+                    AND asset_id NOT IN (SELECT asset_id FROM asset_deletion_requests)
+                )
+            )
         """
         sql = f"""
             UPDATE jobs
-            SET status = CASE WHEN cancel_requested = 1 THEN :cancelled ELSE :running END,
-                attempt = CASE WHEN cancel_requested = 1 THEN attempt ELSE attempt + 1 END,
-                lease_owner = CASE WHEN cancel_requested = 1 THEN NULL ELSE :owner END,
-                lease_until = CASE WHEN cancel_requested = 1 THEN NULL ELSE :lease_until END,
-                heartbeat_at = CASE WHEN cancel_requested = 1 THEN NULL ELSE :now END,
-                cancel_requested = 0,
+            SET status = :running,
+                attempt = CASE
+                    WHEN status = 'running' AND cancel_requested = 1 THEN attempt
+                    ELSE attempt + 1
+                END,
+                lease_owner = :owner,
+                lease_until = :lease_until,
+                heartbeat_at = :now,
+                cancel_requested = CASE
+                    WHEN status = 'running' AND cancel_requested = 1 THEN 1
+                    ELSE 0
+                END,
                 updated_at = :now
             WHERE job_id = (
                 SELECT job_id FROM jobs
                 WHERE {due}
-                ORDER BY COALESCE(next_run_at, lease_until, created_at), created_at, job_id
+                ORDER BY
+                    CASE WHEN status = 'running' AND cancel_requested = 1 THEN 0 ELSE 1 END,
+                    COALESCE(next_run_at, lease_until, created_at), created_at, job_id
                 LIMIT 1
             )
             AND {due}
             RETURNING *
         """
         parameters = {
-            "cancelled": JobStatus.CANCELLED.value,
             "running": JobStatus.RUNNING.value,
             "owner": owner,
             "lease_until": lease_until,
@@ -1350,7 +1363,7 @@ class JobRepository:
                 ),
             )
             row = await self._fetchone(connection, sql, parameters)
-            if row is None or row["status"] == JobStatus.CANCELLED.value:
+            if row is None:
                 return None
             return self._row_to_job(row)
 
@@ -1489,18 +1502,7 @@ class JobRepository:
                         step.elapsed_ms,
                     ),
                 )
-            if current["cancel_requested"]:
-                persisted_stage = current["stage"] if existing is not None else step.stage.value
-                await connection.execute(
-                    """
-                    UPDATE jobs
-                    SET status = ?, stage = ?, lease_owner = NULL, lease_until = NULL,
-                        heartbeat_at = NULL, cancel_requested = 0, updated_at = ?
-                    WHERE job_id = ?
-                    """,
-                    (JobStatus.CANCELLED.value, persisted_stage, _to_iso(checkpoint_at), job.job_id),
-                )
-            elif existing is None:
+            if existing is None:
                 await connection.execute(
                     "UPDATE jobs SET stage = ?, updated_at = ? WHERE job_id = ?",
                     (step.stage.value, _to_iso(checkpoint_at), job.job_id),
@@ -1860,6 +1862,10 @@ class JobRepository:
                 """
                 UPDATE assets SET status = ?, updated_at = ?
                 WHERE asset_id = ? AND current_job_id = ? AND deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM asset_deletion_requests
+                        WHERE asset_deletion_requests.asset_id = assets.asset_id
+                    )
                 """,
                 (AssetStatus.READY.value, cancelled_iso, job.asset_id, job.job_id),
             )
@@ -1937,11 +1943,10 @@ class JobRepository:
             UPDATE jobs
             SET status = CASE
                     WHEN status = 'queued' THEN 'cancelled'
-                    WHEN status = 'running' AND (lease_until IS NULL OR lease_until <= ?) THEN 'cancelled'
                     ELSE status
                 END,
                 cancel_requested = CASE
-                    WHEN status = 'running' AND lease_until > ? THEN 1
+                    WHEN status = 'running' THEN 1
                     ELSE 0
                 END,
                 lease_owner = CASE
@@ -1962,7 +1967,7 @@ class JobRepository:
                 updated_at = ?
             WHERE ({target_predicate}) AND status IN ('queued', 'running')
             """,
-            (now_iso, now_iso, now_iso, now_iso, now_iso, now_iso, *target_parameters),
+            (now_iso, now_iso, now_iso, now_iso, *target_parameters),
         )
 
     @classmethod
