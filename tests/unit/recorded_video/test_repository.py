@@ -802,6 +802,29 @@ async def test_claim_recovers_expired_lease_and_rejects_naive_clock(repo: JobRep
 
 
 @pytest.mark.asyncio
+async def test_release_claim_is_fenced_promptly_reclaimable_and_does_not_consume_attempt(
+    repo: JobRepository,
+) -> None:
+    await _ready_job(repo)
+    claimed = await repo.claim_due_job("worker-stopping", NOW)
+    assert claimed is not None and claimed.attempt == 1
+
+    released = await repo.release_claim(
+        claimed.job_id,
+        "worker-stopping",
+        attempt=claimed.attempt,
+        now=NOW + timedelta(seconds=1),
+    )
+    reclaimed = await repo.claim_due_job("worker-ready", NOW + timedelta(seconds=1))
+
+    assert released.status is JobStatus.RETRY_WAIT
+    assert released.attempt == 0
+    assert released.next_run_at == NOW + timedelta(seconds=1)
+    assert reclaimed is not None and reclaimed.attempt == claimed.attempt
+    assert reclaimed.lease_owner == "worker-ready"
+
+
+@pytest.mark.asyncio
 async def test_renew_lease_checks_owner_and_updates_heartbeat(repo: JobRepository):
     await _ready_job(repo)
     claimed = await repo.claim_due_job("worker-1", NOW)

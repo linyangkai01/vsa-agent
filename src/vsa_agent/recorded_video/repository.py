@@ -15,6 +15,7 @@ from typing import Any
 import aiosqlite
 from pydantic import TypeAdapter
 
+from vsa_agent.recorded_video.errors import LeaseLostError
 from vsa_agent.recorded_video.models import (
     Asset,
     AssetStatus,
@@ -1339,6 +1340,46 @@ class JobRepository:
             await self._raise_lease_error(connection, job_id, owner, attempt, renewed_at)
             raise AssertionError("unreachable")
 
+    async def release_claim(
+        self,
+        job_id: str,
+        owner: str,
+        *,
+        attempt: int,
+        now: datetime,
+    ) -> Job:
+        """Undo a claim that stopped before execution while fencing its exact lease."""
+        released_at = _require_aware(now, "now")
+        released_iso = _to_iso(released_at)
+
+        async with self._write_transaction() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                UPDATE jobs
+                SET status = ?, attempt = attempt - 1, next_run_at = ?,
+                    lease_owner = NULL, lease_until = NULL, heartbeat_at = NULL,
+                    updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ?
+                    AND attempt > 0 AND lease_until > ? AND cancel_requested = 0
+                RETURNING *
+                """,
+                (
+                    JobStatus.RETRY_WAIT.value,
+                    released_iso,
+                    released_iso,
+                    job_id,
+                    JobStatus.RUNNING.value,
+                    owner,
+                    attempt,
+                    released_iso,
+                ),
+            )
+            if row is not None:
+                return self._row_to_job(row)
+            await self._raise_lease_error(connection, job_id, owner, attempt, released_at)
+            raise AssertionError("unreachable")
+
     async def checkpoint_step(self, job: Job, step: JobStep) -> None:
         if step.job_id != job.job_id:
             raise ValueError("job and checkpoint must refer to the same job_id")
@@ -1834,20 +1875,20 @@ class JobRepository:
         if current is None:
             raise KeyError(f"unknown job: {job.job_id}")
         if current["asset_id"] != job.asset_id:
-            raise PermissionError("leased job asset identity does not match")
+            raise LeaseLostError("leased job asset identity does not match")
         if current["pipeline_version"] != job.pipeline_version:
-            raise PermissionError("leased job pipeline identity does not match")
+            raise LeaseLostError("leased job pipeline identity does not match")
         if current["asset_current_job_id"] != job.job_id or current["asset_deleted_at"] is not None:
-            raise PermissionError("asset current job does not match leased job")
+            raise LeaseLostError("asset current job does not match leased job")
         if current["lease_owner"] != job.lease_owner:
-            raise PermissionError("job has no active lease: lease owner does not match")
+            raise LeaseLostError("job has no active lease: lease owner does not match")
         if current["attempt"] != job.attempt:
-            raise PermissionError("job has no active lease: job attempt does not match")
+            raise LeaseLostError("job has no active lease: job attempt does not match")
         lease_until = _from_iso(current["lease_until"])
         if current["status"] != JobStatus.RUNNING.value or lease_until is None or lease_until <= now:
-            raise PermissionError("job has no active lease")
+            raise LeaseLostError("job has no active lease")
         if current["cancel_requested"] and not allow_cancel_requested:
-            raise PermissionError("job cancellation requested")
+            raise LeaseLostError("job cancellation requested")
         return current
 
     @classmethod
@@ -1863,15 +1904,15 @@ class JobRepository:
         if current is None:
             raise KeyError(f"unknown job: {job_id}")
         if current["lease_owner"] != owner:
-            raise PermissionError("lease owner does not match")
+            raise LeaseLostError("lease owner does not match")
         if current["attempt"] != attempt:
-            raise PermissionError("job attempt does not match")
+            raise LeaseLostError("job attempt does not match")
         lease_until = _from_iso(current["lease_until"])
         if current["status"] != JobStatus.RUNNING.value or lease_until is None or lease_until <= now:
-            raise PermissionError("job has no active lease")
+            raise LeaseLostError("job has no active lease")
         if current["cancel_requested"]:
-            raise PermissionError("job cancellation requested")
-        raise PermissionError("job has no active lease")
+            raise LeaseLostError("job cancellation requested")
+        raise LeaseLostError("job has no active lease")
 
     @staticmethod
     def _asset_parameters(asset: Asset) -> tuple[Any, ...]:

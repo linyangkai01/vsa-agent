@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vsa_agent.config import AppConfig, validate_recorded_video_runtime
-from vsa_agent.recorded_video.errors import RecordedVideoError
+from vsa_agent.recorded_video.errors import LeaseLostError, RecordedVideoError
 from vsa_agent.recorded_video.models import Job
 
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
@@ -25,6 +25,15 @@ class WorkerRepository(Protocol):
     async def claim_due_job(self, owner: str, now: datetime) -> Job | None: ...
 
     async def renew_lease(self, job_id: str, owner: str, now: datetime, *, attempt: int) -> Job: ...
+
+    async def release_claim(
+        self,
+        job_id: str,
+        owner: str,
+        *,
+        attempt: int,
+        now: datetime,
+    ) -> Job: ...
 
     async def schedule_retry(
         self,
@@ -67,6 +76,7 @@ class RecordedVideoWorker:
         max_attempts: int,
         clock: Callable[[], datetime] | None = None,
         wait: Callable[[float], Awaitable[None]] | None = None,
+        heartbeat_wait: Callable[[float], Awaitable[None]] | None = None,
         output: Callable[[str], None] | None = None,
         worker_id: str | None = None,
     ) -> None:
@@ -83,6 +93,7 @@ class RecordedVideoWorker:
         self._max_attempts = max_attempts
         self._clock = clock or (lambda: datetime.now(UTC))
         self._wait = wait or asyncio.sleep
+        self._heartbeat_wait = heartbeat_wait or self._wait
         self._output = output or print
         self._worker_id = worker_id or str(uuid.uuid4())
         self._semaphore = asyncio.Semaphore(worker_concurrency)
@@ -122,14 +133,29 @@ class RecordedVideoWorker:
                 return None
             if job.lease_owner != owner:
                 raise RuntimeError("repository returned a claim with a different lease owner")
+            if self._stopping.is_set():
+                try:
+                    await self._repository.release_claim(
+                        job.job_id,
+                        owner,
+                        attempt=job.attempt,
+                        now=self._now(),
+                    )
+                except LeaseLostError:
+                    self._emit_job("job.lease_lost", job, error_code="LEASE_LOST")
+                else:
+                    self._emit_job("job.claim_released", job)
+                return None
             self._active_jobs[job.job_id] = (owner, job.attempt)
             self._emit_job("job.claimed", job)
             try:
+                if job.attempt > self._max_attempts:
+                    return await self._record_failure(job, "MAX_ATTEMPTS", retryable=False)
                 result = await self._run_with_renewal(job)
             except asyncio.CancelledError:
                 self._emit_job("job.interrupted", job, error_code="WORKER_CANCELLED")
                 raise
-            except PermissionError:
+            except LeaseLostError:
                 self._emit_job("job.lease_lost", job, error_code="LEASE_LOST")
                 return None
             except RecordedVideoError as exc:
@@ -137,7 +163,7 @@ class RecordedVideoWorker:
             except Exception:
                 return await self._record_failure(job, "UNEXPECTED", retryable=False)
             else:
-                self._emit_job("job.completed", job)
+                self._emit_job("job.completed", await self._latest_job_for_event(job))
                 return result
             finally:
                 self._active_jobs.pop(job.job_id, None)
@@ -163,23 +189,20 @@ class RecordedVideoWorker:
     async def run(self) -> None:
         """Run until stopped, waiting between idle claim cycles without busy looping."""
         self.readiness()
-        heartbeat_interval = max(1, self._lease_sec // 3)
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             while not self._stopping.is_set():
                 await self.run_until_idle()
                 if self._stopping.is_set():
                     break
-                self._emit(
-                    "worker.heartbeat",
-                    ready=True,
-                    active_jobs=self.active_jobs,
-                    worker_concurrency=self._worker_concurrency,
-                )
-                await self._wait_or_stop(heartbeat_interval)
+                await self._wait_or_stop(self._heartbeat_interval, waiter=self._wait)
         except asyncio.CancelledError:
             self.stop()
             raise
         finally:
+            if not heartbeat_task.done():
+                heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
             self._emit("worker.stopped", ready=False, active_jobs=self.active_jobs)
 
     async def _run_with_renewal(self, job: Job) -> object:
@@ -205,31 +228,25 @@ class RecordedVideoWorker:
             await asyncio.gather(pipeline_task, renewal_task, return_exceptions=True)
 
     async def _renew_lease(self, job: Job) -> None:
-        interval = max(1, self._lease_sec // 3)
         owner = job.lease_owner
         if owner is None:
-            raise PermissionError("claimed job has no lease owner")
+            raise RuntimeError("repository returned a claimed job without a lease owner")
         while True:
-            await self._wait(interval)
-            await self._repository.renew_lease(
+            await self._wait(self._renewal_interval)
+            renewed = await self._repository.renew_lease(
                 job.job_id,
                 owner,
                 self._now(),
                 attempt=job.attempt,
             )
-            self._emit_job("job.heartbeat", job)
+            self._emit_job("job.heartbeat", renewed)
 
     async def _record_failure(self, job: Job, error_code: str, *, retryable: bool) -> Job | None:
         owner = job.lease_owner
         if owner is None:
             return None
         now = self._now()
-        event_job = job
-        try:
-            current = await self._repository.get_job(job.job_id)
-            event_job = job.model_copy(update={"stage": current.stage})
-        except (KeyError, OSError):
-            pass
+        event_job = await self._latest_job_for_event(job)
         try:
             if retryable and job.attempt < self._max_attempts:
                 delay = _RETRY_BACKOFF_SECONDS[min(job.attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)]
@@ -252,12 +269,58 @@ class RecordedVideoWorker:
             )
             self._emit_job("job.failed", event_job, error_code=error_code)
             return result
-        except PermissionError:
+        except LeaseLostError:
             self._emit_job("job.lease_lost", event_job, error_code="LEASE_LOST")
             return None
 
-    async def _wait_or_stop(self, seconds: float) -> None:
-        wait_task = asyncio.create_task(self._wait(seconds))
+    @property
+    def _renewal_interval(self) -> float:
+        return max(0.05, self._lease_sec / 3)
+
+    @property
+    def _heartbeat_interval(self) -> float:
+        return self._renewal_interval
+
+    async def _heartbeat_loop(self) -> None:
+        while not self._stopping.is_set():
+            await self._wait_or_stop(self._heartbeat_interval, waiter=self._heartbeat_wait)
+            if self._stopping.is_set():
+                return
+            jobs = await self._active_job_snapshot()
+            self._emit(
+                "worker.heartbeat",
+                ready=True,
+                active_jobs=len(jobs),
+                worker_concurrency=self._worker_concurrency,
+                jobs=jobs,
+            )
+
+    async def _latest_job_for_event(self, job: Job) -> Job:
+        try:
+            current = await self._repository.get_job(job.job_id)
+        except (KeyError, OSError):
+            return job
+        return job.model_copy(update={"stage": current.stage})
+
+    async def _active_job_snapshot(self) -> list[dict[str, Any]]:
+        snapshot: list[dict[str, Any]] = []
+        for job_id, (_, attempt) in list(self._active_jobs.items()):
+            stage = None
+            try:
+                current = await self._repository.get_job(job_id)
+                stage = current.stage.value if current.stage is not None else None
+            except (KeyError, OSError):
+                pass
+            snapshot.append({"job_id": job_id, "attempt": attempt, "stage": stage})
+        return snapshot
+
+    async def _wait_or_stop(
+        self,
+        seconds: float,
+        *,
+        waiter: Callable[[float], Awaitable[None]],
+    ) -> None:
+        wait_task = asyncio.create_task(waiter(seconds))
         stop_task = asyncio.create_task(self._stopping.wait())
         try:
             await asyncio.wait({wait_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)

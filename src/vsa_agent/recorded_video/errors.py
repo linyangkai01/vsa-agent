@@ -54,6 +54,10 @@ class RecordedVideoError(Exception):
         super().__init__(message or self.code.value)
 
 
+class LeaseLostError(PermissionError):
+    """A repository fencing check rejected a stale leased attempt."""
+
+
 class InvalidStateTransition(Exception):  # noqa: N818 - public name is part of the domain contract
     def __init__(self, source: Any, target: Any) -> None:
         self.source = source
