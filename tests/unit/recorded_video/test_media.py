@@ -106,6 +106,7 @@ class FakeAsyncProcess:
         terminate_error: BaseException | None = None,
         kill_error: BaseException | None = None,
         wait_effects: list[int | BaseException] | None = None,
+        wait_block: bool = False,
     ) -> None:
         self.stdout = stdout
         self.stderr = stderr
@@ -115,6 +116,7 @@ class FakeAsyncProcess:
         self.terminate_error = terminate_error
         self.kill_error = kill_error
         self.wait_effects = list(wait_effects or [])
+        self.wait_block = wait_block
         self.communicate_started = asyncio.Event()
         self.terminate_calls = 0
         self.kill_calls = 0
@@ -147,6 +149,8 @@ class FakeAsyncProcess:
                 raise effect
             self.returncode = effect
             return effect
+        if self.wait_block:
+            await asyncio.Event().wait()
         self.returncode = -15
         return self.returncode
 
@@ -315,18 +319,22 @@ async def test_timeout_remains_primary_when_kill_or_final_wait_fails(
     process = FakeAsyncProcess(
         block=True,
         kill_error=OSError(errno.EIO, "private kill failure"),
-        wait_effects=[TimeoutError(), OSError(errno.EIO, "private wait failure")],
+        wait_block=True,
     )
 
     async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
         return process
 
     monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+    monkeypatch.setattr("vsa_agent.recorded_video.media._PROCESS_TERMINATION_TIMEOUT_SEC", 0.04)
+    started = asyncio.get_running_loop().time()
 
     with pytest.raises(RecordedVideoError) as timeout:
-        await MediaProcessor(timeout_sec=0.01).probe(source)
+        await asyncio.wait_for(MediaProcessor(timeout_sec=0.01).probe(source), timeout=0.3)
 
+    assert asyncio.get_running_loop().time() - started < 0.2
     assert timeout.value.code is ErrorCode.FFMPEG_TIMEOUT
+    assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert process.wait_calls == 2
 
@@ -340,20 +348,24 @@ async def test_cancellation_remains_primary_when_kill_and_wait_fail(
     process = FakeAsyncProcess(
         block=True,
         kill_error=OSError(errno.EIO, "private kill failure"),
-        wait_effects=[TimeoutError(), OSError(errno.EIO, "private wait failure")],
+        wait_block=True,
     )
 
     async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
         return process
 
     monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+    monkeypatch.setattr("vsa_agent.recorded_video.media._PROCESS_TERMINATION_TIMEOUT_SEC", 0.04)
     task = asyncio.create_task(MediaProcessor().probe(source))
     await process.communicate_started.wait()
 
+    started = asyncio.get_running_loop().time()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=0.3)
 
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert process.wait_calls == 2
 
@@ -368,18 +380,67 @@ async def test_communication_storage_error_remains_primary_when_cleanup_fails(
         block=True,
         communicate_error=PermissionError(errno.EACCES, "private communication failure"),
         terminate_error=OSError(errno.EIO, "private terminate failure"),
+        kill_error=RuntimeError("private kill failure"),
+        wait_block=True,
     )
 
     async def create_process(*_args: str, **_kwargs: Any) -> FakeAsyncProcess:
         return process
 
     monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.create_subprocess_exec", create_process)
+    monkeypatch.setattr("vsa_agent.recorded_video.media._PROCESS_TERMINATION_TIMEOUT_SEC", 0.04)
+    started = asyncio.get_running_loop().time()
 
     with pytest.raises(RecordedVideoError) as failure:
-        await MediaProcessor().probe(source)
+        await asyncio.wait_for(MediaProcessor().probe(source), timeout=0.3)
 
+    assert asyncio.get_running_loop().time() - started < 0.2
     assert failure.value.code is ErrorCode.CONFIGURATION
     assert "private" not in str(failure.value)
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
+
+
+async def test_terminate_process_bounds_kill_failure_and_pending_final_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeAsyncProcess(
+        block=True,
+        kill_error=RuntimeError("private kill failure"),
+        wait_block=True,
+    )
+    monkeypatch.setattr("vsa_agent.recorded_video.media._PROCESS_TERMINATION_TIMEOUT_SEC", 0.04)
+    started = asyncio.get_running_loop().time()
+
+    await asyncio.wait_for(MediaProcessor._terminate_process(process), timeout=0.3)
+
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
+
+
+async def test_terminate_process_kills_after_non_timeout_wait_error() -> None:
+    process = FakeAsyncProcess(
+        block=True,
+        wait_effects=[RuntimeError("private wait failure"), -9],
+    )
+
+    await MediaProcessor._terminate_process(process)
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
+
+
+async def test_terminate_process_does_not_signal_finished_process() -> None:
+    process = FakeAsyncProcess(returncode=0)
+
+    await MediaProcessor._terminate_process(process)
+
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
 
 
 async def test_default_runner_uses_distinct_probe_and_ffmpeg_timeouts(

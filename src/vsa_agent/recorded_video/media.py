@@ -312,32 +312,37 @@ class MediaProcessor:
 
     @staticmethod
     async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-        cleanup_errors: list[Exception] = []
-        if process.returncode is None:
+        if process.returncode is not None:
+            return
+
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        cleanup_deadline = started_at + _PROCESS_TERMINATION_TIMEOUT_SEC
+        terminate_wait_deadline = started_at + _PROCESS_TERMINATION_TIMEOUT_SEC / 2
+        cleanup_errors: list[BaseException] = []
+
+        async def bounded_wait(deadline: float) -> None:
+            timeout = max(0.0, deadline - loop.time())
             try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-            except Exception as error:
+                await asyncio.wait_for(process.wait(), timeout=timeout)
+            except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
+
         try:
-            await asyncio.wait_for(process.wait(), timeout=_PROCESS_TERMINATION_TIMEOUT_SEC)
-        except TimeoutError:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                except Exception as error:
-                    cleanup_errors.append(error)
-            try:
-                await process.wait()
-            except Exception as error:
-                cleanup_errors.append(error)
-        except Exception as error:
+            process.terminate()
+        except (Exception, asyncio.CancelledError) as error:
             cleanup_errors.append(error)
-        if cleanup_errors:
-            raise cleanup_errors[0]
+
+        await bounded_wait(terminate_wait_deadline)
+        if process.returncode is not None:
+            return
+
+        try:
+            process.kill()
+        except (Exception, asyncio.CancelledError) as error:
+            cleanup_errors.append(error)
+
+        await bounded_wait(cleanup_deadline)
 
     @staticmethod
     def _parse_probe(payload: Any) -> MediaProbe:
