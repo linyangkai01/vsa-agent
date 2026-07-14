@@ -11,44 +11,16 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import ValidationError
 
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Segment
+from vsa_agent.recorded_video.ports import Embedding, VisionDescription
 
 logger = logging.getLogger(__name__)
-
-Embedding = tuple[float, ...]
-
-
-class VisionDescription(BaseModel):
-    """Validated structured output returned by the vision model."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    description: str
-    tags: tuple[str, ...]
-
-    @field_validator("description")
-    @classmethod
-    def validate_description(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("description must not be blank")
-        return value
-
-    @field_validator("tags")
-    @classmethod
-    def validate_tags(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        normalized: list[str] = []
-        for value in values:
-            value = value.strip()
-            if not value:
-                raise ValueError("tags must not contain blank values")
-            normalized.append(value)
-        return tuple(normalized)
 
 
 class _OpenAIProvider:
@@ -66,8 +38,21 @@ class _OpenAIProvider:
             raise ValueError("timeout_sec must be positive")
         if concurrency <= 0:
             raise ValueError("concurrency must be positive")
-        if not base_url.strip():
-            raise ValueError("base_url must not be blank")
+        try:
+            endpoint = urlsplit(base_url)
+            hostname = endpoint.hostname
+            endpoint.port
+        except (TypeError, ValueError):
+            raise _configuration_error() from None
+        if (
+            endpoint.scheme not in {"http", "https"}
+            or not endpoint.netloc
+            or hostname is None
+            or not hostname.strip()
+            or endpoint.username is not None
+            or endpoint.password is not None
+        ):
+            raise _configuration_error()
         if not model.strip():
             raise ValueError("model must not be blank")
 
@@ -99,7 +84,8 @@ class _OpenAIProvider:
         payload: Mapping[str, Any],
         *,
         stage: str,
-        asset_id: str | None = None,
+        asset_id: str,
+        job_id: str,
     ) -> httpx.Response:
         headers = {"Content-Type": "application/json"}
         if self._api_key is not None:
@@ -131,12 +117,13 @@ class _OpenAIProvider:
             ) from None
         finally:
             logger.info(
-                "provider.request model=%s status=%s duration_ms=%d stage=%s asset_id=%s",
+                "provider.request model=%s status=%s duration_ms=%d stage=%s asset_id=%s job_id=%s",
                 self._model,
                 status,
                 round((time.monotonic() - started) * 1000),
                 stage,
-                asset_id or "-",
+                asset_id,
+                job_id,
             )
 
         if response.status_code == 429:
@@ -176,7 +163,13 @@ class _OpenAIProvider:
 class OpenAIVisionProvider(_OpenAIProvider):
     """Describe representative JPEG frames through chat completions."""
 
-    async def describe(self, segment: Segment, frame_keys: Sequence[str | Path]) -> VisionDescription:
+    async def describe(
+        self,
+        frame_keys: Sequence[str | Path],
+        segment: Segment,
+        *,
+        job_id: str,
+    ) -> VisionDescription:
         if not frame_keys:
             raise _schema_error("MODEL_INPUT: at least one representative frame is required")
 
@@ -221,6 +214,7 @@ class OpenAIVisionProvider(_OpenAIProvider):
             },
             stage="analyzing",
             asset_id=segment.asset_id,
+            job_id=job_id,
         )
         payload = self._response_json(response)
         try:
@@ -238,7 +232,14 @@ class OpenAIVisionProvider(_OpenAIProvider):
 class OpenAIEmbeddingProvider(_OpenAIProvider):
     """Generate one validated vector through the embeddings endpoint."""
 
-    async def embed(self, text: str, *, expected_dims: int) -> Embedding:
+    async def embed(
+        self,
+        text: str,
+        *,
+        expected_dims: int,
+        asset_id: str,
+        job_id: str,
+    ) -> Embedding:
         if expected_dims <= 0:
             raise ValueError("expected_dims must be positive")
         if not text.strip():
@@ -248,6 +249,8 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
             "embeddings",
             {"model": self._model, "input": text},
             stage="embedding",
+            asset_id=asset_id,
+            job_id=job_id,
         )
         payload = self._response_json(response)
         try:
@@ -270,3 +273,11 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
 
 def _schema_error(message: str = "MODEL_RESPONSE_SCHEMA: provider response failed validation") -> RecordedVideoError:
     return RecordedVideoError(ErrorCode.CONFIGURATION, retryable=False, message=message)
+
+
+def _configuration_error() -> RecordedVideoError:
+    return RecordedVideoError(
+        ErrorCode.CONFIGURATION,
+        retryable=False,
+        message="CONFIGURATION: provider base_url must be an absolute HTTP(S) URL without userinfo",
+    )

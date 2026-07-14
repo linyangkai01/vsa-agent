@@ -52,7 +52,7 @@ async def test_vision_sends_openai_compatible_request_and_validates_description(
             model="vision-model",
             client=client,
         )
-        result = await provider.describe(_segment(), [frame])
+        result = await provider.describe([frame], _segment(), job_id="job-1")
 
     body = captured["body"]
     assert isinstance(body, dict)
@@ -92,7 +92,7 @@ async def test_vision_rejects_invalid_structured_output(content: str, tmp_path: 
             client=client,
         )
         with pytest.raises(RecordedVideoError) as caught:
-            await provider.describe(_segment(), [frame])
+            await provider.describe([frame], _segment(), job_id="job-1")
 
     assert caught.value.code is ErrorCode.CONFIGURATION
     assert caught.value.retryable is False
@@ -113,7 +113,12 @@ async def test_embedding_returns_finite_vector_with_expected_dimension() -> None
             model="embedding-model",
             client=client,
         )
-        result = await provider.embed("forklift", expected_dims=2)
+        result = await provider.embed(
+            "forklift",
+            expected_dims=2,
+            asset_id="asset-1",
+            job_id="job-1",
+        )
 
     assert result == (0.25, -0.5)
 
@@ -129,7 +134,12 @@ async def test_embedding_dimension_mismatch_is_permanent() -> None:
             client=client,
         )
         with pytest.raises(RecordedVideoError) as caught:
-            await provider.embed("forklift", expected_dims=4)
+            await provider.embed(
+                "forklift",
+                expected_dims=4,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
 
     assert caught.value.code is ErrorCode.EMBEDDING_DIMENSION
     assert caught.value.retryable is False
@@ -160,7 +170,12 @@ async def test_embedding_rejects_invalid_or_non_finite_vectors(response_content:
             client=client,
         )
         with pytest.raises(RecordedVideoError) as caught:
-            await provider.embed("forklift", expected_dims=1)
+            await provider.embed(
+                "forklift",
+                expected_dims=1,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
 
     assert caught.value.code is ErrorCode.CONFIGURATION
     assert caught.value.retryable is False
@@ -170,7 +185,12 @@ async def test_embedding_rejects_invalid_or_non_finite_vectors(response_content:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "code"),
-    [(429, ErrorCode.MODEL_RATE_LIMIT), (500, ErrorCode.MODEL_5XX), (503, ErrorCode.MODEL_5XX)],
+    [
+        (408, ErrorCode.MODEL_TIMEOUT),
+        (429, ErrorCode.MODEL_RATE_LIMIT),
+        (500, ErrorCode.MODEL_5XX),
+        (503, ErrorCode.MODEL_5XX),
+    ],
 )
 async def test_provider_http_transient_failures_are_retryable(status: int, code: ErrorCode) -> None:
     transport = httpx.MockTransport(lambda _: httpx.Response(status, text="provider body must not leak"))
@@ -182,7 +202,12 @@ async def test_provider_http_transient_failures_are_retryable(status: int, code:
             client=client,
         )
         with pytest.raises(RecordedVideoError) as caught:
-            await provider.embed("forklift", expected_dims=2)
+            await provider.embed(
+                "forklift",
+                expected_dims=2,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
 
     assert caught.value.code is code
     assert caught.value.retryable is True
@@ -191,7 +216,10 @@ async def test_provider_http_transient_failures_are_retryable(status: int, code:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exception_type", [httpx.ReadTimeout, httpx.ConnectError])
-async def test_provider_transport_failures_are_retryable(exception_type: type[httpx.RequestError]) -> None:
+async def test_provider_transport_failures_are_retryable(
+    exception_type: type[httpx.RequestError],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise exception_type("sensitive transport detail", request=request)
 
@@ -202,12 +230,21 @@ async def test_provider_transport_failures_are_retryable(exception_type: type[ht
             model="embedding-model",
             client=client,
         )
-        with pytest.raises(RecordedVideoError) as caught:
-            await provider.embed("forklift", expected_dims=2)
+        with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
+            with pytest.raises(RecordedVideoError) as caught:
+                await provider.embed(
+                    "forklift",
+                    expected_dims=2,
+                    asset_id="asset-1",
+                    job_id="job-1",
+                )
 
     assert caught.value.code is ErrorCode.MODEL_TIMEOUT
     assert caught.value.retryable is True
     assert "sensitive transport detail" not in str(caught.value)
+    assert "asset_id=asset-1" in caplog.text
+    assert "job_id=job-1" in caplog.text
+    assert "sensitive transport detail" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -221,7 +258,12 @@ async def test_non_rate_limit_4xx_is_permanent_configuration_error() -> None:
             client=client,
         )
         with pytest.raises(RecordedVideoError) as caught:
-            await provider.embed("forklift", expected_dims=2)
+            await provider.embed(
+                "forklift",
+                expected_dims=2,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
 
     assert caught.value.code is ErrorCode.CONFIGURATION
     assert caught.value.retryable is False
@@ -253,7 +295,17 @@ async def test_provider_semaphore_bounds_concurrent_requests() -> None:
             concurrency=2,
             client=client,
         )
-        tasks = [asyncio.create_task(provider.embed(str(index), expected_dims=1)) for index in range(4)]
+        tasks = [
+            asyncio.create_task(
+                provider.embed(
+                    str(index),
+                    expected_dims=1,
+                    asset_id="asset-1",
+                    job_id="job-1",
+                )
+            )
+            for index in range(4)
+        ]
         await asyncio.wait_for(first_two_started.wait(), timeout=1)
         await asyncio.sleep(0)
         assert maximum == 2
@@ -278,16 +330,48 @@ async def test_provider_logs_exclude_authorization_frames_and_response_body(
         )
         with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
             with pytest.raises(RecordedVideoError):
-                await provider.describe(_segment(), [frame])
+                await provider.describe([frame], _segment(), job_id="job-vision")
 
     assert "provider.request" in caplog.text
     assert "vision-model" in caplog.text
     assert "asset-1" in caplog.text
+    assert "job-vision" in caplog.text
     assert "top-secret-token" not in caplog.text
     assert "Authorization" not in caplog.text
     assert "sensitive-frame-bytes" not in caplog.text
     assert "sensitive-response-body" not in caplog.text
     assert "data:image" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_embedding_logs_required_asset_and_job_without_sensitive_data(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"data": [{"embedding": [0.1]}]}))
+
+    async with _client(transport) as client:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-token",
+            model="embedding-model",
+            client=client,
+        )
+        with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
+            await provider.embed(
+                "sensitive-embedding-text",
+                expected_dims=1,
+                asset_id="asset-embedding",
+                job_id="job-embedding",
+            )
+
+    assert "model=embedding-model" in caplog.text
+    assert "status=200" in caplog.text
+    assert "stage=embedding" in caplog.text
+    assert "asset_id=asset-embedding" in caplog.text
+    assert "job_id=job-embedding" in caplog.text
+    assert "top-secret-token" not in caplog.text
+    assert "Authorization" not in caplog.text
+    assert "sensitive-embedding-text" not in caplog.text
 
 
 def test_provider_rejects_invalid_runtime_limits() -> None:
@@ -305,3 +389,31 @@ def test_provider_rejects_invalid_runtime_limits() -> None:
             model="vision-model",
             concurrency=0,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "",
+        "provider.example/v1",
+        "/v1",
+        "ftp://provider.example/v1",
+        "https:///v1",
+        "https://user:password@provider.example/v1",
+    ],
+)
+async def test_provider_rejects_invalid_base_url_as_permanent_configuration(
+    base_url: str,
+) -> None:
+    async with _client(httpx.MockTransport(lambda _: pytest.fail("request must not be sent"))) as client:
+        with pytest.raises(RecordedVideoError) as caught:
+            OpenAIEmbeddingProvider(
+                base_url=base_url,
+                api_key=None,
+                model="embedding-model",
+                client=client,
+            )
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False

@@ -4,11 +4,42 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vsa_agent.recorded_video.models import Asset, Job, JobStep, Segment, UploadSession
+
+Embedding = tuple[float, ...]
+
+
+class VisionDescription(BaseModel):
+    """Validated structured output returned by a vision provider."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    description: str
+    tags: tuple[str, ...]
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("description must not be blank")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for value in values:
+            value = value.strip()
+            if not value:
+                raise ValueError("tags must not contain blank values")
+            normalized.append(value)
+        return tuple(normalized)
 
 
 class ProjectionResult(BaseModel):
@@ -39,12 +70,25 @@ class Segmenter(Protocol):
 
 @runtime_checkable
 class VisionProvider(Protocol):
-    async def describe(self, segment: Segment, frame_keys: Sequence[str]) -> str: ...
+    async def describe(
+        self,
+        frame_keys: Sequence[str | Path],
+        segment: Segment,
+        *,
+        job_id: str,
+    ) -> VisionDescription: ...
 
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):
-    async def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]: ...
+    async def embed(
+        self,
+        text: str,
+        *,
+        expected_dims: int,
+        asset_id: str,
+        job_id: str,
+    ) -> Embedding: ...
 
 
 @runtime_checkable

@@ -4,16 +4,19 @@ import asyncio
 import inspect
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, get_type_hints
 
 from vsa_agent.recorded_video.models import Asset, Job, JobStep, Segment, UploadSession
 from vsa_agent.recorded_video.ports import (
     AssetStore,
+    Embedding,
     EmbeddingProvider,
     JobRepository,
     ProjectionResult,
     SearchProjectionStore,
     Segmenter,
+    VisionDescription,
     VisionProvider,
 )
 
@@ -40,13 +43,26 @@ class FakeSegmenter:
 
 
 class FakeVisionProvider:
-    async def describe(self, segment: Segment, frame_keys: Sequence[str]) -> str:
-        return "description"
+    async def describe(
+        self,
+        frame_keys: Sequence[str | Path],
+        segment: Segment,
+        *,
+        job_id: str,
+    ) -> VisionDescription:
+        return VisionDescription(description="description", tags=())
 
 
 class FakeEmbeddingProvider:
-    async def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
-        return []
+    async def embed(
+        self,
+        text: str,
+        *,
+        expected_dims: int,
+        asset_id: str,
+        job_id: str,
+    ) -> Embedding:
+        return (0.1,) * expected_dims
 
 
 class FakeProjectionStore:
@@ -64,6 +80,25 @@ def test_all_ports_are_runtime_checkable_structural_protocols() -> None:
     assert isinstance(FakeVisionProvider(), VisionProvider)
     assert isinstance(FakeEmbeddingProvider(), EmbeddingProvider)
     assert isinstance(FakeProjectionStore(), SearchProjectionStore)
+
+
+def test_model_provider_ports_match_pipeline_contract() -> None:
+    vision = inspect.signature(VisionProvider.describe)
+    assert list(vision.parameters) == ["self", "frame_keys", "segment", "job_id"]
+    assert vision.parameters["job_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert get_type_hints(VisionProvider.describe)["return"] is VisionDescription
+
+    embedding = inspect.signature(EmbeddingProvider.embed)
+    assert list(embedding.parameters) == [
+        "self",
+        "text",
+        "expected_dims",
+        "asset_id",
+        "job_id",
+    ]
+    for name in ("expected_dims", "asset_id", "job_id"):
+        assert embedding.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    assert get_type_hints(EmbeddingProvider.embed)["return"] == Embedding
 
 
 def test_projection_result_keeps_successes_and_failures_separate() -> None:
