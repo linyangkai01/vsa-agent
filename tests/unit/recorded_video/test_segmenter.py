@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from vsa_agent.recorded_video.models import Asset, AssetStatus, segment_id
 from vsa_agent.recorded_video.ports import Segmenter
 from vsa_agent.recorded_video.segmenter import FixedDurationSegmenter
@@ -59,6 +61,38 @@ async def test_exact_boundary_has_no_empty_trailing_segment() -> None:
     assert [(segment.start_offset_ms, segment.end_offset_ms) for segment in segments] == [
         (0, 30_000),
         (30_000, 60_000),
+    ]
+
+
+async def test_zero_duration_emits_no_segments() -> None:
+    segments = list(await FixedDurationSegmenter(30).plan(_asset(0), "pipeline-v1"))
+
+    assert segments == []
+
+
+@pytest.mark.parametrize("duration_ms", [1, 29_999])
+async def test_duration_shorter_than_window_emits_one_exact_segment(duration_ms: int) -> None:
+    segments = list(await FixedDurationSegmenter(30).plan(_asset(duration_ms), "pipeline-v1"))
+
+    assert [
+        (
+            segment.segment_id,
+            segment.ordinal,
+            segment.start_offset_ms,
+            segment.end_offset_ms,
+            segment.start_time,
+            segment.end_time,
+        )
+        for segment in segments
+    ] == [
+        (
+            segment_id("asset-a", "pipeline-v1", 0),
+            0,
+            0,
+            duration_ms,
+            ORIGIN,
+            ORIGIN + timedelta(milliseconds=duration_ms),
+        )
     ]
 
 
