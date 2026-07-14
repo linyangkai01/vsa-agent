@@ -273,16 +273,16 @@ def test_fixed_duration_segmenter_emits_stable_last_partial_segment():
 **Interfaces:**
 - Produces: `MediaProcessor.probe(path) -> MediaProbe`、`extract_representative_frames()`、`ensure_playback_proxy()`。
 
-- [ ] **Step 1: 写 subprocess 命令和坏媒体测试。**
+- [x] **Step 1: 写 subprocess 命令和坏媒体测试。**
 ```python
 async def test_mkv_creates_proxy_and_corrupt_probe_is_permanent(fake_runner, processor):
     assert (await processor.ensure_playback_proxy(asset_mkv)).suffix == ".mp4"
     with pytest.raises(RecordedVideoError, match="CORRUPT_MEDIA"): await processor.probe(corrupt_path)
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_media.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现最小 processor。** `ffprobe -v error -show_format -show_streams -of json` 解析 duration/resolution/codecs；每 segment 均匀选 `representative_frames` offset；MP4 仅在浏览器可播时复用 source，否则 ffmpeg 写 `playback/proxy.mp4.tmp` 后原子发布；找不到二进制抛 `FFMPEG_MISSING`。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_media.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/media.py tests/unit/recorded_video/test_media.py && git commit -m "feat: process recorded video media assets"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_media.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现最小 processor。** `ffprobe -v error -show_format -show_streams -of json` 解析 duration/resolution/codecs；每 segment 均匀选 `representative_frames` offset；MP4 仅在浏览器可播时复用 source，否则 ffmpeg 写 `playback/proxy.mp4.tmp` 后原子发布；找不到二进制抛 `FFMPEG_MISSING`。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_media.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/media.py tests/unit/recorded_video/test_media.py && git commit -m "feat: process recorded video media assets"`。
 
 ### Task 11: OpenAI-compatible Vision 与 Embedding provider（OpenSpec 3.4、3.5）
 
