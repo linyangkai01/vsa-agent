@@ -800,7 +800,9 @@ class RecordedVideoPipeline:
 
     async def cleanup_after_cancel(self, job: Job) -> None:
         """Rollback one attempt and remove only repository-approved temporary data."""
+        await self._assert_cancel_cleanup_lease(job)
         await self._projection.delete_projection(job.asset_id, job.job_id, job.attempt)
+        await self._assert_cancel_cleanup_lease(job)
         asset_root = (
             self._asset_store.root.resolve() / "assets" / _safe_path_component(job.asset_id, "asset_id")
         ).resolve()
@@ -819,6 +821,7 @@ class RecordedVideoPipeline:
                 resolved = candidate.resolve()
                 if resolved.is_file() and resolved.is_relative_to(attempt_dir) and resolved not in referenced:
                     resolved.unlink()
+        await self._assert_cancel_cleanup_lease(job)
 
         cleanup_sessions = getattr(self._asset_store, "cleanup_expired_sessions", None)
         if cleanup_sessions is not None:
@@ -829,6 +832,16 @@ class RecordedVideoPipeline:
             except RecordedVideoError as error:
                 if error.code is not ErrorCode.CONFIGURATION:
                     raise
+        await self._assert_cancel_cleanup_lease(job)
+
+    async def _assert_cancel_cleanup_lease(self, job: Job) -> None:
+        assertion = getattr(self._repository, "assert_cancel_cleanup_lease", None)
+        if assertion is not None:
+            await assertion(job, self._now())
+            return
+        is_cancel_requested = getattr(self._repository, "is_cancel_requested", None)
+        if is_cancel_requested is None or not await is_cancel_requested(job, self._now()):
+            raise PermissionError("cancel cleanup requires an active cancellation lease")
 
     @staticmethod
     def _referenced_artifacts(attempt_dir: Path, asset_root: Path) -> set[Path]:

@@ -988,6 +988,14 @@ class JobRepository:
         async with self._write_transaction() as connection:
             await self._require_active_lease(connection, job, self._now())
 
+    async def assert_cancel_cleanup_lease(self, job: Job, now: datetime | None = None) -> None:
+        """Fence cancellation cleanup without requiring the job to remain current."""
+        if job.lease_owner is None:
+            raise PermissionError("cancel cleanup requires a lease owner")
+        checked_at = _require_aware(now or self._now(), "now")
+        async with self._write_transaction() as connection:
+            await self._require_cancel_cleanup_lease(connection, job, checked_at)
+
     async def reset_steps_from(self, job: Job, stage: JobStage) -> None:
         """Discard an invalid checkpoint and all outputs that depend on it."""
         if job.lease_owner is None:
@@ -1828,14 +1836,7 @@ class JobRepository:
         cancelled_at = _require_aware(now or self._now(), "now")
         cancelled_iso = _to_iso(cancelled_at)
         async with self._write_transaction() as connection:
-            current = await self._require_active_lease(
-                connection,
-                job,
-                cancelled_at,
-                allow_cancel_requested=True,
-            )
-            if not current["cancel_requested"]:
-                return None
+            await self._require_cancel_cleanup_lease(connection, job, cancelled_at)
             row = await self._fetchone(
                 connection,
                 """
@@ -1877,12 +1878,23 @@ class JobRepository:
             raise PermissionError("cancellation check requires a lease owner")
         checked_at = _require_aware(now or self._now(), "now")
         async with self._write_transaction() as connection:
-            current = await self._require_active_lease(
-                connection,
-                job,
-                checked_at,
-                allow_cancel_requested=True,
-            )
+            try:
+                current = await self._require_active_lease(
+                    connection,
+                    job,
+                    checked_at,
+                    allow_cancel_requested=True,
+                )
+            except LeaseLostError as active_lease_error:
+                cancellation = await self._fetchone(
+                    connection,
+                    "SELECT cancel_requested FROM jobs WHERE job_id = ?",
+                    (job.job_id,),
+                )
+                if cancellation is None or not cancellation["cancel_requested"]:
+                    raise active_lease_error
+                await self._require_cancel_cleanup_lease(connection, job, checked_at)
+                return True
             return bool(current["cancel_requested"])
 
     async def soft_delete_asset(self, asset_id: str, now: datetime) -> Asset:
@@ -2006,6 +2018,41 @@ class JobRepository:
             raise LeaseLostError("job has no active lease")
         if current["cancel_requested"] and not allow_cancel_requested:
             raise LeaseLostError("job cancellation requested")
+        return current
+
+    @classmethod
+    async def _require_cancel_cleanup_lease(
+        cls,
+        connection: aiosqlite.Connection,
+        job: Job,
+        now: datetime,
+    ) -> aiosqlite.Row:
+        current = await cls._fetchone(
+            connection,
+            """
+            SELECT jobs.*, assets.deleted_at AS asset_deleted_at
+            FROM jobs JOIN assets ON assets.asset_id = jobs.asset_id
+            WHERE jobs.job_id = ?
+            """,
+            (job.job_id,),
+        )
+        if current is None:
+            raise KeyError(f"unknown job: {job.job_id}")
+        if current["asset_id"] != job.asset_id:
+            raise LeaseLostError("cancel cleanup job asset identity does not match")
+        if current["pipeline_version"] != job.pipeline_version:
+            raise LeaseLostError("cancel cleanup job pipeline identity does not match")
+        if current["asset_deleted_at"] is not None:
+            raise LeaseLostError("cancel cleanup asset is already deleted")
+        if current["lease_owner"] != job.lease_owner:
+            raise LeaseLostError("cancel cleanup lease owner does not match")
+        if current["attempt"] != job.attempt:
+            raise LeaseLostError("cancel cleanup job attempt does not match")
+        lease_until = _from_iso(current["lease_until"])
+        if current["status"] != JobStatus.RUNNING.value or lease_until is None or lease_until <= now:
+            raise LeaseLostError("job has no active cancel cleanup lease")
+        if not current["cancel_requested"]:
+            raise LeaseLostError("job has no cancellation cleanup request")
         return current
 
     @classmethod

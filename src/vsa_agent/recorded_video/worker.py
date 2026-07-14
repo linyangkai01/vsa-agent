@@ -150,6 +150,16 @@ class RecordedVideoWorker:
             self._active_jobs[job.job_id] = (owner, job.attempt)
             self._emit_job("job.claimed", job)
             try:
+                if await self._cancel_requested(job):
+                    cleanup = getattr(self._pipeline, "cleanup_after_cancel", None)
+                    if cleanup is None:
+                        raise RuntimeError("cancel cleanup requires pipeline cleanup support")
+                    try:
+                        await cleanup(job)
+                    except Exception:
+                        self._emit_job("job.cleanup_failed", job, error_code="CLEANUP_FAILED")
+                        return None
+                    raise PipelineCancelled(job)
                 if job.attempt > self._max_attempts:
                     return await self._record_failure(job, "MAX_ATTEMPTS", retryable=False)
                 result = await self._run_with_renewal(job)

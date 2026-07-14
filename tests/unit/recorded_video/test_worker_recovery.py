@@ -239,6 +239,51 @@ async def test_cleanup_failure_remains_reclaimable_after_lease_expiry(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_exhausted_cancel_cleanup_bypasses_failure_and_pipeline_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [NOW]
+    repository, _store, claimed = await _claimed_job(tmp_path, clock)
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "UPDATE jobs SET attempt = ? WHERE job_id = ?",
+            (4, claimed.job_id),
+        )
+        connection.commit()
+    claimed = await repository.get_job(claimed.job_id)
+    await repository.request_cancel(claimed.job_id, clock[0] + timedelta(seconds=1))
+    clock[0] += timedelta(seconds=31)
+    cleanup_calls: list[tuple[str, int]] = []
+
+    class CleanupOnlyPipeline:
+        async def run(self, job) -> None:
+            raise AssertionError("cancel cleanup must not run the active pipeline")
+
+        async def cleanup_after_cancel(self, job) -> None:
+            cleanup_calls.append((job.job_id, job.attempt))
+
+    async def unexpected_mark_failed(*_args, **_kwargs):
+        raise AssertionError("cancel cleanup must not mark the job failed")
+
+    monkeypatch.setattr(repository, "mark_failed", unexpected_mark_failed)
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=CleanupOnlyPipeline(),
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+    )
+
+    cancelled = await worker.run_once()
+
+    assert cancelled is not None and cancelled.status is JobStatus.CANCELLED
+    assert cancelled.attempt == 4
+    assert cleanup_calls == [(claimed.job_id, 4)]
+
+
+@pytest.mark.asyncio
 async def test_renewal_cancel_race_runs_cleanup_and_finishes_cancel(tmp_path: Path) -> None:
     clock = [NOW]
     repository, _store, claimed = await _claimed_job(tmp_path, clock)
@@ -371,6 +416,43 @@ async def test_deletion_requested_cancel_never_restores_ready_or_read_facade(tmp
     assert await repository.list_ready_assets() == []
     await repository.finalize_asset_deletion(claimed.asset_id, clock[0] + timedelta(seconds=1))
     assert (await repository.get_asset(claimed.asset_id)).status is AssetStatus.DELETED
+
+
+@pytest.mark.asyncio
+async def test_deletion_cleans_noncurrent_pipeline_job_without_overwriting_newer_asset_state(
+    tmp_path: Path,
+) -> None:
+    clock = [NOW]
+    repository, store, older = await _claimed_job(tmp_path, clock)
+    newer = await repository.complete_upload(
+        older.asset_id,
+        "pipeline-v2",
+        now=clock[0] + timedelta(seconds=1),
+    )
+    await repository.prepare_asset_deletion(older.asset_id, clock[0] + timedelta(seconds=2))
+    expected_asset = await repository.get_asset(older.asset_id)
+    assert expected_asset.current_job_id == newer.job_id
+    assert (await repository.get_job(newer.job_id)).status is JobStatus.CANCELLED
+    clock[0] += timedelta(seconds=31)
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=_pipeline(repository, store, clock=clock),
+        worker_concurrency=1,
+        lease_sec=30,
+        max_attempts=3,
+        clock=lambda: clock[0],
+    )
+
+    cancelled = await worker.run_once()
+
+    assert cancelled is not None and cancelled.job_id == older.job_id
+    assert cancelled.status is JobStatus.CANCELLED
+    assert cancelled.attempt == older.attempt
+    asset_after_cleanup = await repository.get_asset(older.asset_id)
+    assert asset_after_cleanup.current_job_id == newer.job_id
+    assert asset_after_cleanup.status is expected_asset.status
+    await repository.finalize_asset_deletion(older.asset_id, clock[0] + timedelta(seconds=1))
+    assert (await repository.get_asset(older.asset_id)).status is AssetStatus.DELETED
 
 
 @pytest.mark.asyncio
