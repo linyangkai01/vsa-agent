@@ -129,7 +129,7 @@ async def test_initialize_enables_wal_and_applies_versioned_schema_idempotently(
             "segments",
             "schema_migrations",
         } <= tables
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,)]
 
         indexes = {
             row[1]
@@ -178,7 +178,7 @@ async def test_initialize_rolls_back_a_migration_that_fails_midway(tmp_path: Pat
 
     monkeypatch.setattr(repository_module, "_MIGRATION_1", migration)
     await repository.initialize()
-    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 2
+    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 3
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_initialize_rejects_a_database_from_a_future_schema_version(tmp_pa
                 applied_at TEXT NOT NULL
             );
             INSERT INTO schema_migrations(version, applied_at)
-            VALUES (3, '2026-07-13T04:00:00+00:00');
+            VALUES (4, '2026-07-13T04:00:00+00:00');
             """
         )
         connection.commit()
@@ -203,7 +203,7 @@ async def test_initialize_rejects_a_database_from_a_future_schema_version(tmp_pa
     with pytest.raises(RuntimeError, match="newer schema migration"):
         await JobRepository(db_path, clock=lambda: NOW).initialize()
 
-    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 3
+    assert _fetch_one(db_path, "SELECT MAX(version) AS version FROM schema_migrations")["version"] == 4
 
 
 @pytest.mark.asyncio
@@ -306,6 +306,59 @@ async def test_in_flight_duplicate_cannot_take_reservation_from_original_owner(r
     restored_session, _ = await repo.get_upload_context(session.session_id)
     assert restored_session.received_chunks == 1
     assert await repo.stored_upload_bytes(session.session_id) == 4
+
+
+@pytest.mark.asyncio
+async def test_expired_chunk_reservation_can_be_reclaimed_without_old_token_access(tmp_path: Path):
+    current_time = [NOW]
+    repository = JobRepository(
+        tmp_path / "jobs.sqlite3",
+        lease_seconds=30,
+        clock=lambda: current_time[0],
+    )
+    await repository.initialize()
+    session = _session()
+    await repository.create_upload_session(_asset(), session)
+
+    original_owner = await repository.reserve_upload_chunk(
+        session.session_id,
+        identifier="client-identifier",
+        chunk_number=1,
+        total_chunks=2,
+        checksum="chunk-a",
+        size_bytes=4,
+        max_upload_bytes=8,
+        path="000001.part",
+    )
+
+    with pytest.raises(ValueError, match="already being uploaded"):
+        await repository.reserve_upload_chunk(
+            session.session_id,
+            identifier="client-identifier",
+            chunk_number=1,
+            total_chunks=2,
+            checksum="chunk-a",
+            size_bytes=4,
+            max_upload_bytes=8,
+            path="000001.part",
+        )
+
+    current_time[0] = NOW + timedelta(seconds=31)
+    replacement_owner = await repository.reserve_upload_chunk(
+        session.session_id,
+        identifier="client-identifier",
+        chunk_number=1,
+        total_chunks=2,
+        checksum="chunk-a",
+        size_bytes=4,
+        max_upload_bytes=8,
+        path="000001.part",
+    )
+
+    assert replacement_owner != original_owner
+    assert await repository.confirm_reserved_upload_chunk(session.session_id, 1, original_owner) is False
+    assert await repository.release_reserved_upload_chunk(session.session_id, 1, original_owner) is False
+    assert await repository.confirm_reserved_upload_chunk(session.session_id, 1, replacement_owner) is True
 
 
 @pytest.mark.asyncio

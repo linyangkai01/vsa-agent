@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vsa_agent.config import AppConfig, RecordedVideoConfig
+from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 
 
 @pytest.fixture
@@ -180,6 +181,31 @@ def test_chunk_confirm_losing_reservation_returns_conflict_instead_of_success(
 
     assert response.status_code == 409
     assert "reservation" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_status"),
+    [(ErrorCode.CORRUPT_MEDIA, 409), (ErrorCode.DISK_FULL, 507)],
+)
+def test_chunk_domain_storage_errors_return_stable_http_responses(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    code: ErrorCode,
+    expected_status: int,
+) -> None:
+    from vsa_agent.api import recorded_video
+
+    created = _create_upload(client)
+
+    async def fail_write(*_args: object, **_kwargs: object) -> str:
+        raise RecordedVideoError(code, retryable=False, message=f"{code.value}: storage failure")
+
+    monkeypatch.setattr(recorded_video.LocalAssetStore, "write_chunk", fail_write)
+
+    response = _upload_chunk(client, created["url"], b"video")
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": {"error_code": code.value, "error_message": f"{code.value}: storage failure"}}
 
 
 def test_failed_first_chunk_write_releases_identifier_and_total_binding(

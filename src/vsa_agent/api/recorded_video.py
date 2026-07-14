@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from vsa_agent.config import get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
+from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, AssetStatus, UploadSession
 from vsa_agent.recorded_video.repository import JobRepository
 
@@ -67,6 +68,18 @@ def _chunk_headers(request: Request) -> tuple[str, int, int, bool, str]:
     return identifier, chunk_number, total_chunks, is_last_chunk == "true", filename
 
 
+def _recorded_video_http_exception(error: RecordedVideoError) -> HTTPException:
+    status_code = {
+        ErrorCode.CORRUPT_MEDIA: 409,
+        ErrorCode.UNSUPPORTED_MEDIA: 409,
+        ErrorCode.DISK_FULL: 507,
+    }.get(error.code, 500)
+    return HTTPException(
+        status_code=status_code,
+        detail={"error_code": error.code.value, "error_message": str(error)},
+    )
+
+
 @router.post("/api/v1/videos")
 async def create_recorded_video(payload: CreateRecordedVideoRequest) -> dict[str, str]:
     try:
@@ -105,11 +118,13 @@ async def create_recorded_video(payload: CreateRecordedVideoRequest) -> dict[str
     await repository.create_upload_session(asset, session)
     try:
         await store.create_session(session)
-    except Exception:
+    except Exception as exc:
         try:
             await store.remove_session(session_id)
         finally:
             await repository.delete_upload_session(session_id, asset_id)
+        if isinstance(exc, RecordedVideoError):
+            raise _recorded_video_http_exception(exc) from exc
         raise
     return {
         "url": f"/api/v1/vst/v1/storage/file?upload_session_id={session_id}",
@@ -168,20 +183,25 @@ async def upload_recorded_video_chunk(
             )
             if not confirmed:
                 raise HTTPException(status_code=409, detail="chunk reservation is no longer owned; retry the upload")
-    except Exception:
+    except Exception as exc:
         if reservation_token:
             await repository.release_reserved_upload_chunk(
                 upload_session_id,
                 chunk_number,
                 reservation_token,
             )
+        if isinstance(exc, RecordedVideoError):
+            raise _recorded_video_http_exception(exc) from exc
         raise
 
     session, asset = await repository.get_upload_context(upload_session_id)
     if not is_last_chunk or session.received_chunks != session.total_chunks:
         return {"chunkCount": session.received_chunks}
 
-    file_path = await store.assemble_source(session, asset)
+    try:
+        file_path = await store.assemble_source(session, asset)
+    except RecordedVideoError as exc:
+        raise _recorded_video_http_exception(exc) from exc
     return {
         "sensorId": asset.asset_id,
         "streamId": asset.asset_id,

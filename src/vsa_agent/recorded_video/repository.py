@@ -28,7 +28,7 @@ from vsa_agent.recorded_video.models import (
 
 _PIPELINE_VERSION_ADAPTER = TypeAdapter(PipelineVersion)
 _STAGE_ORDER = {stage: ordinal for ordinal, stage in enumerate(JobStage)}
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _SNAPSHOT_SECTIONS = frozenset({"pipeline", "vision"})
 _SNAPSHOT_SECTION_FIELDS = frozenset({"enabled", "model", "thresholds"})
 _SNAPSHOT_TOP_LEVEL_FIELDS = frozenset({"pipeline_version", *_SNAPSHOT_SECTIONS})
@@ -148,6 +148,8 @@ _MIGRATION_2 = (
     CHECK (status IN ('reserved', 'confirmed'))
     """,
 )
+
+_MIGRATION_3 = ("ALTER TABLE upload_chunks ADD COLUMN reservation_expires_at TEXT",)
 
 
 def _require_aware(value: datetime, name: str) -> datetime:
@@ -297,7 +299,7 @@ class JobRepository:
                     raise RuntimeError(
                         f"database has newer schema migration {version}; supported version is {_SCHEMA_VERSION}"
                     )
-                migrations = {1: _MIGRATION_1, 2: _MIGRATION_2}
+                migrations = {1: _MIGRATION_1, 2: _MIGRATION_2, 3: _MIGRATION_3}
                 for migration_version in range(version + 1, _SCHEMA_VERSION + 1):
                     for statement in migrations[migration_version]:
                         await connection.execute(statement)
@@ -465,8 +467,10 @@ class JobRepository:
         that placeholder with the client-supplied nvstreamer identifier and fixes
         the initially unknown total chunk count. Recording before filesystem I/O
         makes the size limit safe across concurrent API workers; callers must
-        release their token-owned reservation when their write fails. A matching
-        confirmed row returns ``None`` because no new filesystem write is owned.
+        release their token-owned reservation when their write fails. Reservations
+        expire after the repository lease so a crashed writer cannot permanently
+        consume quota. A matching confirmed row returns ``None`` because no new
+        filesystem write is owned.
         """
         if not identifier:
             raise ValueError("upload identifier is required")
@@ -510,10 +514,12 @@ class JobRepository:
                 if not 1 <= chunk_number <= total_chunks:
                     raise ValueError(f"chunk_number must be between 1 and {total_chunks}")
 
+                now = self._now()
+                reservation_expires_at = _to_iso(now + timedelta(seconds=self.lease_seconds))
                 existing = await self._fetchone(
                     connection,
                     """
-                    SELECT checksum, size_bytes, path, status
+                    SELECT checksum, size_bytes, path, status, reservation_token, reservation_expires_at
                     FROM upload_chunks
                     WHERE session_id = ? AND chunk_number = ?
                     """,
@@ -529,7 +535,32 @@ class JobRepository:
                         raise ValueError("chunk key already contains different content")
                     if existing["status"] == "confirmed":
                         return None
-                    raise ValueError("chunk upload is already being uploaded")
+                    expires_at = _from_iso(existing["reservation_expires_at"])
+                    if expires_at is not None and expires_at > now:
+                        raise ValueError("chunk upload is already being uploaded")
+                    cursor = await connection.execute(
+                        """
+                        UPDATE upload_chunks
+                        SET reservation_token = ?, reservation_expires_at = ?, recorded_at = ?
+                        WHERE session_id = ? AND chunk_number = ?
+                            AND reservation_token = ? AND status = 'reserved'
+                        """,
+                        (
+                            reservation_token,
+                            reservation_expires_at,
+                            _to_iso(now),
+                            session_id,
+                            chunk_number,
+                            existing["reservation_token"],
+                        ),
+                    )
+                    try:
+                        reclaimed = cursor.rowcount == 1
+                    finally:
+                        await cursor.close()
+                    if not reclaimed:
+                        raise ValueError("chunk upload is already being uploaded")
+                    return reservation_token
 
                 total_row = await self._fetchone(
                     connection,
@@ -544,8 +575,8 @@ class JobRepository:
                     """
                     INSERT INTO upload_chunks (
                         session_id, chunk_number, checksum, size_bytes, path, recorded_at,
-                        reservation_token, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved')
+                        reservation_token, reservation_expires_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved')
                     """,
                     (
                         session_id,
@@ -553,8 +584,9 @@ class JobRepository:
                         checksum,
                         size_bytes,
                         path,
-                        _to_iso(self._now()),
+                        _to_iso(now),
                         reservation_token,
+                        reservation_expires_at,
                     ),
                 )
                 return reservation_token
@@ -574,7 +606,7 @@ class JobRepository:
             cursor = await connection.execute(
                 """
                 UPDATE upload_chunks
-                SET status = 'confirmed'
+                SET status = 'confirmed', reservation_expires_at = NULL
                 WHERE session_id = ? AND chunk_number = ?
                     AND reservation_token = ? AND status = 'reserved'
                 """,
@@ -676,8 +708,8 @@ class JobRepository:
                 """
                     INSERT INTO upload_chunks (
                         session_id, chunk_number, checksum, size_bytes, path, recorded_at,
-                        reservation_token, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'confirmed')
+                        reservation_token, reservation_expires_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'confirmed')
                     """,
                 (session_id, chunk_number, checksum, size_bytes, path, _to_iso(self._now())),
             )
