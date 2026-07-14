@@ -110,14 +110,24 @@ async def _record_all_chunks(repo: JobRepository, session: UploadSession) -> Non
 async def test_ready_asset_and_segment_read_boundaries_exclude_deleted_assets(repo: JobRepository) -> None:
     ready = _asset("ready")
     deleted = _asset("deleted")
+    processing = _asset("processing")
+    soft_deleted = _asset("soft-deleted")
     deleted.status = AssetStatus.DELETED
     deleted.deleted_at = NOW
     await repo.create_upload_session(ready, _session("ready", identifier="ready-upload"))
     await repo.create_upload_session(deleted, _session("deleted", identifier="deleted-upload"))
+    await repo.create_upload_session(processing, _session("processing", identifier="processing-upload"))
+    await repo.create_upload_session(soft_deleted, _session("soft-deleted", identifier="soft-deleted-upload"))
     await _record_all_chunks(repo, _session("ready", identifier="ready-upload"))
     await repo.complete_upload("ready", "v1", now=NOW)
+    await _record_all_chunks(repo, _session("soft-deleted", identifier="soft-deleted-upload"))
+    await repo.complete_upload("soft-deleted", "v1", now=NOW)
 
     with sqlite3.connect(repo.database_path) as connection:
+        connection.execute(
+            "UPDATE assets SET deleted_at = ? WHERE asset_id = ?",
+            (NOW.isoformat(), "soft-deleted"),
+        )
         connection.execute(
             """
             INSERT INTO segments (

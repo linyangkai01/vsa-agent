@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -106,8 +107,47 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient,
     return TestClient(app), asset_id
 
 
-def test_vst_lists_ready_streams_sensors_and_storage_timeline(client: tuple[TestClient, str]) -> None:
+def test_vst_lists_ready_streams_sensors_and_real_storage_timeline(
+    client: tuple[TestClient, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     http, asset_id = client
+    from vsa_agent.api import recorded_video_vst
+
+    data_root = Path(recorded_video_vst.get_config().recorded_video.data_root)
+    with sqlite3.connect(data_root / "recorded-video.sqlite3") as connection:
+        connection.execute(
+            "UPDATE segments SET end_offset_ms = ?, end_time = ? WHERE asset_id = ?",
+            (2_000, (NOW + timedelta(seconds=2)).isoformat(), asset_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO segments (
+                segment_id, asset_id, pipeline_version, ordinal, start_offset_ms, end_offset_ms,
+                start_time, end_time, description, thumbnail_key, model, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "segment-2",
+                asset_id,
+                "v1",
+                1,
+                2_000,
+                10_000,
+                (NOW + timedelta(seconds=2)).isoformat(),
+                (NOW + timedelta(seconds=10)).isoformat(),
+                "yard",
+                "derived/v1/thumb.jpg",
+                None,
+                None,
+            ),
+        )
+        connection.commit()
+
+    async def fake_disk_usage(_store: LocalAssetStore) -> SimpleNamespace:
+        return SimpleNamespace(total=1_000, used=600, free=400)
+
+    monkeypatch.setattr(LocalAssetStore, "disk_usage", fake_disk_usage)
 
     streams = http.get("/api/v1/vst/v1/replay/streams")
     sensors = http.get("/api/v1/vst/v1/sensor/list")
@@ -116,9 +156,17 @@ def test_vst_lists_ready_streams_sensors_and_storage_timeline(client: tuple[Test
     assert streams.status_code == sensors.status_code == storage.status_code == 200
     assert streams.json()[0][asset_id][0]["streamId"] == asset_id
     assert sensors.json() == [{"name": "yard.mp4", "sensorId": asset_id, "state": "online", "type": "recorded"}]
-    assert storage.json()[asset_id]["timelines"][0]["startTime"] == NOW.isoformat()
-    assert storage.json()[asset_id]["timelines"][0]["sizeInMegabytes"] == pytest.approx(10 / 1_000_000)
-    assert storage.json()["total"]["sizeInMegabytes"] == pytest.approx(10 / 1_000_000)
+    timelines = storage.json()[asset_id]["timelines"]
+    assert timelines[0]["startTime"] == NOW.isoformat()
+    assert [timeline["sizeInMegabytes"] for timeline in timelines] == pytest.approx([2 / 1_000_000, 8 / 1_000_000])
+    assert storage.json()["total"] == pytest.approx(
+        {
+            "remainingStorageDays": 400 * 10_000 / (10 * 86_400_000),
+            "sizeInMegabytes": 600 / 1_000_000,
+            "totalAvailableStorageSize": 400 / 1_000_000,
+            "totalDiskCapacity": 1_000 / 1_000_000,
+        }
+    )
 
 
 def test_vst_returns_same_origin_media_url_and_segment_thumbnail(client: tuple[TestClient, str]) -> None:
@@ -154,3 +202,86 @@ def test_vst_clamps_requested_playback_offsets_to_asset_duration(client: tuple[T
     assert response.json()["startTime"] == 0
     assert response.json()["endTime"] == 10
     assert response.json()["videoUrl"].endswith("#t=0,10")
+
+
+@pytest.mark.parametrize(
+    ("status", "deleted_at"),
+    [(AssetStatus.PROCESSING, None), (AssetStatus.READY, NOW)],
+)
+def test_vst_hides_non_ready_and_soft_deleted_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: AssetStatus,
+    deleted_at: datetime | None,
+) -> None:
+    from vsa_agent.api import recorded_video_vst
+
+    data_root = tmp_path / "recorded-video"
+    config = AppConfig(recorded_video=RecordedVideoConfig(data_root=data_root, max_upload_bytes=1_024))
+    monkeypatch.setattr(recorded_video_vst, "get_config", lambda: config)
+    asset_id = _seed_ready_asset(data_root)
+    with sqlite3.connect(data_root / "recorded-video.sqlite3") as connection:
+        connection.execute(
+            "UPDATE assets SET status = ?, deleted_at = ? WHERE asset_id = ?",
+            (status.value, deleted_at.isoformat() if deleted_at else None, asset_id),
+        )
+        connection.commit()
+    app = FastAPI()
+    app.include_router(recorded_video_vst.router)
+    http = TestClient(app)
+
+    assert http.get("/api/v1/vst/v1/replay/streams").json() == []
+    assert http.get("/api/v1/vst/v1/sensor/list").json() == []
+    assert http.get(f"/api/v1/vst/v1/storage/file/{asset_id}").status_code == 404
+    assert (
+        http.get(
+            f"/api/v1/vst/v1/storage/file/{asset_id}/url",
+            params={"startTime": NOW.isoformat(), "endTime": (NOW + timedelta(seconds=1)).isoformat()},
+        ).status_code
+        == 404
+    )
+    assert (
+        http.get(
+            f"/api/v1/vst/v1/replay/stream/{asset_id}/picture",
+            params={"startTime": NOW.isoformat()},
+        ).status_code
+        == 404
+    )
+
+
+def test_vst_thumbnail_rejects_cross_asset_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video_vst
+
+    data_root = tmp_path / "recorded-video"
+    config = AppConfig(recorded_video=RecordedVideoConfig(data_root=data_root, max_upload_bytes=1_024))
+    monkeypatch.setattr(recorded_video_vst, "get_config", lambda: config)
+    asset_id = _seed_ready_asset(data_root)
+    link = data_root / "assets" / asset_id / "derived" / "v1" / "thumb.jpg"
+    target = data_root / "assets" / "other-asset" / "derived" / "v1" / "thumb.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"other-thumbnail")
+    link.unlink()
+    try:
+        link.symlink_to(target)
+    except OSError:
+        link.write_bytes(b"simulated-link")
+        real_resolve = Path.resolve
+
+        def resolve_cross_asset(candidate: Path, *args: object, **kwargs: object) -> Path:
+            if candidate == link:
+                return target
+            return real_resolve(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_cross_asset)
+    app = FastAPI()
+    app.include_router(recorded_video_vst.router)
+
+    response = TestClient(app).get(
+        f"/api/v1/vst/v1/replay/stream/{asset_id}/picture",
+        params={"startTime": NOW.isoformat()},
+    )
+
+    assert response.status_code == 404

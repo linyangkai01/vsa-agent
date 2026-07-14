@@ -113,6 +113,18 @@ async def test_free_bytes_reports_root_filesystem_capacity(
     assert await store.free_bytes() == 40
 
 
+async def test_disk_usage_reports_real_total_used_and_free_bytes(
+    store: LocalAssetStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = shutil._ntuple_diskusage(total=100, used=60, free=40)
+    monkeypatch.setattr("vsa_agent.recorded_video.assets.shutil.disk_usage", lambda path: usage)
+
+    reported = await store.disk_usage()
+
+    assert (reported.total, reported.used, reported.free) == (100, 60, 40)
+
+
 async def test_store_never_uses_user_filename_in_physical_path(store: LocalAssetStore) -> None:
     session = _session(total_chunks=1)
 
@@ -136,6 +148,58 @@ async def test_media_resolvers_only_return_existing_controlled_asset_files(store
     with pytest.raises(RecordedVideoError) as unsafe:
         await store.resolve_thumbnail_path(asset.asset_id, "../../outside.jpg")
     assert unsafe.value.code is ErrorCode.UNSUPPORTED_MEDIA
+
+
+@pytest.mark.parametrize("kind", ["source", "proxy", "thumbnail"])
+async def test_media_resolvers_reject_cross_asset_symlinks(
+    store: LocalAssetStore,
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = _asset(asset_id="asset-1", extension="mp4")
+    other = store.root / "assets" / "asset-2"
+    if kind == "source":
+        target = other / "source" / "original.mp4"
+        link = store.root / "assets" / "asset-1" / "source" / "original.mp4"
+    elif kind == "proxy":
+        target = other / "playback" / "proxy.mp4"
+        link = store.root / "assets" / "asset-1" / "playback" / "proxy.mp4"
+    else:
+        target = other / "derived" / "v1" / "thumb.jpg"
+        link = store.root / "assets" / "asset-1" / "derived" / "v1" / "thumb.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"other-asset")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        link.write_bytes(b"simulated-link")
+        real_resolve = Path.resolve
+
+        def resolve_cross_asset(candidate: Path, *args: object, **kwargs: object) -> Path:
+            if candidate == link:
+                return target
+            return real_resolve(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_cross_asset)
+
+    with pytest.raises(RecordedVideoError) as unsafe:
+        if kind == "source":
+            await store.resolve_source_path(asset)
+        elif kind == "proxy":
+            await store.resolve_playback_path(asset)
+        else:
+            await store.resolve_thumbnail_path(asset.asset_id, "derived/v1/thumb.jpg")
+
+    assert unsafe.value.code is ErrorCode.UNSUPPORTED_MEDIA
+
+
+async def test_mkv_playback_requires_published_mp4_proxy(store: LocalAssetStore) -> None:
+    asset = _asset(asset_id="asset-1", extension="mkv")
+    await store.write_atomic("assets/asset-1/source/original.mkv", b"matroska")
+
+    with pytest.raises(FileNotFoundError):
+        await store.resolve_playback_path(asset)
 
 
 async def test_duplicate_chunk_is_idempotent_but_conflicting_content_is_rejected(
@@ -297,10 +361,32 @@ async def test_concurrent_conflicting_chunk_writes_report_domain_conflict_withou
     assert not list(chunk.parent.glob("*.tmp"))
 
 
-async def test_open_media_range_reads_only_requested_bytes(store: LocalAssetStore) -> None:
+async def test_iter_media_range_reads_bounded_chunks(store: LocalAssetStore) -> None:
     path = await store.write_atomic(store.root / "assets" / "asset-uuid" / "derived.bin", b"012345")
 
-    assert await store.open_media_range(path, 1, 4) == b"123"
+    assert list(store.iter_media_range(path, 1, 6, chunk_size=2)) == [b"12", b"34", b"5"]
+
+
+async def test_iter_media_range_closes_file_when_consumer_disconnects(
+    store: LocalAssetStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path(await store.write_atomic("assets/asset-uuid/derived.bin", b"012345"))
+    real_open = Path.open
+    opened: list[object] = []
+
+    def tracking_open(candidate: Path, *args: object, **kwargs: object):
+        media = real_open(candidate, *args, **kwargs)
+        opened.append(media)
+        return media
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    stream = store.iter_media_range(path, 0, None, chunk_size=2)
+
+    assert next(stream) == b"01"
+    stream.close()
+
+    assert opened and opened[0].closed
 
 
 @pytest.mark.parametrize(

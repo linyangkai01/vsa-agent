@@ -6,14 +6,16 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from vsa_agent.config import get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
+from vsa_agent.recorded_video.errors import RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, AssetStatus, Segment
 from vsa_agent.recorded_video.repository import JobRepository
 
 router = APIRouter(prefix="/api/v1/vst", tags=["recorded-video-vst"])
+_MILLISECONDS_PER_DAY = 86_400_000
 
 
 def _repository_and_store() -> tuple[JobRepository, LocalAssetStore]:
@@ -84,6 +86,27 @@ def _timeline(segment: Segment, size_megabytes: float) -> dict[str, object]:
     }
 
 
+def _timeline_sizes(asset: Asset, segments: list[Segment]) -> list[float]:
+    durations = [max(segment.end_offset_ms - segment.start_offset_ms, 0) for segment in segments]
+    total_duration = sum(durations)
+    if total_duration <= 0:
+        return [0.0] * len(segments)
+    return [asset.size_bytes * duration / total_duration / 1_000_000 for duration in durations]
+
+
+def _remaining_storage_days(assets: list[Asset], free_bytes: int) -> float:
+    observed = [
+        asset
+        for asset in assets
+        if asset.size_bytes > 0 and asset.duration_ms is not None and asset.duration_ms > 0
+    ]
+    observed_bytes = sum(asset.size_bytes for asset in observed)
+    observed_duration_ms = sum(asset.duration_ms or 0 for asset in observed)
+    if observed_bytes <= 0 or observed_duration_ms <= 0:
+        return 0.0
+    return free_bytes * observed_duration_ms / (observed_bytes * _MILLISECONDS_PER_DAY)
+
+
 def _playback_offsets(asset: Asset, start: datetime, end: datetime) -> tuple[float, float]:
     start_offset = max((start - asset.timeline_origin).total_seconds(), 0.0)
     end_offset = max((end - asset.timeline_origin).total_seconds(), 0.0)
@@ -118,25 +141,24 @@ async def sensor_list() -> list[dict[str, str]]:
 @router.get("/v1/storage/size")
 async def storage_size(timelines: bool = False) -> dict[str, object]:
     del timelines
-    repository, _ = _repository_and_store()
+    repository, store = _repository_and_store()
     await repository.initialize()
     assets = await repository.list_ready_assets()
     response: dict[str, object] = {}
     for asset in assets:
         segments = await repository.list_segments(asset.asset_id)
-        timeline_size = asset.size_bytes / 1_000_000 / len(segments) if segments else 0
+        timeline_sizes = _timeline_sizes(asset, segments)
         response[asset.asset_id] = {
             "sizeInMegabytes": asset.size_bytes / 1_000_000,
             "state": "ready",
-            "timelines": [_timeline(segment, timeline_size) for segment in segments],
+            "timelines": [_timeline(segment, size) for segment, size in zip(segments, timeline_sizes, strict=True)],
         }
-    total_bytes = await repository.ready_storage_bytes()
-    total_megabytes = total_bytes / 1_000_000
+    usage = await store.disk_usage()
     response["total"] = {
-        "remainingStorageDays": 0,
-        "sizeInMegabytes": total_megabytes,
-        "totalAvailableStorageSize": total_megabytes,
-        "totalDiskCapacity": total_megabytes,
+        "remainingStorageDays": _remaining_storage_days(assets, usage.free),
+        "sizeInMegabytes": usage.used / 1_000_000,
+        "totalAvailableStorageSize": usage.free / 1_000_000,
+        "totalDiskCapacity": usage.total / 1_000_000,
     }
     return response
 
@@ -169,21 +191,23 @@ async def media(asset_id: str, request: Request) -> Response:
     asset = await _ready_asset(repository, asset_id)
     try:
         path = await store.resolve_playback_path(asset)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, RecordedVideoError) as exc:
         raise HTTPException(status_code=404, detail="media not found") from exc
     size = path.stat().st_size
     media_type = "video/mp4" if path.suffix.lower() == ".mp4" else asset.mime_type
     range_header = request.headers.get("range")
     if range_header is None:
-        content = await store.open_media_range(path, 0)
-        return Response(content=content, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+        return StreamingResponse(
+            store.iter_media_range(path, 0),
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", "Content-Length": str(size)},
+        )
     byte_range = _parse_byte_range(range_header, size)
     if byte_range is None:
         return Response(status_code=416, headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{size}"})
     start, end = byte_range
-    content = await store.open_media_range(path, start, end + 1)
-    return Response(
-        content=content,
+    return StreamingResponse(
+        store.iter_media_range(path, start, end + 1),
         status_code=206,
         media_type=media_type,
         headers={
@@ -205,6 +229,6 @@ async def replay_picture(asset_id: str, start_time: Annotated[str, Query(alias="
         if segment.thumbnail_key is None:
             raise KeyError("segment has no thumbnail")
         thumbnail = await store.resolve_thumbnail_path(asset_id, segment.thumbnail_key)
-    except (FileNotFoundError, KeyError):
+    except (FileNotFoundError, KeyError, RecordedVideoError):
         raise HTTPException(status_code=404, detail="thumbnail not found") from None
     return Response(content=thumbnail.read_bytes(), media_type="image/jpeg")

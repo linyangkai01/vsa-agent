@@ -9,10 +9,10 @@ import re
 import shutil
 import tempfile
 import threading
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, UploadSession
@@ -21,6 +21,12 @@ _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _ALLOWED_SOURCE_EXTENSIONS = frozenset({"mkv", "mp4"})
 _WINDOWS_DISK_FULL = 112
 _DISK_QUOTA_EXCEEDED = getattr(errno, "EDQUOT", 122)
+
+
+class StorageUsage(NamedTuple):
+    total: int
+    used: int
+    free: int
 
 
 class CleanupRepository(Protocol):
@@ -192,51 +198,65 @@ class LocalAssetStore:
                 temporary.unlink(missing_ok=True)
         return str(target)
 
-    async def open_media_range(self, media_path: str | Path, start: int, end: int | None = None) -> bytes:
+    def iter_media_range(
+        self,
+        media_path: str | Path,
+        start: int,
+        end: int | None = None,
+        *,
+        chunk_size: int = 64 * 1024,
+    ) -> Iterator[bytes]:
+        """Yield a bounded byte range and close the file when iteration stops."""
         if start < 0 or (end is not None and end < start):
             raise ValueError("media byte range is invalid")
+        if chunk_size <= 0:
+            raise ValueError("media chunk size must be positive")
         path = self._contained_path(media_path)
         try:
             with path.open("rb") as media:
                 media.seek(start)
-                return media.read(None if end is None else end - start)
+                remaining = None if end is None else end - start
+                while remaining is None or remaining > 0:
+                    read_size = chunk_size if remaining is None else min(chunk_size, remaining)
+                    chunk = media.read(read_size)
+                    if not chunk:
+                        break
+                    yield chunk
+                    if remaining is not None:
+                        remaining -= len(chunk)
         except OSError as error:
             self._raise_storage_error(error)
             raise
 
     async def resolve_source_path(self, asset: Asset) -> Path:
         """Resolve an existing original source through the controlled asset layout."""
-        asset_root = self._asset_root(asset.asset_id)
         extension = asset.source_extension.lower().removeprefix(".")
         if extension not in _ALLOWED_SOURCE_EXTENSIONS:
             raise self._unsafe_path_error(asset.source_extension)
-        source = asset_root / "source" / f"original.{extension}"
-        if not source.is_file():
-            raise FileNotFoundError(source)
-        return source
+        return self._resolve_asset_file(asset.asset_id, Path("source") / f"original.{extension}")
 
     async def resolve_playback_path(self, asset: Asset) -> Path:
         """Prefer a published browser playback proxy, then fall back to the source."""
-        proxy = self._asset_root(asset.asset_id) / "playback" / "proxy.mp4"
-        if proxy.is_file():
-            return proxy
-        return await self.resolve_source_path(asset)
+        try:
+            return self._resolve_asset_file(asset.asset_id, Path("playback") / "proxy.mp4")
+        except FileNotFoundError:
+            if asset.source_extension.lower().removeprefix(".") != "mp4":
+                raise
+            return await self.resolve_source_path(asset)
 
     async def resolve_thumbnail_path(self, asset_id: str, thumbnail_key: str) -> Path:
         """Resolve an existing segment thumbnail without allowing asset-root escapes."""
         if not thumbnail_key or Path(thumbnail_key).is_absolute():
             raise self._unsafe_path_error(thumbnail_key)
-        asset_root = self._asset_root(asset_id)
-        thumbnail = (asset_root / thumbnail_key).resolve()
-        if not thumbnail.is_relative_to(asset_root):
-            raise self._unsafe_path_error(thumbnail_key)
-        if not thumbnail.is_file():
-            raise FileNotFoundError(thumbnail)
-        return thumbnail
+        return self._resolve_asset_file(asset_id, Path(thumbnail_key))
 
     async def free_bytes(self) -> int:
+        return (await self.disk_usage()).free
+
+    async def disk_usage(self) -> StorageUsage:
         try:
-            return shutil.disk_usage(self.root).free
+            usage = shutil.disk_usage(self.root)
+            return StorageUsage(total=usage.total, used=usage.used, free=usage.free)
         except OSError as error:
             self._raise_storage_error(error)
             raise
@@ -273,6 +293,15 @@ class LocalAssetStore:
 
     def _asset_root(self, asset_id: str) -> Path:
         return self.root / "assets" / self._validate_component(asset_id, "asset_id")
+
+    def _resolve_asset_file(self, asset_id: str, relative_path: Path) -> Path:
+        asset_root = self._asset_root(asset_id)
+        resolved = (asset_root / relative_path).resolve()
+        if not resolved.is_relative_to(asset_root):
+            raise self._unsafe_path_error(relative_path)
+        if not resolved.is_file():
+            raise FileNotFoundError(resolved)
+        return resolved
 
     def _validate_component(self, value: str, name: str) -> str:
         if _SAFE_COMPONENT.fullmatch(value) is None or value in {".", ".."}:
