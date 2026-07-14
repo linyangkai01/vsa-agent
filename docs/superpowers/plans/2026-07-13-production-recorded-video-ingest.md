@@ -254,16 +254,16 @@ async def test_delete_requests_cancel_then_is_idempotent(client, running_asset):
 - Consumes: Task 2 的 `Segmenter` 协议。
 - Produces: `FixedDurationSegmenter(Segmenter)`，其 `plan(asset, duration_ms) -> list[Segment]`。
 
-- [ ] **Step 1: 写边界分段和 ISO/offset 换算测试。**
+- [x] **Step 1: 写边界分段和 ISO/offset 换算测试。**
 ```python
 def test_fixed_duration_segmenter_emits_stable_last_partial_segment():
     segments = FixedDurationSegmenter(30).plan(asset("a", "2026-01-01T00:00:00Z"), 61_000)
     assert [(s.ordinal,s.start_offset_ms,s.end_offset_ms) for s in segments] == [(0,0,30000),(1,30000,60000),(2,60000,61000)]
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_segmenter.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现固定分段算法。** `FixedDurationSegmenter` 实现 Task 2 已定义的 `Segmenter` 协议；固定时段按毫秒左闭右开区间，时间显示使用 `timeline_origin + offset`，segment ID 调用 Task 2 的 `segment_id`，本任务不再修改协议文件。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_segmenter.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/segmenter.py tests/unit/recorded_video/test_segmenter.py && git commit -m "feat: add replaceable recorded video segmentation"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_segmenter.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现固定分段算法。** `FixedDurationSegmenter` 实现 Task 2 已定义的 `Segmenter` 协议；固定时段按毫秒左闭右开区间，时间显示使用 `timeline_origin + offset`，segment ID 调用 Task 2 的 `segment_id`，本任务不再修改协议文件。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_segmenter.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/segmenter.py tests/unit/recorded_video/test_segmenter.py && git commit -m "feat: add replaceable recorded video segmentation"`。
 
 ### Task 10: ffprobe、代表帧和浏览器 proxy（OpenSpec 3.3）
 
