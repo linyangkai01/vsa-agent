@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import pytest
 
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
 POWERSHELL_SCRIPT = Path("scripts/es-runtime-stack.ps1")
+POWERSHELL_LOG_PUMP = Path("scripts/lib/RuntimeLogPump.cs")
 
 
 def _bash() -> str:
@@ -118,6 +120,20 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     scripts.mkdir(parents=True)
     fake_bin.mkdir()
     shutil.copy2(BASH_SCRIPT, scripts / BASH_SCRIPT.name)
+    (repo / ".deps").mkdir()
+    (repo / ".deps/node-env.sh").write_text("", encoding="utf-8")
+    turbo = repo / "frontend/original-ui/node_modules/.bin/turbo"
+    turbo.parent.mkdir(parents=True)
+    _write_executable(turbo, "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(
+        scripts / "run_original_ui_vss.sh",
+        """
+        #!/usr/bin/env bash
+        echo 'ui ready'
+        trap 'exit 0' TERM INT
+        while :; do sleep 0.1; done
+        """,
+    )
     (repo / "config.yaml").write_text(
         """search:\n  enabled: false\nrecorded_video:\n  enabled: true\n  data_root: .runtime/recorded-video\n""",
         encoding="utf-8",
@@ -136,6 +152,7 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         if [[ -n "${HARNESS_FOREIGN_PID:-}" ]]; then printf '%s\n' "$HARNESS_FOREIGN_PID"; fi
         """,
     )
+    _write_executable(fake_bin / "npm", "#!/usr/bin/env bash\nexit 0\n")
     _write_executable(
         fake_bin / "docker",
         """
@@ -158,6 +175,7 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           if [[ "${HARNESS_DELETE_FAIL:-0}" == "1" ]]; then exit 22; fi
           exit 0
         fi
+        if [[ "$*" == *"/api/v1/search"* ]]; then printf '405'; exit 0; fi
         if [[ "$*" == *"/health"* ]]; then printf '{"status":"ok"}\n'; else printf '{}\n'; fi
         """,
     )
@@ -183,6 +201,10 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           printf 'api_config=%s\n' "$VSA_CONFIG" >>"$HARNESS_TRACE"
           echo 'Authorization: Bearer api-secret'
           trap 'exit 0' TERM INT
+          if [[ -n "${HARNESS_API_EXIT_AFTER:-}" ]]; then
+            sleep "$HARNESS_API_EXIT_AFTER"
+            exit 17
+          fi
           while :; do sleep 0.1; done
         fi
         if [[ "$1" == "scripts/recorded-video-worker.py" ]]; then
@@ -200,6 +222,7 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         fi
         if [[ "$1" == "scripts/es_ingest_smoke.py" ]]; then
           printf 'smoke=%s\n' "$*" >>"$HARNESS_TRACE"
+          if [[ -n "${HARNESS_SMOKE_SLEEP:-}" ]]; then sleep "$HARNESS_SMOKE_SLEEP"; fi
           exit "${HARNESS_SMOKE_STATUS:-0}"
         fi
         exec "$REAL_PYTHON" "$@"
@@ -252,6 +275,173 @@ def _run_bash_runtime(repo: Path, env: dict[str, str], *args: str) -> subprocess
         capture_output=True,
         text=True,
         timeout=20,
+    )
+
+
+def _powershell_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    repo = tmp_path / "powershell-runtime-repo"
+    scripts = repo / "scripts"
+    fake_bin = repo / "fake-bin"
+    scripts.mkdir(parents=True)
+    fake_bin.mkdir()
+    shutil.copy2(POWERSHELL_SCRIPT, scripts / POWERSHELL_SCRIPT.name)
+    (scripts / "lib").mkdir()
+    shutil.copy2(POWERSHELL_LOG_PUMP, scripts / "lib" / POWERSHELL_LOG_PUMP.name)
+    (repo / ".deps").mkdir()
+    (repo / ".deps/node-env.sh").write_text("", encoding="utf-8")
+    turbo = repo / "frontend/original-ui/node_modules/.bin/turbo"
+    turbo.parent.mkdir(parents=True)
+    _write_executable(turbo, "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(scripts / "bootstrap_node.sh", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(
+        scripts / "run_original_ui_vss.sh",
+        """
+        #!/usr/bin/env bash
+        while :; do sleep 0.1; done
+        """,
+    )
+    (repo / "config.yaml").write_text(
+        """search:\n  enabled: false\nrecorded_video:\n  enabled: true\n  data_root: .runtime/recorded-video\n""",
+        encoding="utf-8",
+    )
+    (scripts / "es-dev-start.ps1").write_text("& docker compose up | Out-Null\n", encoding="utf-8")
+    (scripts / "es-dev-stop.ps1").write_text("& docker compose down | Out-Null\n", encoding="utf-8")
+    fake_runtime = textwrap.dedent(
+        """
+        import json
+        import os
+        from pathlib import Path
+        import sys
+        import time
+
+        trace = Path(os.environ["HARNESS_TRACE"])
+        with trace.open("a", encoding="utf-8") as stream:
+            stream.write(f"{Path(sys.argv[0]).name}={' '.join(sys.argv[1:])}\\n")
+        """
+    )
+    (repo / "inspect").write_text(fake_runtime + "print('true')\n", encoding="utf-8")
+    (repo / "compose").write_text(fake_runtime + "if 'logs' in sys.argv:\n    time.sleep(3600)\n", encoding="utf-8")
+    shutil.copy2(Path(sys.executable), fake_bin / "docker.exe")
+    (repo / "uvicorn.py").write_text(
+        fake_runtime
+        + """
+with trace.open("a", encoding="utf-8") as stream:
+    stream.write(f"api_config={os.environ.get('VSA_CONFIG', '')}\\n")
+delay = int(os.environ.get("HARNESS_API_EXIT_AFTER_MS", "0"))
+if delay:
+    time.sleep(delay / 1000)
+    raise SystemExit(17)
+time.sleep(3600)
+""",
+        encoding="utf-8",
+    )
+    (scripts / "runtime-doctor.py").write_text(fake_runtime + "print('api_key=doctor-secret')\n", encoding="utf-8")
+    (scripts / "recorded-video-worker.py").write_text(
+        fake_runtime
+        + """
+config = Path(sys.argv[sys.argv.index("--config") + 1])
+with trace.open("a", encoding="utf-8") as stream:
+    stream.write(f"worker_config={config}\\n")
+if os.environ.get("HARNESS_WORKER_READY") == "0":
+    raise SystemExit(7)
+(config.parent / "worker.log").write_text(
+    json.dumps({"event": "worker.readiness", "ready": True}) + "\\n",
+    encoding="utf-8",
+)
+time.sleep(3600)
+""",
+        encoding="utf-8",
+    )
+    (scripts / "es_ingest_smoke.py").write_text(
+        fake_runtime
+        + """
+with trace.open("a", encoding="utf-8") as stream:
+    stream.write(f"smoke={' '.join(sys.argv[1:])}\\n")
+time.sleep(int(os.environ.get("HARNESS_SMOKE_SLEEP_MS", "0")) / 1000)
+raise SystemExit(int(os.environ.get("HARNESS_SMOKE_STATUS", "0")))
+""",
+        encoding="utf-8",
+    )
+    trace = repo / "trace.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+            "HARNESS_TRACE": str(trace),
+        }
+    )
+    return repo, env
+
+
+def _run_powershell_runtime(
+    repo: Path,
+    env: dict[str, str],
+    *args: str,
+    timeout: float = 60,
+) -> subprocess.CompletedProcess[str]:
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    launcher_args = " ".join(args)
+    launcher = (repo / "scripts/es-runtime-stack.ps1").resolve()
+    trace = (repo / "trace.log").resolve()
+    probe = repo / "run-launcher.ps1"
+    probe.write_text(
+        textwrap.dedent(
+            f"""
+            $ErrorActionPreference = 'Stop'
+            function Get-NetTCPConnection {{ return @() }}
+            function Invoke-RestMethod {{ [pscustomobject]@{{ status = 'ok' }} }}
+            function Invoke-WebRequest {{
+                param($Uri, $Method, $TimeoutSec, [switch]$UseBasicParsing)
+                if ($Method -eq 'Delete') {{
+                    [IO.File]::AppendAllText('{trace}', "delete=$Uri`n")
+                    return [pscustomobject]@{{ StatusCode = 200 }}
+                }}
+                if ("$Uri" -like '*/api/v1/search') {{
+                    $exception = [Exception]::new('method not allowed')
+                    $response = [pscustomobject]@{{ StatusCode = [pscustomobject]@{{ value__ = 405 }} }}
+                    $exception | Add-Member -NotePropertyName Response -NotePropertyValue $response
+                    throw $exception
+                }}
+                return [pscustomobject]@{{ StatusCode = 200 }}
+            }}
+            try {{
+                & '{launcher}' {launcher_args}
+                [IO.File]::AppendAllText(
+                    '{trace}',
+                    "wrapper=returned;last=$LASTEXITCODE;env=$([Environment]::ExitCode);errors=$($Error.Count);ok=$?`n"
+                )
+                exit 0
+            }} catch {{
+                [Console]::Error.WriteLine($_.Exception.Message)
+                [IO.File]::AppendAllText('{trace}', "wrapper=failed`n")
+                exit 1
+            }}
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    command = [powershell, "-NoProfile", "-NonInteractive", "-File", str(probe)]
+    stdout_path = repo / "launcher.stdout.log"
+    stderr_path = repo / "launcher.stderr.log"
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        result = subprocess.run(
+            command,
+            cwd=repo,
+            env=env,
+            check=False,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            timeout=timeout,
+        )
+    return subprocess.CompletedProcess(
+        command,
+        result.returncode,
+        stdout_path.read_text(encoding="utf-8"),
+        stderr_path.read_text(encoding="utf-8"),
     )
 
 
@@ -359,6 +549,54 @@ def test_bash_worker_readiness_failure_cleans_started_processes(tmp_path: Path):
     assert "recorded-video Worker exited before readiness" in (run_dir / "stack.log").read_text(encoding="utf-8")
 
 
+def test_bash_normal_start_never_invokes_validation_smoke(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_API_EXIT_AFTER"] = "1"
+
+    completed = _run_bash_runtime(repo, env, "--timeout-sec", "3")
+
+    assert completed.returncode == 17, completed.stderr
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "smoke=" not in trace
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker", "ui"}
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+
+
+@pytest.mark.parametrize("signal_name", ["TERM", "INT"])
+def test_bash_interruption_cleans_validation_index_data_and_config(tmp_path: Path, signal_name: str):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_SMOKE_SLEEP"] = "30"
+    bash = shutil.which("bash")
+    assert bash is not None
+    launcher = (repo / "scripts/es-runtime-stack.sh").as_posix()
+
+    completed = subprocess.run(
+        [
+            bash,
+            "-c",
+            'timeout --preserve-status -k 5 -s "$1" 3 "$2" --validate --smoke-only --timeout-sec 3',
+            "bash",
+            signal_name,
+            launcher,
+        ],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode == 130, completed.stderr
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "-X DELETE" in trace
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+
+
 def test_bash_runtime_monitor_detects_api_exit_while_worker_and_ui_continue():
     functions = "\n".join(_bash_function(name) for name in ("pid_is_running", "wait_runtime_processes"))
     probe = f"""
@@ -377,6 +615,87 @@ def test_bash_runtime_monitor_detects_api_exit_while_worker_and_ui_continue():
 
     assert completed.returncode != 0
     assert "api" in completed.stderr
+
+
+def test_powershell_full_validation_run_records_manifest_and_shared_isolated_config(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+
+    completed = _run_powershell_runtime(
+        repo,
+        env,
+        "-Validate",
+        "-SmokeOnly",
+        "-TimeoutSec",
+        "3",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker"}
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "wrapper=returned" in trace
+    api_config = re.search(r"^api_config=(.+)$", trace, re.MULTILINE).group(1)  # type: ignore[union-attr]
+    worker_config = re.search(r"^worker_config=(.+)$", trace, re.MULTILINE).group(1)  # type: ignore[union-attr]
+    assert api_config == worker_config
+    assert api_config.endswith("validation-config.yaml")
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}-legacy-smoke" in trace
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
+
+
+def test_powershell_log_pump_avoids_runspace_callbacks_and_exit_code_resets():
+    launcher = _powershell()
+    log_pump = POWERSHELL_LOG_PUMP.read_text(encoding="utf-8")
+
+    for forbidden in (
+        "DataReceivedEventHandler",
+        "add_OutputDataReceived",
+        "add_ErrorDataReceived",
+        "BeginOutputReadLine",
+        "BeginErrorReadLine",
+        "$global:LASTEXITCODE = 0",
+        "[Environment]::ExitCode = 0",
+    ):
+        assert forbidden not in launcher
+    assert "Add-Type -Path $sourcePath" in launcher
+    assert "class VsaRuntimeLogPump" in log_pump
+
+
+def test_powershell_worker_readiness_failure_cleans_started_runtime(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    env["HARNESS_WORKER_READY"] = "0"
+
+    completed = _run_powershell_runtime(
+        repo,
+        env,
+        "-Validate",
+        "-SmokeOnly",
+        "-TimeoutSec",
+        "2",
+    )
+
+    assert completed.returncode != 0
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    assert not (run_dir / "validation-config.yaml").exists()
+
+
+def test_powershell_normal_start_never_invokes_validation_smoke(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    env["HARNESS_API_EXIT_AFTER_MS"] = "1000"
+
+    completed = _run_powershell_runtime(repo, env, "-TimeoutSec", "3")
+
+    assert completed.returncode != 0
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "smoke=" not in trace
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker", "ui"}
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
 
 
 def test_launchers_create_uuid_run_evidence_and_latest_pointer():
@@ -503,6 +822,7 @@ def test_launchers_only_reclaim_listeners_verified_as_current_user():
 def test_component_output_is_aggregated_with_required_prefixes():
     bash = _bash()
     powershell = _powershell()
+    powershell_log_pump = POWERSHELL_LOG_PUMP.read_text(encoding="utf-8")
 
     assert "[stack]" in bash
     assert 'sed -u "s/^/[$label] /"' in bash
@@ -510,7 +830,8 @@ def test_component_output_is_aggregated_with_required_prefixes():
     assert "redact_component_output" in bash
 
     assert "[stack]" in powershell
-    assert '$prefix = "[$Component]"' in powershell
+    assert '"[$Component]"' in powershell
+    assert "PublishProtected" in powershell_log_pump
     for component in ("api", "worker", "ui", "es"):
         assert f'-Component "{component}"' in powershell
 
@@ -660,6 +981,36 @@ def test_runtime_redactor_hides_header_token_and_image_payload(
     assert "[REDACTED]" in completed.stdout
 
 
+@pytest.mark.parametrize("launcher", ["bash", "powershell"])
+def test_runtime_redactor_covers_quoted_json_secrets_and_multiline_image_payload(launcher: str):
+    first_chunk = "A" * 96
+    second_chunk = "B" * 96
+    payload = (
+        '{"Authorization":"Bearer json-auth-secret","api_key":"json-api-secret",'
+        '"token":"json-token-secret","password":"json-password-secret",'
+        f'"image":"data:image/png;base64,\n{first_chunk}\n{second_chunk}"}}'
+    )
+    if launcher == "bash":
+        function = _bash_function("redact_runtime_text")
+        completed = _run_bash_probe(f"{function}\nprintf %s {shlex.quote(payload)} | redact_runtime_text")
+    else:
+        function = _powershell_function("Protect-RuntimeText")
+        escaped = payload.replace("'", "''")
+        completed = _run_powershell_probe(f"{function}\nProtect-RuntimeText @'\n{escaped}\n'@")
+
+    assert completed.returncode == 0, completed.stderr
+    for secret in (
+        "json-auth-secret",
+        "json-api-secret",
+        "json-token-secret",
+        "json-password-secret",
+        first_chunk,
+        second_chunk,
+    ):
+        assert secret not in completed.stdout
+    assert "[REDACTED" in completed.stdout
+
+
 def test_powershell_shutdown_does_not_block_on_a_stubborn_process():
     function = _powershell_function("Stop-OwnedProcessTree")
     probe = f"""
@@ -668,17 +1019,58 @@ def test_powershell_shutdown_does_not_block_on_a_stubborn_process():
     function taskkill.exe {{ }}
     {function}
     $child = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 2') -PassThru
+    $childId = $child.Id
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $stopArgs = @{{ Component = 'worker'; Process = $child; GraceTimeoutMs = 100; ForceTimeoutMs = 100 }}
     try {{ Stop-OwnedProcessTree @stopArgs }} catch {{ }}
     $watch.Stop()
-    if (-not $child.HasExited) {{ Stop-Process -Id $child.Id -Force }}
+    if (Get-Process -Id $childId -ErrorAction SilentlyContinue) {{ Stop-Process -Id $childId -Force }}
     if ($watch.ElapsedMilliseconds -ge 1000) {{ exit 8 }}
     """
 
     completed = _run_powershell_probe(probe)
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_powershell_log_pump_drains_bounded_stdout_and_stderr_without_secret_leaks(tmp_path: Path):
+    functions = "\n".join(
+        _powershell_function(name)
+        for name in ("Protect-RuntimeText", "ConvertTo-NativeArgument", "Start-LoggedProcess", "Stop-OwnedProcessTree")
+    )
+    component_log = tmp_path / "component.log"
+    stack_log = tmp_path / "stack.log"
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    $stackLogPath = '{stack_log}'
+    function Add-ManagedProcess {{ }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {functions}
+    $null = Protect-RuntimeText ''
+    $command = @'
+1..2000 | ForEach-Object {{
+    [Console]::Out.WriteLine("stdout-$($_) token=stdout-secret")
+    [Console]::Error.WriteLine("stderr-$($_) password=stderr-secret")
+}}
+'@
+    $child = Start-LoggedProcess -Component 'probe' -FilePath 'powershell' `
+        -Arguments @('-NoProfile', '-NonInteractive', '-Command', $command) `
+        -WorkingDirectory '{tmp_path}' -LogPath '{component_log}' -SafeCommand 'probe' -Record:$false
+    if (-not $child.WaitForExit(10000)) {{ throw 'child output blocked' }}
+    Stop-OwnedProcessTree -Component 'probe' -Process $child -LogDrainTimeoutMs 10000
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+    component = component_log.read_text(encoding="utf-8")
+    stack = stack_log.read_text(encoding="utf-8")
+    assert "stdout-2000 token=[REDACTED]" in component
+    assert "stderr-2000 password=[REDACTED]" in component
+    assert "[probe] stdout-2000 token=[REDACTED]" in stack
+    assert "[probe] stderr-2000 password=[REDACTED]" in stack
+    assert "stdout-secret" not in component + stack
+    assert "stderr-secret" not in component + stack
 
 
 def test_powershell_validation_delete_failure_is_reported_after_local_cleanup(tmp_path: Path):
@@ -710,6 +1102,44 @@ def test_powershell_validation_delete_failure_is_reported_after_local_cleanup(tm
     assert not validation_root.exists()
     assert not config.exists()
     assert not validation_config.exists()
+
+
+def test_powershell_validation_local_delete_failure_continues_and_names_failed_path(tmp_path: Path):
+    function = _powershell_function("DeleteValidationResources")
+    validation_root = tmp_path / "blocked-validation-data"
+    config = tmp_path / "config.yaml"
+    validation_config = tmp_path / "validation-config.yaml"
+    probe = f"""
+    $Validate = $true
+    $esEndpoint = 'http://127.0.0.1:9200'
+    $validationSmokeIndex = 'validation-test-legacy-smoke'
+    $validationDataRoot = '{validation_root}'
+    $validationConfigPath = '{validation_config}'
+    $configPath = '{config}'
+    $validationIndex = 'validation-test'
+    $script:removedPaths = [System.Collections.Generic.List[string]]::new()
+    $script:messages = [System.Collections.Generic.List[string]]::new()
+    function Write-Stack {{ param($Message, [switch]$ErrorLine) $script:messages.Add("$Message") }}
+    function Invoke-WebRequest {{ }}
+    function Test-Path {{ return $true }}
+    function Remove-Item {{
+        param($LiteralPath, [switch]$Force, [switch]$Recurse, $ErrorAction)
+        foreach ($path in @($LiteralPath)) {{
+            if ($path -eq $validationDataRoot) {{ throw "blocked $path" }}
+            $script:removedPaths.Add("$path") | Out-Null
+        }}
+    }}
+    {function}
+    $removed = DeleteValidationResources
+    if ($removed -ne $false) {{ exit 11 }}
+    if (-not $script:removedPaths.Contains($validationConfigPath)) {{ exit 12 }}
+    if (-not $script:removedPaths.Contains($configPath)) {{ exit 13 }}
+    if (($script:messages -join "`n") -notmatch [regex]::Escape($validationDataRoot)) {{ exit 14 }}
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("owner_case", ["missing", "wrong-domain"])

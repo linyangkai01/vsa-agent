@@ -116,10 +116,12 @@ import sys
 
 def protect(text):
     text = re.sub(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)([\"'"'"']authorization[\"'"'"']\s*:\s*[\"'"'"'])(?:bearer\s+)?[^\"'"'"']*([\"'"'"'])", r"\1[REDACTED]\2", text)
     text = re.sub(r"(?i)([\"'"'"'](?:api[-_]?key|access[-_]?token|token|password)[\"'"'"']\s*:\s*[\"'"'"'])[^\"'"'"']*([\"'"'"'])", r"\1[REDACTED]\2", text)
     text = re.sub(r"(?i)((?:api[-_]?key|access[-_]?token|token|password)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(?i)data:image/[^;\s\"'"'"']+;base64,[A-Za-z0-9+/=_-]+", "[REDACTED_IMAGE]", text)
-    return re.sub(r"(?i)([\"'"'"'](?:image|image_url|input_image|b64_json)[\"'"'"']\s*:\s*[\"'"'"'])[A-Za-z0-9+/=_-]{64,}([\"'"'"'])", r"\1[REDACTED_IMAGE]\2", text)
+    text = re.sub(r"(?i)data:image/[^;\s\"'"'"']+;base64,[A-Za-z0-9+/=_-]*", "[REDACTED_IMAGE]", text)
+    text = re.sub(r"(?i)([\"'"'"'](?:image|image_url|input_image|b64_json)[\"'"'"']\s*:\s*[\"'"'"'])[A-Za-z0-9+/=_-]{64,}([\"'"'"'])", r"\1[REDACTED_IMAGE]\2", text)
+    return re.sub(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{64,}(?![A-Za-z0-9+/=_-])", "[REDACTED_BASE64]", text)
 
 for line in sys.stdin:
     sys.stdout.write(protect(line))

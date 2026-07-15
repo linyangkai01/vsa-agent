@@ -64,22 +64,21 @@ New-Item -ItemType Junction -Path $latestLink -Target $runDir | Out-Null
 
 function Write-Stack {
     param([string]$Message, [switch]$ErrorLine)
-    $line = "[stack] $(Protect-RuntimeText $Message)"
-    [System.IO.File]::AppendAllText($stackLogPath, $line + [Environment]::NewLine)
-    if ($ErrorLine) {
-        [Console]::Error.WriteLine($line)
-    } else {
-        [Console]::WriteLine($line)
-    }
+    $protected = Protect-RuntimeText $Message
+    [VsaRuntimeLogPump]::PublishProtected("", $stackLogPath, "[stack]", $protected, $ErrorLine.IsPresent)
 }
 
 function Protect-RuntimeText {
     param([AllowEmptyString()][string]$Text)
-    $protected = [regex]::Replace($Text, '(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+', '${1}[REDACTED]')
-    $protected = [regex]::Replace($protected, '(?i)(["''](?:api[-_]?key|access[-_]?token|token|password)["'']\s*:\s*["''])[^"'']*(["''])', '${1}[REDACTED]${2}')
-    $protected = [regex]::Replace($protected, '(?i)((?:api[-_]?key|access[-_]?token|token|password)\s*[:=]\s*)[^\s,;]+', '${1}[REDACTED]')
-    $protected = [regex]::Replace($protected, '(?i)data:image/[^;\s"'']+;base64,[A-Za-z0-9+/=_-]+', '[REDACTED_IMAGE]')
-    return [regex]::Replace($protected, '(?i)(["''](?:image|image_url|input_image|b64_json)["'']\s*:\s*["''])[A-Za-z0-9+/=_-]{64,}(["''])', '${1}[REDACTED_IMAGE]${2}')
+    if (-not ("VsaRuntimeLogPump" -as [type])) {
+        $sourcePath = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+            Join-Path (Get-Location) "scripts\\lib\\RuntimeLogPump.cs"
+        } else {
+            Join-Path $PSScriptRoot "lib\\RuntimeLogPump.cs"
+        }
+        Add-Type -Path $sourcePath
+    }
+    return [VsaRuntimeLogPump]::ProtectText($Text)
 }
 
 function Write-ProcessManifest {
@@ -149,32 +148,20 @@ function Start-LoggedProcess {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw "Failed to start $Component" }
-
-    $prefix = "[$Component]"
-    $onOutput = {
-        param($sender, $eventArgs)
-        if ($null -eq $eventArgs.Data) { return }
-        $redacted = Protect-RuntimeText $eventArgs.Data
-        [System.IO.File]::AppendAllText($LogPath, $redacted + [Environment]::NewLine)
-        $line = "$prefix $redacted"
-        [System.IO.File]::AppendAllText($stackLogPath, $line + [Environment]::NewLine)
-        [Console]::WriteLine($line)
-    }.GetNewClosure()
-    $onError = {
-        param($sender, $eventArgs)
-        if ($null -eq $eventArgs.Data) { return }
-        $redacted = Protect-RuntimeText $eventArgs.Data
-        [System.IO.File]::AppendAllText($LogPath, $redacted + [Environment]::NewLine)
-        $line = "$prefix $redacted"
-        [System.IO.File]::AppendAllText($stackLogPath, $line + [Environment]::NewLine)
-        [Console]::Error.WriteLine($line)
-    }.GetNewClosure()
-    $process.add_OutputDataReceived([System.Diagnostics.DataReceivedEventHandler]$onOutput)
-    $process.add_ErrorDataReceived([System.Diagnostics.DataReceivedEventHandler]$onError)
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-    $process | Add-Member -NotePropertyName VsaOutputHandler -NotePropertyValue $onOutput
-    $process | Add-Member -NotePropertyName VsaErrorHandler -NotePropertyValue $onError
+    try {
+        $logPump = [VsaRuntimeLogPump]::new(
+            $process.StandardOutput,
+            $process.StandardError,
+            $LogPath,
+            $stackLogPath,
+            "[$Component]"
+        )
+        $process | Add-Member -NotePropertyName VsaLogPump -NotePropertyValue $logPump
+    } catch {
+        if (-not $process.HasExited) { $process.Kill() }
+        $process.Dispose()
+        throw
+    }
     if ($Record) {
         Add-ManagedProcess -Component $Component -ProcessId $process.Id -SafeCommand $SafeCommand
     }
@@ -346,29 +333,39 @@ function Stop-OwnedProcessTree {
         [string]$Component,
         [System.Diagnostics.Process]$Process,
         [int]$GraceTimeoutMs = 5000,
-        [int]$ForceTimeoutMs = 5000
+        [int]$ForceTimeoutMs = 5000,
+        [int]$LogDrainTimeoutMs = 5000
     )
     if ($null -eq $Process) { return }
     $Process.Refresh()
     if (-not $Process.HasExited) {
-        & taskkill.exe /PID $Process.Id /T | Out-Null
+        & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T >nul 2>nul"
+        $graceTaskkillStatus = $LASTEXITCODE
         if (-not $Process.WaitForExit($GraceTimeoutMs)) {
             $Process.Refresh()
-            if (-not $Process.HasExited) { & taskkill.exe /PID $Process.Id /T /F | Out-Null }
+            if (-not $Process.HasExited) {
+                & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T /F >nul 2>nul"
+                $forceTaskkillStatus = $LASTEXITCODE
+            }
             if (-not $Process.WaitForExit($ForceTimeoutMs)) {
                 throw "Process $Component (PID $($Process.Id)) did not exit after forced shutdown"
             }
         }
     }
-    if ($null -ne $Process.VsaOutputHandler) {
-        $Process.CancelOutputRead()
-        $Process.remove_OutputDataReceived($Process.VsaOutputHandler)
+    $exitCode = $Process.ExitCode
+    $pumpError = $null
+    try {
+        if ($null -ne $Process.VsaLogPump) {
+            $Process.VsaLogPump.Complete($LogDrainTimeoutMs)
+        }
+    } catch {
+        $pumpError = $_.Exception
+    } finally {
+        Set-ProcessExit -Component $Component -ExitStatus $exitCode
+        if ($null -ne $Process.VsaLogPump) { $Process.VsaLogPump.Dispose() }
+        $Process.Dispose()
     }
-    if ($null -ne $Process.VsaErrorHandler) {
-        $Process.CancelErrorRead()
-        $Process.remove_ErrorDataReceived($Process.VsaErrorHandler)
-    }
-    Set-ProcessExit -Component $Component -ExitStatus $Process.ExitCode
+    if ($null -ne $pumpError) { throw $pumpError }
 }
 
 function DeleteValidationResources {
@@ -380,8 +377,19 @@ function DeleteValidationResources {
         Write-Stack "failed to remove validation index $validationSmokeIndex`: $($_.Exception.Message)" -ErrorLine
         $removed = $false
     }
-    Remove-Item -LiteralPath $validationDataRoot -Force -Recurse -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $validationConfigPath, $configPath -Force -ErrorAction SilentlyContinue
+    foreach ($resource in @(
+        @{ Path = $validationDataRoot; Recurse = $true },
+        @{ Path = $validationConfigPath; Recurse = $false },
+        @{ Path = $configPath; Recurse = $false }
+    )) {
+        if (-not (Test-Path -LiteralPath $resource.Path)) { continue }
+        try {
+            Remove-Item -LiteralPath $resource.Path -Force -Recurse:$resource.Recurse -ErrorAction Stop
+        } catch {
+            Write-Stack "failed to remove validation path $($resource.Path)`: $($_.Exception.Message)" -ErrorLine
+            $removed = $false
+        }
+    }
     if ($removed) { Write-Stack "removed isolated validation namespace $validationIndex" }
     return $removed
 }
