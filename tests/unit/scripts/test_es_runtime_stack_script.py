@@ -92,16 +92,19 @@ def test_es_runtime_stack_exposes_expected_parameters():
         "[switch]$StopElasticsearch",
         "[int]$UiPort = 3000",
         "[switch]$SmokeOnly",
+        '[string]$DataRoot = ""',
+        "[switch]$Validate",
     ):
         assert parameter in text
 
 
-def test_es_runtime_stack_uses_existing_lifecycle_and_smoke_scripts():
+def test_es_runtime_stack_uses_existing_lifecycle_and_explicit_validation_script():
     text = _script_text()
 
     assert "es-dev-start.ps1" in text
     assert "es-dev-stop.ps1" in text
     assert "es_ingest_smoke.py" in text
+    assert "if ($Validate)" in text
     assert "vsa_agent.api.routes:app" in text
     assert "Invoke-RestMethod" in text
 
@@ -123,7 +126,11 @@ def test_es_runtime_stack_generates_temporary_search_config():
     assert "search:" in text
     assert "enabled: true" in text
     assert "verify_certs: false" in text
-    assert "force_mock_embedding: true" in text
+    assert '$mockValue = if ($validationMode) { "true" } else { "false" }' in text
+    assert "force_mock_embedding: $mockValue" in text
+    assert "allow_mock_fallback: $mockValue" in text
+    assert "recorded_video:" in text
+    assert "enabled: true" in text
     assert "config.yaml" in text
 
 
@@ -165,6 +172,8 @@ def test_es_runtime_stack_bash_exposes_expected_options():
         "--stop-elasticsearch",
         "--ui-port",
         "--smoke-only",
+        "--data-root",
+        "--validate",
     ):
         assert option in text
 
@@ -174,6 +183,7 @@ def test_es_runtime_stack_bash_uses_linux_runtime_dependencies():
 
     assert "docker compose" in text
     assert "es_ingest_smoke.py" in text
+    assert 'if [[ "$VALIDATE" == "1" ]]' in text
     assert "vsa_agent.api.routes:app" in text
     assert "curl" in text
     assert "uvicorn" in text
@@ -187,7 +197,11 @@ def test_es_runtime_stack_bash_generates_temporary_search_config():
     assert "search:" in text
     assert "enabled: true" in text
     assert "verify_certs: false" in text
-    assert "force_mock_embedding: true" in text
+    assert 'validation = mode == "validation"' in text
+    assert "force_mock_embedding: {str(validation).lower()}" in text
+    assert "allow_mock_fallback: {str(validation).lower()}" in text
+    assert "recorded_video:" in text
+    assert "enabled: true" in text
 
 
 def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
@@ -214,8 +228,8 @@ def test_windows_stack_waits_for_ui_readiness_and_reports_failures():
         "Invoke-WebRequest",
         "Original UI process exited before readiness",
         "Original UI did not become reachable",
-        "UI log:",
-        "UI error log:",
+        'Join-Path $runDir "ui.log"',
+        "stack log:",
     ):
         assert required in text
 
@@ -242,12 +256,11 @@ def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
         "wait_ui_health",
         "UI_URL=",
         "UI_LOG_PATH=",
-        "UI_ERR_LOG_PATH=",
         "ES_LOG_PATH=",
         "Original UI process exited before readiness",
         "start_file_log_stream",
         "start_es_log_stream",
-        "tail -n 0 -F",
+        "tail -n +1 -F",
         "LOG_STREAM_PIDS",
         "PYTHONUNBUFFERED=1",
     ):
@@ -264,6 +277,8 @@ def test_linux_stack_uses_port_discovery_fallbacks_without_killing_es_proxy():
     assert 'for port in "$API_PORT" "$UI_PORT"' in text
     assert 'pids="$(port_listener_pids "$port")" || return 1' in text
     assert "PORT_TERMINATION_GRACE_SEC=5" in text
+    assert "assert_current_user_pid" in text
+    assert "FOREIGN_LISTENER" in text
 
 
 def test_linux_stack_preflights_python_and_reports_each_service_failure():
@@ -302,9 +317,10 @@ def test_es_runtime_stack_bash_terminates_the_owned_process_group_and_checks_hea
     text = _bash_script_text()
 
     assert "setsid" in text
-    assert 'kill -- "-$API_PID"' in text
+    assert "stop_managed_process" in text
+    assert 'kill -- "-$pid"' in text
     assert 'json.load(sys.stdin).get("status") == "ok"' in text
-    assert "health_payload=$(curl -fsS" in text
+    assert 'health_payload="$(curl -fsS' in text
 
 
 def test_es_runtime_stack_bash_retains_temporary_config_with_an_explicit_notice():
