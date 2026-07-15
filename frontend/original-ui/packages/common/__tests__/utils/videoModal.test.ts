@@ -65,17 +65,12 @@ describe('replaceVideoUrlBase', () => {
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
 
-  it('falls back to original and warns when constructed URL is invalid', () => {
+  it('supports a root-relative VST API URL', () => {
     const videoUrl = 'http://other.com/vst/segment.mp4';
     const result = replaceVideoUrlBase(videoUrl, '/vst/api');
 
-    expect(result).toBe(videoUrl);
-    expect(consoleWarnSpy).toHaveBeenCalled();
-    expect(consoleWarnSpy.mock.calls[0][0]).toBe(
-      'Constructed video URL is invalid, using original. Bad URL:'
-    );
-    expect(consoleWarnSpy.mock.calls[0][1]).toBe('/vst/segment.mp4');
-    expect(consoleWarnSpy.mock.calls[0][3]).toBe(videoUrl);
+    expect(result).toBe('/vst/segment.mp4');
+    expect(consoleWarnSpy).not.toHaveBeenCalled();
   });
 
   it('preserves query string and hash in video path', () => {
@@ -84,6 +79,17 @@ describe('replaceVideoUrlBase', () => {
       'http://new/vst/api'
     );
     expect(result).toBe('http://new/vst/path?foo=1#anchor');
+  });
+
+  it('rewrites an internal media URL to the same-origin VST facade', () => {
+    const result = replaceVideoUrlBase(
+      'http://127.0.0.1:8000/api/v1/vst/v1/storage/file/asset-1?startTime=10&endTime=20',
+      '/api/v1/vst'
+    );
+
+    expect(result).toBe(
+      '/api/v1/vst/v1/storage/file/asset-1?startTime=10&endTime=20'
+    );
   });
 });
 
@@ -107,10 +113,12 @@ describe('fetchVideoUrlFromVst', () => {
 
   it('returns videoUrl from API response', async () => {
     global.fetch = mockFetchResponse({ videoUrl: 'http://stream.test/video.mp4' });
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
 
     const result = await fetchVideoUrlFromVst('http://vst.test', defaultParams);
 
     expect(result).toBe('http://stream.test/video.mp4');
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
   it('replaces video URL base with vstApiUrl base', async () => {
@@ -207,6 +215,23 @@ describe('fetchVideoUrlFromVst', () => {
 
     expect((global.fetch as jest.Mock).mock.calls[0][1].signal).toBe(
       controller.signal
+    );
+  });
+
+  it('keeps the requested time range and returns a same-origin media URL', async () => {
+    global.fetch = mockFetchResponse({
+      videoUrl:
+        'http://127.0.0.1:8000/api/v1/vst/v1/storage/file/asset-1?startTime=2024-01-15T09%3A00%3A00&endTime=2024-01-15T09%3A05%3A00',
+    });
+
+    const result = await fetchVideoUrlFromVst('/api/v1/vst', defaultParams);
+    const calledUrl = (global.fetch as jest.Mock).mock.calls[0][0];
+    const query = new URL(calledUrl, 'http://ui.test').searchParams;
+
+    expect(query.get('startTime')).toBe(defaultParams.startTime);
+    expect(query.get('endTime')).toBe(defaultParams.endTime);
+    expect(result).toBe(
+      '/api/v1/vst/v1/storage/file/asset-1?startTime=2024-01-15T09%3A00%3A00&endTime=2024-01-15T09%3A05%3A00'
     );
   });
 });

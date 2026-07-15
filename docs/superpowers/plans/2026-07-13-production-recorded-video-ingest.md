@@ -434,17 +434,17 @@ it('keeps upload in processing until the job is completed', async () => {
 **Interfaces:**
 - Produces: streaming `proxyApiRequest(req,res,targetBase)`；浏览器固定使用相对 `/api/v1` 与 `/api/v1/vst`。
 
-- [ ] **Step 1: 写 multipart/Range 不缓冲测试。**
+- [x] **Step 1: 写 multipart/Range 不缓冲测试。**
 ```ts
 it('forwards Range and pipes the upstream body without json parsing', async () => {
   await proxyApiRequest(reqWith({range:'bytes=0-9'}), res, 'http://127.0.0.1:8000');
   expect(upstreamHeaders.range).toBe('bytes=0-9'); expect(res.statusCode).toBe(206);
 });
 ```
-- [ ] **Step 2: 验证失败。** Run: `npm --prefix frontend/original-ui test --workspace nv-metropolis-bp-vss-ui -- --runInBand --testPathPatterns="proxy" && npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="vstFacade"`。Expected: FAIL。
-- [ ] **Step 3: 实现 streaming proxy。** API route 禁用 body parser，透传 method、headers、request readable stream 和 upstream status/headers/body；保持 rewrite 仅作 GET/普通 API 回退，代理不读取完整 10 MB chunk/媒体；VST API endpoint 使用 `/api/v1/vst`。
-- [ ] **Step 4: 验证通过。** Run: `npm --prefix frontend/original-ui test --workspace nv-metropolis-bp-vss-ui -- --runInBand --testPathPatterns="proxy" && npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="vstFacade"`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add frontend/original-ui/apps/nv-metropolis-bp-vss-ui frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management/lib-src/api.ts frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management/__tests__ && git commit -m "feat: proxy recorded video ui requests same origin"`。
+- [x] **Step 2: 验证失败。** Run: `npm --prefix frontend/original-ui test --workspace nv-metropolis-bp-vss-ui -- --runInBand --testPathPatterns="proxy" && npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="vstFacade"`。Expected: FAIL。
+- [x] **Step 3: 实现 streaming proxy。** API route 禁用 body parser，透传 method、headers、request readable stream 和 upstream status/headers/body；保持 rewrite 仅作 GET/普通 API 回退，代理不读取完整 10 MB chunk/媒体；VST API endpoint 使用 `/api/v1/vst`。
+- [x] **Step 4: 验证通过。** Run: `npm --prefix frontend/original-ui test --workspace nv-metropolis-bp-vss-ui -- --runInBand --testPathPatterns="proxy" && npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="vstFacade"`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add frontend/original-ui/apps/nv-metropolis-bp-vss-ui frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management/lib-src/api.ts frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management/__tests__ && git commit -m "feat: proxy recorded video ui requests same origin"`。
 
 ### Task 19: Runtime doctor 与安全启动前检查（OpenSpec 7.1）
 

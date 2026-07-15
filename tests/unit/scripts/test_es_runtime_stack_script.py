@@ -63,8 +63,10 @@ def test_stack_proxies_browser_search_requests_through_the_original_ui():
     next_config = VSS_NEXT_CONFIG.read_text(encoding="utf-8")
 
     assert 'NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1"' in launcher
+    assert 'NEXT_PUBLIC_VST_API_URL="/api/v1/vst"' in launcher
     assert 'VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1"' in launcher
     assert '$env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"' in windows_launcher
+    assert '$env:NEXT_PUBLIC_VST_API_URL = "/api/v1/vst"' in windows_launcher
     assert '$env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"' in windows_launcher
     assert "source: '/api/v1/:path*'" in next_config
     assert "VSA_INTERNAL_AGENT_API_URL_BASE" in next_config

@@ -41,8 +41,8 @@
 
 - [x] 6.1 扩展上传完成响应类型以读取 job ID/status URL，同时保留既有三段式 chunk headers 和路径
 - [x] 6.2 在 Chat 和 Video Management 上传界面轮询任务状态，正确显示 processing、completed、failed 和 cancelled
-- [ ] 6.3 扩展 Next 同源代理以流式转发 multipart chunk、任务 API、缩略图和 Range 媒体，不缓冲大文件
-- [ ] 6.4 验证搜索结果缩略图、VST URL facade 和时间段播放，并保持未涉及的原版 UI 模块不变
+- [x] 6.3 扩展 Next 同源代理以流式转发 multipart chunk、任务 API、缩略图和 Range 媒体，不缓冲大文件
+- [x] 6.4 验证搜索结果缩略图、VST URL facade 和时间段播放，并保持未涉及的原版 UI 模块不变
 
 ## 7. 单脚本运行、doctor 与日志
 

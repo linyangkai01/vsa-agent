@@ -54,10 +54,10 @@ Result: valid before archive.
 
 ## Active Change
 
-- `production-recorded-video-ingest`: Task 1-17 已完成；Common、Video Management 与 Chat 已接入 recorded-video job 的 processing/completed/failed/cancelled、retry、cancel 与卸载中止轮询。
+- `production-recorded-video-ingest`: Task 1-18 已完成；原版 UI 已接入任务状态轮询，并通过流式同源代理访问上传、任务、缩略图、Range 媒体和 `/api/v1/vst` facade。
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
 - Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
-- 当前分支：`codex/production-recorded-video-ingest`；下一项为 Task 18 同源流式代理和 UI 媒体契约。
+- 当前分支：`codex/production-recorded-video-ingest`；下一项为 Task 19 runtime doctor 与安全启动前检查。
 
 ## Python Quality Program
 
@@ -141,4 +141,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-继续 Task 18：实现 Next 同源流式代理，验证 multipart chunk、任务 API、缩略图、Range 媒体和 VST facade。
+继续 Task 19：实现 runtime doctor，集中检查无 sudo Ubuntu 所需依赖、目录、端口、provider 配置和 Elasticsearch mapping。

@@ -118,7 +118,11 @@ export const replaceVideoUrlBase = (
 
   if (finalVideoUrl !== videoUrl) {
     try {
-      new URL(finalVideoUrl);
+      if (finalVideoUrl.startsWith('/')) {
+        new URL(finalVideoUrl, 'http://same-origin.invalid');
+      } else {
+        new URL(finalVideoUrl);
+      }
     } catch (e) {
       console.warn(
         'Constructed video URL is invalid, using original. Bad URL:',
@@ -185,7 +189,7 @@ export const fetchVideoUrlFromVst = async (
   const data = await response.json();
   let finalUrl = data.videoUrl ?? '';
 
-  if (data.videoUrl && vstApiUrl) {
+  if (data.videoUrl?.includes('/vst') && vstApiUrl.includes('/vst')) {
     finalUrl = replaceVideoUrlBase(data.videoUrl, vstApiUrl);
   }
 

@@ -178,6 +178,7 @@ $oldVsaConfig = $env:VSA_CONFIG
 $oldPythonPath = $env:PYTHONPATH
 $oldSearchTab = $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB
 $oldAgentApiUrl = $env:NEXT_PUBLIC_AGENT_API_URL_BASE
+$oldVstApiUrl = $env:NEXT_PUBLIC_VST_API_URL
 $oldInternalAgentApiUrl = $env:VSA_INTERNAL_AGENT_API_URL_BASE
 $oldUiPort = $env:PORT
 
@@ -227,6 +228,7 @@ try {
     if (-not $SmokeOnly) {
         $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = "true"
         $env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"
+        $env:NEXT_PUBLIC_VST_API_URL = "/api/v1/vst"
         $env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"
         $env:PORT = "$UiPort"
         $uiProcess = Start-Process -FilePath "bash" -ArgumentList @("scripts/run_original_ui_vss.sh") -WorkingDirectory $repoRoot -RedirectStandardOutput $uiLogPath -RedirectStandardError $uiErrLogPath -PassThru
@@ -252,6 +254,7 @@ try {
     $env:PYTHONPATH = $oldPythonPath
     $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = $oldSearchTab
     $env:NEXT_PUBLIC_AGENT_API_URL_BASE = $oldAgentApiUrl
+    $env:NEXT_PUBLIC_VST_API_URL = $oldVstApiUrl
     $env:VSA_INTERNAL_AGENT_API_URL_BASE = $oldInternalAgentApiUrl
     $env:PORT = $oldUiPort
 
