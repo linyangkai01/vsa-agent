@@ -455,16 +455,16 @@ it('forwards Range and pipes the upstream body without json parsing', async () =
 **Interfaces:**
 - Produces: `python scripts/runtime-doctor.py --config PATH --es-endpoint URL --json`；`DoctorResult(ok, checks)`。
 
-- [ ] **Step 1: 写失败依赖和生产 mapping 测试。**
+- [x] **Step 1: 写失败依赖和生产 mapping 测试。**
 ```python
 def test_doctor_reports_ffmpeg_and_foreign_port_without_killing(monkeypatch):
     result = run_doctor(command_exists=lambda name: name != "ffmpeg", port_owner=lambda _: "other-user")
     assert {c.code for c in result.checks} >= {"FFMPEG_MISSING", "PORT_FOREIGN_OWNER"}
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/scripts/test_runtime_doctor.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现 doctor。** 检查 conda/Python 包、npm、Docker Compose、ffprobe/ffmpeg、data_root 创建写入/剩余空间、provider 配置、端口所有者、ES 连接/alias mapping；每项给出 component、code、remediation，禁止 subprocess sudo 和任何写生产索引。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/scripts/test_runtime_doctor.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add scripts/runtime-doctor.py tests/unit/scripts/test_runtime_doctor.py scripts/es-runtime-stack.sh scripts/es-runtime-stack.ps1 && git commit -m "feat: add recorded video runtime doctor"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/scripts/test_runtime_doctor.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现 doctor。** 检查 conda/Python 包、npm、Docker Compose、ffprobe/ffmpeg、data_root 创建写入/剩余空间、provider 配置、端口所有者、ES 连接/alias mapping；每项给出 component、code、remediation，禁止 subprocess sudo 和任何写生产索引。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/scripts/test_runtime_doctor.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add scripts/runtime-doctor.py tests/unit/scripts/test_runtime_doctor.py scripts/es-runtime-stack.sh scripts/es-runtime-stack.ps1 && git commit -m "feat: add recorded video runtime doctor"`。
 
 ### Task 20: 单脚本 Worker 生命周期、run-id 日志与显式验证（OpenSpec 7.2、7.3、7.4）
 

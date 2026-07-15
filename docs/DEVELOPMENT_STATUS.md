@@ -6,7 +6,7 @@ Last updated: 2026-07-15
 
 - Active OpenSpec change: `production-recorded-video-ingest`.
 - Active branch: `codex/production-recorded-video-ingest`.
-- Phase: build；主会话按 `executing-plans + TDD + thorough review` 连续执行。
+- Phase: build；主会话按 `subagent-driven-development + TDD + thorough review` 连续执行。
 - Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
@@ -54,10 +54,11 @@ Result: valid before archive.
 
 ## Active Change
 
-- `production-recorded-video-ingest`: Task 1-18 已完成；原版 UI 已接入任务状态轮询，并通过流式同源代理访问上传、任务、缩略图、Range 媒体和 `/api/v1/vst` facade。
+- `production-recorded-video-ingest`: Task 1-19 已完成；原版 UI 已接入任务状态轮询和流式同源代理，runtime doctor 已覆盖依赖、目录/磁盘、provider、端口及只读 Elasticsearch mapping 检查，并以静态 preflight 与 ES readiness 两阶段接入 Bash/PowerShell 启动器。
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
 - Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
-- 当前分支：`codex/production-recorded-video-ingest`；下一项为 Task 19 runtime doctor 与安全启动前检查。
+- 当前分支：`codex/production-recorded-video-ingest`；Task 19 提交为 `e39a10b`，审查修复为 `cf1f377`，独立验证结果为 `49 passed`，Ruff、Bash 和 PowerShell 语法检查通过。
+- 下一项为 Task 20。开始实施前需确认生产契约增量：显式 embedding 维度、默认 Worker runtime composition，以及独立的索引 provision 路径。
 
 ## Python Quality Program
 

@@ -46,7 +46,7 @@
 
 ## 7. 单脚本运行、doctor 与日志
 
-- [ ] 7.1 将 runtime doctor 加入单一启动入口，检查 conda/Python、npm、Docker、ffprobe/ffmpeg、写权限、磁盘、模型和 ES mapping
+- [x] 7.1 将 runtime doctor 加入单一启动入口，检查 conda/Python、npm、Docker、ffprobe/ffmpeg、写权限、磁盘、模型和 ES mapping
 - [ ] 7.2 扩展启动脚本管理 Worker PID/readiness/信号，且端口只回收当前用户拥有的监听进程
 - [ ] 7.3 实现按 run ID 保存 stack/API/Worker/UI/ES/process manifest 日志、终端前缀汇聚、敏感字段脱敏和保留策略
 - [ ] 7.4 将默认启动改为非写入 readiness，并实现使用隔离索引且自动清理的显式 `--validate` 模式
