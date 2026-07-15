@@ -33,9 +33,9 @@
 ## 5. Elasticsearch 生产索引与搜索
 
 - [x] 5.1 实现显式版本化 segment mapping、embedding 维度校验、index bootstrap 和 alias 管理
-- [ ] 5.2 实现 manifest 到 segment 文档的确定性投影、bulk 写入、部分失败处理、对账和失败清理
-- [ ] 5.3 调整真实 query embedding 和 ES 搜索，使生产 profile fail closed，测试/smoke fallback 必须显式启用
-- [ ] 5.4 保持 `/api/v1/search` 原版 UI 返回契约，并验证 asset/segment identity、时间、缩略图和相似度字段
+- [x] 5.2 实现 manifest 到 segment 文档的确定性投影、bulk 写入、部分失败处理、对账和失败清理
+- [x] 5.3 调整真实 query embedding 和 ES 搜索，使生产 profile fail closed，测试/smoke fallback 必须显式启用
+- [x] 5.4 保持 `/api/v1/search` 原版 UI 返回契约，并验证 asset/segment identity、时间、缩略图和相似度字段
 
 ## 6. 原版 UI 最小调整
 

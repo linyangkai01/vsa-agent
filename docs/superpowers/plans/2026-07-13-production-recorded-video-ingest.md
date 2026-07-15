@@ -391,16 +391,16 @@ async def test_existing_alias_with_wrong_vector_dimension_blocks_readiness(index
 **Interfaces:**
 - Produces: `project_segments(manifest) -> ProjectionResult`；生产 `embed_search` 的 controlled failure；`SearchResult` 使用 asset identity/timestamps/thumbnail。
 
-- [ ] **Step 1: 写 bulk 部分失败与生产 fail-closed 测试。**
+- [x] **Step 1: 写 bulk 部分失败与生产 fail-closed 测试。**
 ```python
 async def test_production_embedding_failure_never_uses_mock(monkeypatch):
     monkeypatch.setattr("vsa_agent.tools.embed_search._embed_query", failing_embed)
     with pytest.raises(SearchDependencyError): await embed_search("forklift", production_config())
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_es_projection.py tests/unit/tools/test_embed_search_production.py tests/unit/api/test_original_ui_search_route.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现投影和读取。** manifest 生成 `SegmentDocument(id=segment_id)`，`async_bulk` 逐项处理 errors，成功可重放、部分失败保留 retryable job；只在 ES 完成后事务 publish asset/job；生产关闭 `allow_mock_fallback`/`force_mock_embedding`，测试 profile 明确允许；保留 `{data:[{video_name,description,start_time,end_time,sensor_id,screenshot_url,similarity}]}`。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_es_projection.py tests/unit/tools/test_embed_search_production.py tests/unit/api/test_original_ui_search_route.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/es_index.py src/vsa_agent/tools/embed_search.py src/vsa_agent/api/video_search_ingest.py tests/unit/recorded_video/test_es_projection.py tests/unit/tools/test_embed_search_production.py tests/unit/api/test_original_ui_search_route.py && git commit -m "feat: index recorded video segments for production search"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/recorded_video/test_es_projection.py tests/unit/tools/test_embed_search_production.py tests/unit/api/test_original_ui_search_route.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现投影和读取。** manifest 生成 `SegmentDocument(id=segment_id)`，`async_bulk` 逐项处理 errors，成功可重放、部分失败保留 retryable job；只在 ES 完成后事务 publish asset/job；生产关闭 `allow_mock_fallback`/`force_mock_embedding`，测试 profile 明确允许；保留 `{data:[{video_name,description,start_time,end_time,sensor_id,screenshot_url,similarity}]}`。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_es_projection.py tests/unit/tools/test_embed_search_production.py tests/unit/api/test_original_ui_search_route.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/es_index.py src/vsa_agent/tools/embed_search.py src/vsa_agent/api/video_search_ingest.py tests/unit/recorded_video/test_es_projection.py tests/unit/tools/test_embed_search_production.py tests/unit/api/test_original_ui_search_route.py && git commit -m "feat: index recorded video segments for production search"`。
 
 ### Task 17: 原版 UI 上传完成类型与任务轮询（OpenSpec 6.1、6.2）
 
