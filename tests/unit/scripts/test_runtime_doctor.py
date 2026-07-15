@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -142,6 +144,65 @@ def test_doctor_only_requires_conda_when_an_environment_is_selected(tmp_path: Pa
     assert not with_conda.ok
 
 
+def test_static_doctor_skips_npm_when_ui_is_disabled(tmp_path: Path):
+    doctor = _load_doctor()
+    config = AppConfig(recorded_video={"enabled": False, "data_root": tmp_path, "max_upload_bytes": 1})
+    commands: list[str] = []
+
+    result = doctor.run_doctor(
+        config=config,
+        ports=(),
+        phase="static",
+        require_ui=False,
+        command_exists=lambda name: commands.append(name) or True,
+        python_module_exists=lambda _name: True,
+        docker_compose_available=lambda: True,
+    )
+
+    assert "npm" not in commands
+    assert result.ok
+
+
+def test_static_doctor_checks_recorded_video_python_dependencies(tmp_path: Path):
+    doctor = _load_doctor()
+    config = AppConfig(recorded_video={"enabled": False, "data_root": tmp_path, "max_upload_bytes": 1})
+
+    result = doctor.run_doctor(
+        config=config,
+        ports=(),
+        phase="static",
+        command_exists=lambda _name: True,
+        python_module_exists=lambda _name: True,
+        docker_compose_available=lambda: True,
+    )
+
+    components = {check.component for check in result.checks}
+    assert {"python:aiosqlite", "python:httpx", "python:multipart"} <= components
+
+
+def test_cli_reports_missing_packages_without_import_traceback(tmp_path: Path):
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(SCRIPT_PATH),
+            "--config",
+            str(tmp_path / "missing.yaml"),
+            "--phase",
+            "static",
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert "Traceback" not in completed.stderr
+    assert "PYTHON_PACKAGE_MISSING" in {check["code"] for check in payload["checks"]}
+
+
 def test_doctor_probes_data_root_and_reports_low_disk_without_leaving_a_file(
     tmp_path: Path,
 ):
@@ -272,6 +333,48 @@ def test_elasticsearch_check_validates_alias_mapping_without_writes(
     assert client.closed
 
 
+def test_elasticsearch_check_accepts_es_omitted_object_type(tmp_path: Path, monkeypatch):
+    doctor = _load_doctor()
+    config = _production_config(tmp_path)
+    monkeypatch.delenv("VSA_PROFILE", raising=False)
+    monkeypatch.setenv("TEST_PROVIDER_API_KEY", "secret-value")
+    dims = 4
+    mapping = copy.deepcopy(build_segment_mapping(model="embedding-model", version="v1", dims=dims))
+    mapping["properties"]["readiness"].pop("type")
+    index_name = RecordedVideoIndex(None, alias="recorded-video").index_name(
+        model="embedding-model",
+        dims=dims,
+    )
+    client = _FakeElasticsearch(_FakeIndices("recorded-video", index_name, mapping))
+
+    check = doctor.check_elasticsearch(
+        config,
+        "http://es.test:9200",
+        client_factory=lambda **_kwargs: client,
+    )
+
+    assert check.ok
+    assert check.code == "ES_INDEX_VALID"
+
+
+def test_elasticsearch_check_catches_client_construction_failure(tmp_path: Path):
+    doctor = _load_doctor()
+    config = _production_config(tmp_path)
+
+    def invalid_client_factory(**_kwargs):
+        raise ValueError("invalid endpoint")
+
+    check = doctor.check_elasticsearch(
+        config,
+        "not-an-endpoint",
+        client_factory=invalid_client_factory,
+    )
+
+    assert not check.ok
+    assert check.code == "ES_CHECK_FAILED"
+    assert "invalid endpoint" in check.message
+
+
 def test_json_cli_returns_nonzero_and_structured_checks(tmp_path: Path, capsys):
     doctor = _load_doctor()
     config_path = tmp_path / "config.yaml"
@@ -299,13 +402,56 @@ def test_json_cli_returns_nonzero_and_structured_checks(tmp_path: Path, capsys):
     assert payload["checks"][0]["code"] == "FFMPEG_MISSING"
 
 
-def test_stack_launchers_run_doctor_before_starting_api():
+def test_config_load_failure_redacts_malformed_secrets(tmp_path: Path, capsys):
+    doctor = _load_doctor()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """backends:
+  provider:
+    provider: openai_compatible
+    api_key:
+      - api-key-secret
+    base_url:
+      - http://username:url-password@provider.test/v1
+recorded_video:
+  enabled: false
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = doctor.main(["--config", str(config_path), "--json"])
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert exit_code == 1
+    assert payload["checks"][0]["code"] == "CONFIG_LOAD_FAILED"
+    assert "api-key-secret" not in output
+    assert "url-password" not in output
+    assert "Authorization" not in output
+
+
+def test_stack_launchers_run_two_phase_doctor_around_elasticsearch_startup():
     bash = Path("scripts/es-runtime-stack.sh").read_text(encoding="utf-8")
     powershell = Path("scripts/es-runtime-stack.ps1").read_text(encoding="utf-8")
 
-    assert "scripts/runtime-doctor.py" in bash
-    assert bash.index("scripts/runtime-doctor.py") < bash.index("python -m uvicorn")
+    bash_static = bash.index("--phase static")
+    bash_es_start = bash.index("docker compose -f docker-compose.es.yml up -d")
+    bash_es_readiness = bash.index("--phase elasticsearch")
+    assert bash_static < bash_es_start < bash_es_readiness < bash.index("python -m uvicorn")
     assert 'doctor_args+=(--conda-env "$CONDA_ENV")' in bash
-    assert "scripts\\runtime-doctor.py" in powershell
-    assert powershell.index("scripts\\runtime-doctor.py") < powershell.index('"-m", "uvicorn"')
+    ps_static = powershell.index('"--phase", "static"')
+    ps_es_start = powershell.index('es-dev-start.ps1" -Port $EsPort')
+    ps_es_readiness = powershell.index('"--phase", "elasticsearch"')
+    assert ps_static < ps_es_start < ps_es_readiness < powershell.index('"-m", "uvicorn"')
     assert '$doctorArgs += @("--conda-env", $CondaEnv)' in powershell
+
+
+def test_stack_launchers_bootstrap_ui_before_static_doctor_and_skip_ui_for_smoke():
+    bash = Path("scripts/es-runtime-stack.sh").read_text(encoding="utf-8")
+    powershell = Path("scripts/es-runtime-stack.ps1").read_text(encoding="utf-8")
+
+    assert 'if [[ ! -f "$REPO_ROOT/.deps/node-env.sh" ]]; then' in bash
+    assert bash.index("ensure_ui_runtime\n") < bash.index("--phase static")
+    assert "doctor_args+=(--skip-ui)" in bash
+    assert powershell.index("Ensure-UiRuntime") < powershell.index('"--phase", "static"')
+    assert '$doctorArgs += @("--skip-ui")' in powershell

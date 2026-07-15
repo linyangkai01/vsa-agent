@@ -156,6 +156,24 @@ function PythonCommand {
     }
 }
 
+function Ensure-UiRuntime {
+    param(
+        [string]$RepoRoot,
+        [string]$ScriptDir
+    )
+
+    & bash (Join-Path $ScriptDir "bootstrap_node.sh")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Project-local Node bootstrap failed with exit code $LASTEXITCODE"
+    }
+
+    $installCommand = 'set -euo pipefail; root="$1"; source "$root/.deps/node-env.sh"; cd "$root"; if [[ ! -x frontend/original-ui/node_modules/.bin/turbo ]]; then npm run ui:install; fi'
+    & bash -c $installCommand bash $RepoRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Original UI dependency installation failed with exit code $LASTEXITCODE"
+    }
+}
+
 function Stop-OwnedProcessTree {
     param([System.Diagnostics.Process]$Process)
 
@@ -192,18 +210,44 @@ try {
 
     foreach ($port in @($EsPort, $ApiPort, $UiPort)) { Reclaim-Port -Port $port -TimeoutSec $TimeoutSec }
 
-    & "$PSScriptRoot\es-dev-start.ps1" -Port $EsPort
     Write-SearchConfig -SourceConfig (Join-Path $repoRoot "config.yaml") -TargetConfig $configPath -EsEndpoint $esEndpoint -Index $Index
 
     $env:VSA_CONFIG = $configPath
     $env:PYTHONPATH = Join-Path $repoRoot "src"
 
+    if (-not $SmokeOnly) {
+        Ensure-UiRuntime -RepoRoot $repoRoot -ScriptDir $PSScriptRoot
+    }
+
     $doctorArgs = @(
         "scripts\runtime-doctor.py",
         "--config", $configPath,
         "--es-endpoint", $esEndpoint,
+        "--phase", "static",
         "--port", "$ApiPort",
-        "--port", "$UiPort",
+        "--json"
+    )
+    if ($SmokeOnly) {
+        $doctorArgs += @("--skip-ui")
+    } else {
+        $doctorArgs += @("--port", "$UiPort")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CondaEnv)) {
+        $doctorArgs += @("--conda-env", $CondaEnv)
+    }
+    $doctor = PythonCommand -CondaEnv $CondaEnv -PythonArgs $doctorArgs
+    & $doctor.File @($doctor.Args)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime doctor failed with exit code $LASTEXITCODE"
+    }
+
+    & "$PSScriptRoot\es-dev-start.ps1" -Port $EsPort
+
+    $doctorArgs = @(
+        "scripts\runtime-doctor.py",
+        "--config", $configPath,
+        "--es-endpoint", $esEndpoint,
+        "--phase", "elasticsearch",
         "--json"
     )
     if (-not [string]::IsNullOrWhiteSpace($CondaEnv)) {
@@ -212,7 +256,7 @@ try {
     $doctor = PythonCommand -CondaEnv $CondaEnv -PythonArgs $doctorArgs
     & $doctor.File @($doctor.Args)
     if ($LASTEXITCODE -ne 0) {
-        throw "Runtime doctor failed with exit code $LASTEXITCODE"
+        throw "Elasticsearch readiness doctor failed with exit code $LASTEXITCODE"
     }
 
     $uvicorn = PythonCommand -CondaEnv $CondaEnv -PythonArgs @(

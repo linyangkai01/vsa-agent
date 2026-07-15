@@ -283,13 +283,12 @@ PY
 }
 
 ensure_ui_runtime() {
-  if ! command -v npm >/dev/null 2>&1; then
+  if [[ ! -f "$REPO_ROOT/.deps/node-env.sh" ]]; then
     bash "$SCRIPT_DIR/bootstrap_node.sh"
   fi
-  if [[ -f "$REPO_ROOT/.deps/node-env.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.deps/node-env.sh"
-  fi
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/.deps/node-env.sh"
+  require_command npm
   if [[ ! -x "$REPO_ROOT/frontend/original-ui/node_modules/.bin/turbo" ]]; then
     npm run ui:install
   fi
@@ -347,6 +346,30 @@ ensure_python_runtime
 
 for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
+write_search_config
+
+export VSA_CONFIG="$CONFIG_PATH"
+export PYTHONPATH="$REPO_ROOT/src"
+if [[ "$SMOKE_ONLY" == "0" ]]; then
+  ensure_ui_runtime
+fi
+
+doctor_args=(scripts/runtime-doctor.py \
+  --config "$CONFIG_PATH" \
+  --es-endpoint "$ES_ENDPOINT" \
+  --phase static \
+  --port "$API_PORT" \
+  --json)
+if [[ "$SMOKE_ONLY" == "1" ]]; then
+  doctor_args+=(--skip-ui)
+else
+  doctor_args+=(--port "$UI_PORT")
+fi
+if [[ -n "$CONDA_ENV" ]]; then
+  doctor_args+=(--conda-env "$CONDA_ENV")
+fi
+python_cmd "${doctor_args[@]}"
+
 export VSA_ES_PORT="$ES_PORT"
 export VSA_ES_CONTAINER_NAME="vsa-agent-es"
 STACK_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -366,15 +389,10 @@ until curl -fsS "$ES_ENDPOINT" >/dev/null 2>&1; do
   sleep 2
 done
 
-write_search_config
-
-export VSA_CONFIG="$CONFIG_PATH"
-export PYTHONPATH="$REPO_ROOT/src"
 doctor_args=(scripts/runtime-doctor.py \
   --config "$CONFIG_PATH" \
   --es-endpoint "$ES_ENDPOINT" \
-  --port "$API_PORT" \
-  --port "$UI_PORT" \
+  --phase elasticsearch \
   --json)
 if [[ -n "$CONDA_ENV" ]]; then
   doctor_args+=(--conda-env "$CONDA_ENV")
