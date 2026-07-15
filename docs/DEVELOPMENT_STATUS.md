@@ -54,11 +54,11 @@ Result: valid before archive.
 
 ## Active Change
 
-- `production-recorded-video-ingest`: Task 1-19 已完成；原版 UI 已接入任务状态轮询和流式同源代理，runtime doctor 已覆盖依赖、目录/磁盘、provider、端口及只读 Elasticsearch mapping 检查，并以静态 preflight 与 ES readiness 两阶段接入 Bash/PowerShell 启动器。
+- `production-recorded-video-ingest`: Task 1-19 已完成；原版 UI 已接入任务状态轮询和流式同源代理，runtime doctor 已覆盖依赖、目录/磁盘、provider、端口及只读 Elasticsearch mapping 检查，并以静态 preflight 与 ES readiness 两阶段接入 Bash/PowerShell 启动器。Task 20 已确认运行契约：启动器管理 API、Worker、UI、ES 的独立 PID 与 readiness，按 run ID 保存分组件日志和 process manifest，默认启动不写入生产索引，显式 `--validate` 使用隔离索引并自动清理。
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
 - Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
 - 当前分支：`codex/production-recorded-video-ingest`；Task 19 提交为 `e39a10b`，审查修复为 `cf1f377`，独立验证结果为 `49 passed`，Ruff、Bash 和 PowerShell 语法检查通过。
-- 下一项为 Task 20。开始实施前需确认生产契约增量：显式 embedding 维度、默认 Worker runtime composition，以及独立的索引 provision 路径。
+- 下一项为 Task 20：实现单脚本 Worker 生命周期、run-id 日志和显式隔离验证模式。生产 embedding 维度、默认 Worker runtime composition 与独立索引 provision 路径已在前序任务中确认并作为启动 readiness 契约。
 
 ## Python Quality Program
 
@@ -142,4 +142,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-继续 Task 19：实现 runtime doctor，集中检查无 sudo Ubuntu 所需依赖、目录、端口、provider 配置和 Elasticsearch mapping。
+继续 Task 20：实现启动脚本的 Worker PID/readiness 管理、run-id 分组件日志与 process manifest，并让默认启动保持非写入、`--validate` 使用隔离索引且自动清理。

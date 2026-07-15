@@ -117,11 +117,13 @@ The project SHALL provide one user-facing script that starts and monitors Elasti
 - **THEN** it creates a unique run directory containing stack, API, Worker, UI, Elasticsearch, and process-manifest logs
 - **AND** terminal output prefixes component log lines
 - **AND** request, asset, job, stage, and attempt identifiers allow one business flow to be traced without logging credentials or video contents
+- **AND** the process manifest records each managed component's PID, command, start time, and final exit status
 
 #### Scenario: Default runtime startup does not pollute production data
 - **WHEN** the user starts the normal interactive stack
 - **THEN** startup performs non-mutating readiness checks and does not write a smoke video into the production alias
-- **AND** an explicit validation mode uses isolated validation data and removes it after completion
+- **AND** normal startup does not invoke the ingest smoke validator
+- **AND** an explicit validation mode uses a `validation-{run_id}` index or namespace and removes validation data and temporary configuration on success, failure, or interruption
 
 ### Requirement: Recorded-video production acceptance
 The system SHALL provide automated and server-side validation for concurrency, recovery, failure handling, original UI compatibility, semantic retrieval, media playback, and lifecycle cleanup.
