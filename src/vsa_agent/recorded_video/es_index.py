@@ -5,14 +5,16 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID
 
+from elasticsearch.helpers import async_streaming_bulk
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import segment_id as build_segment_id
+from vsa_agent.recorded_video.ports import ProjectionResult
 
 _CONTRACT_NAME = "vsa-recorded-video-segment"
 _CONTRACT_VERSION = 1
@@ -307,6 +309,125 @@ class RecordedVideoIndex:
         return index_name
 
 
+class ElasticsearchProjectionStore:
+    """Attempt-fenced Elasticsearch projection for recorded-video segments."""
+
+    def __init__(self, client: Any, *, index: RecordedVideoIndex) -> None:
+        self._client = client
+        self._index = index
+
+    async def project(
+        self,
+        documents: Sequence[Mapping[str, Any]],
+        *,
+        job_id: str,
+        attempt: int,
+    ) -> ProjectionResult:
+        if not documents:
+            return ProjectionResult()
+        validated = [SegmentDocument.model_validate(document) for document in documents]
+        if any(document.job_id != job_id or document.job_attempt != attempt for document in validated):
+            raise _configuration_error("PROJECTION_IDENTITY: document job identity does not match the projection call")
+
+        model = validated[0].embedding_model
+        dims = len(validated[0].vector)
+        if any(document.embedding_model != model or len(document.vector) != dims for document in validated):
+            raise _configuration_error("PROJECTION_MAPPING: one bulk must use a single embedding contract")
+        await self._index.bootstrap(model=model, dims=dims)
+
+        actions = [self._update_action(document, attempt=attempt) for document in validated]
+        indexed_ids: list[str] = []
+        failed_ids: list[str] = []
+        try:
+            async for succeeded, item in async_streaming_bulk(
+                _json_compatible_client(self._client),
+                actions,
+                raise_on_error=False,
+                raise_on_exception=False,
+                refresh="wait_for",
+            ):
+                operation = item.get("update") if isinstance(item, Mapping) else None
+                document_id = operation.get("_id") if isinstance(operation, Mapping) else None
+                if not isinstance(document_id, str):
+                    raise _configuration_error("PROJECTION_RESPONSE: Elasticsearch bulk response is incomplete")
+                (indexed_ids if succeeded else failed_ids).append(document_id)
+        except RecordedVideoError:
+            raise
+        except Exception as error:
+            raise _classify_es_error(error, operation="project segments") from None
+        return ProjectionResult(indexed_ids=indexed_ids, failed_ids=failed_ids)
+
+    async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+        await self._delete_by_query(
+            {
+                "bool": {
+                    "filter": [
+                        {"term": {"asset_id": asset_id}},
+                        {"term": {"job_id": job_id}},
+                        {"term": {"job_attempt": attempt}},
+                    ]
+                }
+            },
+            operation="rollback projection",
+        )
+
+    async def delete_asset(self, asset_id: str) -> None:
+        await self._delete_by_query(
+            {"term": {"asset_id": asset_id}},
+            operation="delete asset projection",
+        )
+
+    async def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            await close()
+
+    async def _delete_by_query(self, query: Mapping[str, Any], *, operation: str) -> None:
+        try:
+            response = await _json_compatible_client(self._client).delete_by_query(
+                index=self._index.alias,
+                query=query,
+                conflicts="proceed",
+                refresh=True,
+            )
+            failures = response.get("failures") if isinstance(response, Mapping) else None
+            timed_out = response.get("timed_out") if isinstance(response, Mapping) else None
+            if failures or timed_out is True:
+                raise RecordedVideoError(
+                    ErrorCode.ES_5XX,
+                    retryable=True,
+                    message=f"ES_5XX: Elasticsearch {operation} was incomplete",
+                )
+            if not isinstance(response, Mapping):
+                raise _configuration_error("PROJECTION_RESPONSE: Elasticsearch delete response is invalid")
+        except RecordedVideoError:
+            raise
+        except Exception as error:
+            raise _classify_es_error(error, operation=operation) from None
+
+    def _update_action(self, document: SegmentDocument, *, attempt: int) -> dict[str, Any]:
+        source = document.model_dump(mode="json", by_alias=True)
+        document_id = source.pop("_id")
+        return {
+            "_op_type": "update",
+            "_index": self._index.alias,
+            "_id": document_id,
+            "scripted_upsert": True,
+            "script": {
+                "lang": "painless",
+                "source": (
+                    "if (ctx._source.job_attempt == null || "
+                    "ctx._source.job_attempt <= params.attempt) { "
+                    "ctx._source.clear(); ctx._source.putAll(params.document); "
+                    "} else { ctx.op = 'none'; }"
+                ),
+                "params": {"attempt": attempt, "document": source},
+            },
+            "upsert": source,
+            "retry_on_conflict": 3,
+        }
+
+
 def _json_compatible_client(client: Any) -> Any:
     """Avoid a v9 vendor media type when the target cluster is Elasticsearch 7/8."""
     options = getattr(client, "options", None)
@@ -433,6 +554,7 @@ def _classify_es_error(error: Exception, *, operation: str) -> RecordedVideoErro
 
 __all__ = [
     "INDEX_SETTINGS",
+    "ElasticsearchProjectionStore",
     "RecordedVideoIndex",
     "SegmentDocument",
     "build_segment_mapping",

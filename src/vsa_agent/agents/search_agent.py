@@ -46,8 +46,10 @@ class SearchAgentInput(BaseModel):
     )
     max_results: int = Field(default=5, description="Maximum number of results to return")
     top_k: int | None = Field(default=None, description="Override top_k for embed search")
+    video_sources: list[str] = Field(default_factory=list, description="Explicit video filename filters")
     start_time: str | None = Field(default=None, description="Start time filter (ISO format)")
     end_time: str | None = Field(default=None, description="End time filter (ISO format)")
+    min_cosine_similarity: float = Field(default=0.0, description="Minimum accepted cosine similarity")
     source_type: str = Field(default="video_file", description="Type of video source: video_file or rtsp")
     use_critic: bool = Field(default=True, description="Whether to verify search results with VLM critic agent")
 
@@ -72,6 +74,43 @@ class SearchAgentExecutionResult(BaseModel):
     incidents: list[Incident] = Field(default_factory=list)
     text_answer: str = Field(default="")
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def _propagate_search_dependency(error: Exception) -> None:
+    from vsa_agent.tools.embed_search import SearchDependencyError
+
+    if isinstance(error, SearchDependencyError):
+        raise error
+
+
+def _apply_request_constraints(search_input: SearchAgentInput, decomposed: DecomposedQuery) -> DecomposedQuery:
+    return decomposed.model_copy(
+        update={
+            "video_sources": list(search_input.video_sources or decomposed.video_sources),
+            "timestamp_start": search_input.start_time or decomposed.timestamp_start,
+            "timestamp_end": search_input.end_time or decomposed.timestamp_end,
+            "source_type": search_input.source_type or decomposed.source_type,
+            "min_cosine_similarity": max(
+                search_input.min_cosine_similarity,
+                decomposed.min_cosine_similarity or 0.0,
+            ),
+        }
+    )
+
+
+def _embed_search_kwargs(decomposed: DecomposedQuery, *, top_k: int) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"query": decomposed.query, "top_k": top_k}
+    optional = {
+        "video_sources": decomposed.video_sources or None,
+        "timestamp_start": decomposed.timestamp_start,
+        "timestamp_end": decomposed.timestamp_end,
+        "source_type": decomposed.source_type if decomposed.source_type != "video_file" else None,
+        "min_cosine_similarity": decomposed.min_cosine_similarity
+        if (decomposed.min_cosine_similarity or 0.0) > 0.0
+        else None,
+    }
+    kwargs.update({key: value for key, value in optional.items() if value is not None})
+    return kwargs
 
 
 # ===== Presentation Converters =====
@@ -204,6 +243,7 @@ async def _execute_search_with_metadata(
         decomposed = await decompose_query(search_input.query, model_adapter)
     else:
         decomposed = DecomposedQuery(query=search_input.query)
+    decomposed = _apply_request_constraints(search_input, decomposed)
     write_live_trace_event(
         "search_agent.decompose_query",
         {"input_query": search_input.query, "decomposed": decomposed},
@@ -214,7 +254,7 @@ async def _execute_search_with_metadata(
 
     if embed_search is None:
         embed_top_k = search_input.top_k or search_input.max_results
-        embed_search = _resolve_search_callable("embed_search", query=decomposed.query, top_k=embed_top_k)
+        embed_search = _resolve_search_callable("embed_search", **_embed_search_kwargs(decomposed, top_k=embed_top_k))
     if attribute_search is None and has_attributes:
         attribute_search = _resolve_search_callable(
             "attribute_search",
@@ -239,6 +279,7 @@ async def _execute_search_with_metadata(
             else:
                 result = SearchOutput(data=getattr(results, "data", []))
         except Exception as e:
+            _propagate_search_dependency(e)
             logger.error("Attribute search failed: %s", e)
             write_live_trace_event(
                 "search_agent.attribute_search",
@@ -261,6 +302,7 @@ async def _execute_search_with_metadata(
             else:
                 result = SearchOutput(data=results if isinstance(results, list) else [])
         except Exception as e:
+            _propagate_search_dependency(e)
             logger.error("Embed search failed: %s", e)
             write_live_trace_event(
                 "search_agent.embed_search",
@@ -281,6 +323,7 @@ async def _execute_search_with_metadata(
                 )
                 embed_results = list(r.data) if hasattr(r, "data") else list(r) if isinstance(r, list) else []
             except Exception as e:
+                _propagate_search_dependency(e)
                 logger.error("Embed search in fusion failed: %s", e)
                 write_live_trace_event(
                     "search_agent.embed_search",
@@ -300,6 +343,7 @@ async def _execute_search_with_metadata(
                 elif hasattr(r, "data"):
                     attr_results = r.data
             except Exception as e:
+                _propagate_search_dependency(e)
                 logger.error("Attribute search in fusion failed: %s", e)
                 write_live_trace_event(
                     "search_agent.attribute_search",

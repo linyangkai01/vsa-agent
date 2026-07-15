@@ -191,6 +191,11 @@ class SearchBackendConfig(BaseModel):
     allow_mock_fallback: bool = True
     force_mock_embedding: bool = False
 
+    @property
+    def legacy_embed_index(self) -> str:
+        """Dedicated compatibility index; never aliases the production contract."""
+        return f"{self.embed_index}-legacy-smoke"
+
 
 class RecordedVideoConfig(BaseModel):
     """Runtime limits for the recorded-video ingestion pipeline."""

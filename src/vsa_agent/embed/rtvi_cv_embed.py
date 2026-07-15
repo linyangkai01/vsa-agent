@@ -28,11 +28,13 @@ class RTVICVEmbedClient(EmbedClient):
         base_url: str | None = None,
         api_key: str | None = None,
         dimension: int = 1536,
+        allow_mock_fallback: bool = True,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._api_key = api_key
         self._dimension = dimension
+        self._allow_mock_fallback = allow_mock_fallback
         self._client = None
         self._http_client: httpx.AsyncClient | None = None
 
@@ -55,8 +57,10 @@ class RTVICVEmbedClient(EmbedClient):
             return
 
         if AsyncOpenAI is None:
-            logger.warning("openai package is not installed, using mock embeddings")
-            return
+            if self._allow_mock_fallback:
+                logger.warning("OpenAI client is not installed; mock fallback enabled")
+                return
+            raise RuntimeError("embedding client is unavailable")
 
         base_url, api_key = self._resolve_runtime_settings()
         self._http_client = httpx.AsyncClient(trust_env=False)
@@ -73,7 +77,9 @@ class RTVICVEmbedClient(EmbedClient):
 
         await self._ensure_client()
         if self._client is None:
-            return [self._mock_embedding(item) for item in items]
+            if self._allow_mock_fallback:
+                return [self._mock_embedding(item) for item in items]
+            raise RuntimeError("embedding client is unavailable")
 
         try:
             response = await self._client.embeddings.create(
@@ -85,8 +91,13 @@ class RTVICVEmbedClient(EmbedClient):
                 self._dimension = len(embeddings[0])
             return embeddings
         except Exception as exc:
-            logger.warning("RTVI CV embedding request failed, using mock embeddings: %s", exc)
-            return [self._mock_embedding(item) for item in items]
+            if self._allow_mock_fallback:
+                logger.warning(
+                    "RTVI CV embedding request failed; mock fallback enabled error_type=%s",
+                    type(exc).__name__,
+                )
+                return [self._mock_embedding(item) for item in items]
+            raise RuntimeError("embedding request failed") from None
 
     async def embed_query(self, query: str) -> list[float]:
         results = await self.embed([query])

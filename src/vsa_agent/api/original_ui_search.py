@@ -2,9 +2,10 @@
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from vsa_agent.agents.search_agent import SearchAgentInput, execute_search
+from vsa_agent.tools.embed_search import SearchDependencyError
 from vsa_agent.tools.search import SearchInput, SearchOutput
 
 logger = logging.getLogger(__name__)
@@ -22,15 +23,20 @@ async def original_ui_search(request: SearchInput) -> SearchOutput:
         top_k,
         request.agent_mode,
     )
-    return await execute_search(
-        SearchAgentInput(
-            query=request.query,
-            agent_mode=request.agent_mode,
-            max_results=top_k,
-            top_k=top_k,
-            start_time=request.timestamp_start,
-            end_time=request.timestamp_end,
-            source_type=request.source_type,
-            use_critic=request.use_critic,
+    try:
+        return await execute_search(
+            SearchAgentInput(
+                query=request.query,
+                agent_mode=request.agent_mode,
+                max_results=top_k,
+                top_k=top_k,
+                video_sources=request.video_sources or [],
+                start_time=request.timestamp_start,
+                end_time=request.timestamp_end,
+                min_cosine_similarity=request.min_cosine_similarity,
+                source_type=request.source_type,
+                use_critic=request.use_critic,
+            )
         )
-    )
+    except SearchDependencyError:
+        raise HTTPException(status_code=503, detail="production search dependency is unavailable") from None

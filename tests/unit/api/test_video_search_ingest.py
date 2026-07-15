@@ -158,9 +158,9 @@ class TestVideoSearchIngest:
         assert fake_client.verify_certs is False
         assert fake_client.closed is True
         assert fake_client.created_indices == [
-            ("video-embeddings", {"properties": {"vector": {"type": "dense_vector", "dims": 3}}})
+            ("video-embeddings-legacy-smoke", {"properties": {"vector": {"type": "dense_vector", "dims": 3}}})
         ]
-        assert fake_client.index_calls[0][0] == "video-embeddings"
+        assert fake_client.index_calls[0][0] == "video-embeddings-legacy-smoke"
         assert fake_client.index_calls[0][2] == "video-1"
         indexed_document = fake_client.index_calls[0][1]
         assert indexed_document["video_id"] == "video-1"
@@ -181,7 +181,7 @@ class TestVideoSearchIngest:
                 pass
 
             async def index(self, index, document, id):
-                raise RuntimeError("index rejected")
+                raise RuntimeError("Authorization: Bearer secret; private response")
 
             async def close(self):
                 pass
@@ -204,7 +204,39 @@ class TestVideoSearchIngest:
         response = client.post("/api/search/ingest", json={"video_id": "video-1", "metadata": {}})
 
         assert response.status_code == 502
-        assert "Elasticsearch indexing failed" in response.json()["detail"]
+        assert response.json() == {"detail": "Legacy Elasticsearch indexing failed"}
+        assert "secret" not in response.text
+
+    def test_production_profile_disables_legacy_ingest_without_creating_client(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from vsa_agent.api import video_search_ingest
+
+        def forbidden_client(*args, **kwargs):
+            raise AssertionError("production must not create the legacy ingest client")
+
+        monkeypatch.setattr(
+            video_search_ingest,
+            "get_config",
+            lambda: AppConfig(
+                search=SearchBackendConfig(
+                    enabled=True,
+                    es_endpoint="http://es:9200",
+                    embed_index="vsa-video-segments",
+                    allow_mock_fallback=False,
+                )
+            ),
+        )
+        monkeypatch.setattr(video_search_ingest, "AsyncElasticsearch", forbidden_client)
+
+        response = _client_for_router(video_search_ingest.router).post(
+            "/api/search/ingest",
+            json={"video_id": "video-1", "metadata": {}},
+        )
+
+        assert response.status_code == 410
+        assert response.json() == {"detail": "legacy search ingest is disabled; use the recorded-video upload API"}
 
     def test_ingest_route_is_registered_on_app(self):
         from vsa_agent.api.routes import app

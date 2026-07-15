@@ -1,4 +1,4 @@
-"""Video search ingest endpoint - submits a video for indexing."""
+"""Explicit smoke-only compatibility ingest for the legacy search document shape."""
 
 from typing import Any
 
@@ -64,6 +64,13 @@ def _create_es_client(search_config: SearchBackendConfig) -> AsyncElasticsearch:
     )
 
 
+def _json_compatible_client(client: Any) -> Any:
+    options = getattr(client, "options", None)
+    if callable(options):
+        return options(headers={"accept": "application/json", "content-type": "application/json"})
+    return client
+
+
 async def _ensure_embed_index(es_client: AsyncElasticsearch, index: str, document: dict[str, Any]) -> None:
     vector = document.get("vector")
     if not isinstance(vector, list) or not vector:
@@ -82,20 +89,27 @@ async def video_search_ingest(request: VideoSearchIngestRequest) -> VideoSearchI
     search_config = get_config().search
     if not search_config.enabled or not search_config.es_endpoint:
         return VideoSearchIngestResponse(status="skipped", video_id=request.video_id, indexed=False)
+    if not search_config.allow_mock_fallback:
+        raise HTTPException(
+            status_code=410,
+            detail="legacy search ingest is disabled; use the recorded-video upload API",
+        )
 
-    es_client = _create_es_client(search_config)
+    raw_es_client = _create_es_client(search_config)
+    es_client = _json_compatible_client(raw_es_client)
+    legacy_index = search_config.legacy_embed_index
     try:
         document = _build_ingest_document(request.video_id, request.metadata)
-        await _ensure_embed_index(es_client, search_config.embed_index, document)
+        await _ensure_embed_index(es_client, legacy_index, document)
         response = await es_client.index(
-            index=search_config.embed_index,
+            index=legacy_index,
             document=document,
             id=request.video_id,
         )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Elasticsearch indexing failed: {exc}") from exc
+    except Exception:
+        raise HTTPException(status_code=502, detail="Legacy Elasticsearch indexing failed") from None
     finally:
-        await es_client.close()
+        await raw_es_client.close()
 
     return VideoSearchIngestResponse(
         status="ingested",

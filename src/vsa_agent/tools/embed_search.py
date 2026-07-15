@@ -8,6 +8,8 @@ Design Pattern: #10 Registry Table, #13 Search Strategy.
 
 import json
 import logging
+import math
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Base timestamp for offset conversion
 BASE_2025 = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+class SearchDependencyError(RuntimeError):
+    """A required production search dependency is unavailable."""
 
 
 # ===== Data Models =====
@@ -80,12 +86,39 @@ async def _generate_query_embedding(query_input: QueryInput, embed_client=None) 
     if embed_client is not None:
         try:
             return await embed_client.embed_query(query_text)
-        except Exception as e:
-            logger.warning("Embedding generation failed, using mock: %s", e)
+        except Exception as error:
+            logger.warning("Embedding generation failed; mock fallback enabled error_type=%s", type(error).__name__)
 
     # Deterministic mock: hash-based vector for testing
     seed = sum(ord(c) for c in query_text) % 1000
     return [seed * 0.001, seed * 0.002, seed * 0.003, (seed % 100) * 0.01]
+
+
+async def _embed_query(query_input: QueryInput, search_config: SearchBackendConfig) -> list[float]:
+    """Generate a validated query vector under the explicit fallback policy."""
+    if search_config.force_mock_embedding:
+        if not search_config.allow_mock_fallback:
+            raise SearchDependencyError("production search configuration is invalid")
+        return await _generate_query_embedding(query_input)
+
+    embed_client = _create_default_embed_client(allow_mock_fallback=search_config.allow_mock_fallback)
+    if embed_client is None:
+        if search_config.allow_mock_fallback:
+            return await _generate_query_embedding(query_input)
+        raise SearchDependencyError("production query embedding is unavailable")
+    try:
+        vector = await embed_client.embed_query(query_input.params.get("query", ""))
+    except Exception:
+        if search_config.allow_mock_fallback:
+            return await _generate_query_embedding(query_input)
+        raise SearchDependencyError("production query embedding is unavailable") from None
+    if (
+        not isinstance(vector, list | tuple)
+        or not vector
+        or any(type(value) is not float or not math.isfinite(value) for value in vector)
+    ):
+        raise SearchDependencyError("production query embedding is invalid")
+    return list(vector)
 
 
 # ===== ES Query Building =====
@@ -114,40 +147,49 @@ def _build_es_query(
     # Build filter conditions
     filters: list[dict[str, Any]] = []
 
+    source_type = query_input.source_type
+    if source_type in {"video_file", "recorded_video"}:
+        filters.append({"term": {"source_type": "recorded_video"}})
+    elif source_type:
+        filters.append({"term": {"source_type": source_type}})
+
     # Add video_sources filter if provided
     video_sources_str = query_input.params.get("video_sources", "")
     if video_sources_str:
         try:
             video_sources = json.loads(video_sources_str) if video_sources_str.startswith("[") else [video_sources_str]
             if isinstance(video_sources, list) and video_sources:
-                should_clauses = []
-                for vname in video_sources:
-                    vname_str = str(vname)
-                    should_clauses.append({"term": {"sensor.id.keyword": vname_str}})
-                    should_clauses.append({"wildcard": {"sensor.id.keyword": f"*{vname_str}*"}})
-                    should_clauses.append({"wildcard": {"sensor.info.url.keyword": f"*{vname_str}*"}})
-                filters.append({"bool": {"should": should_clauses, "minimum_should_match": 1}})
+                filters.append({"terms": {"video_name": [str(value) for value in video_sources]}})
         except (json.JSONDecodeError, TypeError):
             pass
 
     # Add timestamp filters if provided
     timestamp_start = query_input.params.get("timestamp_start", "")
     timestamp_end = query_input.params.get("timestamp_end", "")
-    if timestamp_start or timestamp_end:
-        range_filter: dict[str, Any] = {"range": {}}
-        if timestamp_start:
-            range_filter["range"]["timestamp"] = {"gte": timestamp_start}
-        if timestamp_end:
-            if "timestamp" in range_filter["range"]:
-                range_filter["range"]["timestamp"]["lte"] = timestamp_end
-            else:
-                range_filter["range"]["timestamp"] = {"lte": timestamp_end}
-        filters.append(range_filter)
+    if timestamp_start:
+        filters.append({"range": {"end_time": {"gte": timestamp_start}}})
+    if timestamp_end:
+        filters.append({"range": {"start_time": {"lte": timestamp_end}}})
 
     # Build the query body
     query_body: dict[str, Any] = {
         "size": top_k,
-        "_source": True,
+        "_source": [
+            "asset_id",
+            "video_id",
+            "segment_id",
+            "sensor_id",
+            "source_type",
+            "job_id",
+            "job_attempt",
+            "readiness",
+            "pipeline_version",
+            "video_name",
+            "description",
+            "start_time",
+            "end_time",
+            "screenshot_url",
+        ],
         "query": {
             "script_score": {
                 "query": {"match_all": {}} if not filters else {"bool": {"filter": filters}},
@@ -303,7 +345,59 @@ def _create_es_client(search_config: SearchBackendConfig) -> AsyncElasticsearch:
     )
 
 
-def _create_default_embed_client():
+def _json_compatible_client(client: Any) -> Any:
+    options = getattr(client, "options", None)
+    if callable(options):
+        return options(headers={"accept": "application/json", "content-type": "application/json"})
+    return client
+
+
+def _create_readiness_repository():
+    from vsa_agent.config import get_config
+    from vsa_agent.recorded_video.repository import JobRepository
+
+    database_path = get_config().recorded_video.data_root / "recorded-video.sqlite3"
+    if not database_path.is_file():
+        raise SearchDependencyError("recorded-video readiness database is unavailable")
+    return JobRepository(database_path)
+
+
+def _readiness_identity(hit: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
+    source = hit.get("_source")
+    readiness = source.get("readiness") if isinstance(source, Mapping) else None
+    if not isinstance(readiness, Mapping) or set(readiness) != {
+        "asset_id",
+        "job_id",
+        "pipeline_version",
+        "attempt",
+    }:
+        return None
+    asset_id = readiness.get("asset_id")
+    job_id = readiness.get("job_id")
+    pipeline_version = readiness.get("pipeline_version")
+    attempt = readiness.get("attempt")
+    if (
+        not isinstance(asset_id, str)
+        or not asset_id
+        or not isinstance(job_id, str)
+        or not job_id
+        or not isinstance(pipeline_version, str)
+        or not pipeline_version
+        or type(attempt) is not int
+        or attempt <= 0
+    ):
+        return None
+    if (
+        source.get("asset_id") != asset_id
+        or source.get("job_id") != job_id
+        or source.get("pipeline_version") != pipeline_version
+        or source.get("job_attempt") != attempt
+    ):
+        return None
+    return asset_id, job_id, pipeline_version, attempt
+
+
+def _create_default_embed_client(*, allow_mock_fallback: bool = True):
     from vsa_agent.config import resolve_runtime_config
     from vsa_agent.embed.rtvi_cv_embed import RTVICVEmbedClient
 
@@ -315,6 +409,7 @@ def _create_default_embed_client():
         model=embedding.model,
         base_url=embedding.base_url,
         api_key=embedding.api_key,
+        allow_mock_fallback=allow_mock_fallback,
     )
 
 
@@ -322,43 +417,93 @@ async def _search_real_es(
     query: str,
     top_k: int,
     search_config: SearchBackendConfig,
+    *,
+    readiness_repository=None,
+    video_sources: list[str] | None = None,
+    timestamp_start: str | None = None,
+    timestamp_end: str | None = None,
+    source_type: str = "video_file",
+    min_cosine_similarity: float | None = None,
 ) -> SearchOutput | None:
     if not search_config.enabled or not search_config.es_endpoint:
         return None
 
-    es_client = _create_es_client(search_config)
+    raw_es_client = _create_es_client(search_config)
+    es_client = _json_compatible_client(raw_es_client)
     try:
-        index_exists = await es_client.indices.exists(index=search_config.embed_index)
+        target_index = search_config.embed_index
+        legacy_index = False
+        index_exists = await es_client.indices.exists(index=target_index)
+        if not index_exists and search_config.allow_mock_fallback:
+            target_index = search_config.legacy_embed_index
+            index_exists = await es_client.indices.exists(index=target_index)
+            legacy_index = index_exists
         if not index_exists:
-            logger.warning("ES embed index does not exist: %s", search_config.embed_index)
+            if not search_config.allow_mock_fallback:
+                raise SearchDependencyError("production search index is unavailable")
             return None
 
         query_input = QueryInput(
-            params={"query": query, "top_k": str(top_k)},
-            source_type="video_file",
+            params={
+                "query": query,
+                "top_k": str(top_k),
+                "video_sources": json.dumps(video_sources or []),
+                "timestamp_start": timestamp_start or "",
+                "timestamp_end": timestamp_end or "",
+            },
+            source_type="" if legacy_index and source_type == "video_file" else source_type,
         )
-        embed_client = None if search_config.force_mock_embedding else _create_default_embed_client()
-        query_embedding = await _generate_query_embedding(query_input, embed_client)
+        query_embedding = await _embed_query(query_input, search_config)
         if not query_embedding:
-            logger.warning("Could not generate query embedding for ES search")
-            return None
+            raise SearchDependencyError("production query embedding is unavailable")
+
+        threshold = max(
+            search_config.embed_confidence_threshold,
+            min_cosine_similarity or 0.0,
+        )
 
         es_query = _build_es_query(
             query_input,
             query_embedding,
-            search_config.embed_index,
+            target_index,
             top_k,
-            search_config.embed_confidence_threshold,
+            threshold,
             vector_field=search_config.vector_field,
         )
-        response = await es_client.search(index=search_config.embed_index, body=es_query)
+        response = await es_client.search(index=target_index, body=es_query)
         hits = response.get("hits", {}).get("hits", [])
+
+        repository = readiness_repository
+        if repository is None:
+            try:
+                repository = _create_readiness_repository()
+            except SearchDependencyError:
+                if not search_config.allow_mock_fallback:
+                    raise
+        initialize = getattr(repository, "initialize", None)
+        if callable(initialize):
+            await initialize()
+
+        ready_hits = []
+        for hit in hits:
+            if repository is None and search_config.allow_mock_fallback:
+                ready_hits.append(hit)
+                continue
+            identity = _readiness_identity(hit) if isinstance(hit, Mapping) else None
+            if identity is None:
+                if search_config.allow_mock_fallback:
+                    ready_hits.append(hit)
+                continue
+            try:
+                ready = await repository.is_asset_search_ready(*identity)
+            except Exception:
+                raise SearchDependencyError("recorded-video readiness check is unavailable") from None
+            if ready:
+                ready_hits.append(hit)
 
         import asyncio
 
-        processed = await asyncio.gather(
-            *[_process_search_hit(hit, search_config.embed_confidence_threshold) for hit in hits]
-        )
+        processed = await asyncio.gather(*[_process_search_hit(hit, threshold) for hit in ready_hits])
 
         from vsa_agent.tools.search import SearchResult
 
@@ -377,8 +522,18 @@ async def _search_real_es(
         ]
         search_results.sort(key=lambda item: item.similarity, reverse=True)
         return SearchOutput(data=search_results[:top_k])
+    except SearchDependencyError as error:
+        if search_config is not None and not search_config.allow_mock_fallback:
+            raise
+        logger.warning(
+            "ES search dependency failed; using explicit fallback profile error_type=%s", type(error).__name__
+        )
+    except Exception:
+        if not search_config.allow_mock_fallback:
+            raise SearchDependencyError("production search dependency is unavailable") from None
+        raise
     finally:
-        await es_client.close()
+        await raw_es_client.close()
 
 
 # ===== Registered Tool =====
@@ -393,6 +548,11 @@ async def embed_search_tool(
     query: str,
     store=None,
     top_k: int = 10,
+    video_sources: list[str] | None = None,
+    timestamp_start: str | None = None,
+    timestamp_end: str | None = None,
+    source_type: str = "video_file",
+    min_cosine_similarity: float | None = None,
 ) -> SearchOutput:
     """Search for videos matching a natural language description.
 
@@ -411,14 +571,34 @@ async def embed_search_tool(
         raise ValueError("Search query must be a non-empty string")
 
     # Try real ES first if configured.
+    search_config = None
     try:
         from vsa_agent.config import get_config
 
-        es_output = await _search_real_es(query, top_k, get_config().search)
+        search_config = get_config().search
+        if search_config.force_mock_embedding and not search_config.allow_mock_fallback:
+            raise SearchDependencyError("production search configuration is invalid")
+        es_output = await _search_real_es(
+            query,
+            top_k,
+            search_config,
+            video_sources=video_sources,
+            timestamp_start=timestamp_start,
+            timestamp_end=timestamp_end,
+            source_type=source_type,
+            min_cosine_similarity=min_cosine_similarity,
+        )
         if es_output is not None:
             return es_output
-    except Exception as e:
-        logger.warning("ES search failed, falling back to in-memory store: %s", e)
+    except SearchDependencyError:
+        raise
+    except Exception as error:
+        if search_config is not None and not search_config.allow_mock_fallback:
+            raise SearchDependencyError("production search dependency is unavailable") from None
+        logger.warning("ES search failed; using explicit fallback profile error_type=%s", type(error).__name__)
+
+    if search_config is not None and not search_config.allow_mock_fallback:
+        raise SearchDependencyError("production search dependency is unavailable")
 
     # Fallback: in-memory store
     if store is None:
@@ -433,6 +613,6 @@ async def embed_search_tool(
         if hasattr(result, "data"):
             return SearchOutput(data=list(result.data))
         return SearchOutput(data=list(result) if isinstance(result, list) else [])
-    except Exception as e:
-        logger.error("Embed search failed for query '%s': %s", query[:80], e)
+    except Exception as error:
+        logger.error("Embed search fallback failed error_type=%s", type(error).__name__)
         return SearchOutput(data=[])

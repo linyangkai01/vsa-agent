@@ -1,6 +1,7 @@
 import logging
 
 from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
 
 
 def test_original_ui_search_preserves_vss_contract(monkeypatch):
@@ -33,7 +34,7 @@ def test_original_ui_search_preserves_vss_contract(monkeypatch):
             "query": "forklift near worker",
             "top_k": 3,
             "source_type": "video_file",
-            "video_sources": [],
+            "video_sources": ["yard.mp4"],
             "timestamp_start": None,
             "timestamp_end": None,
             "min_cosine_similarity": "0.00",
@@ -47,12 +48,37 @@ def test_original_ui_search_preserves_vss_contract(monkeypatch):
     assert captured["input"].top_k == 3
     assert captured["input"].max_results == 3
     assert captured["input"].agent_mode is False
+    assert captured["input"].video_sources == ["yard.mp4"]
+    assert captured["input"].start_time is None
+    assert captured["input"].end_time is None
+    assert captured["input"].min_cosine_similarity == 0.0
 
 
 def test_original_ui_search_route_is_registered():
     from vsa_agent.api.routes import app
 
     assert "/api/v1/search" in {route.path for route in app.routes}
+
+
+def test_original_ui_search_returns_controlled_503_for_production_dependency_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from vsa_agent.api import original_ui_search
+    from vsa_agent.api.routes import app
+    from vsa_agent.tools.embed_search import SearchDependencyError
+
+    async def fail_closed(_search_input):
+        raise SearchDependencyError("production search dependency is unavailable")
+
+    monkeypatch.setattr(original_ui_search, "execute_search", fail_closed)
+
+    response = TestClient(app).post(
+        "/api/v1/search",
+        json={"query": "forklift near worker", "agent_mode": False},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "production search dependency is unavailable"}
 
 
 def test_runtime_logging_writes_vsa_info_events_to_stdout(capsys):

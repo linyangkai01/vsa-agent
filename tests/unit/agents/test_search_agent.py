@@ -5,9 +5,23 @@ import logging
 
 import pytest
 
-from vsa_agent.agents.search_agent import SearchAgentConfig, SearchAgentInput
+from vsa_agent.agents.search_agent import SearchAgentConfig, SearchAgentInput, execute_search
 from vsa_agent.tools.search import SearchOutput, SearchResult
 from vsa_agent.video_analytics.nvschema import Incident
+
+
+@pytest.mark.asyncio
+async def test_embed_only_search_propagates_controlled_dependency_failure() -> None:
+    from vsa_agent.tools.embed_search import SearchDependencyError
+
+    async def fail_closed():
+        raise SearchDependencyError("production search dependency is unavailable")
+
+    with pytest.raises(SearchDependencyError):
+        await execute_search(
+            SearchAgentInput(query="forklift near worker", agent_mode=False),
+            embed_search=fail_closed,
+        )
 
 
 class TestSearchAgentInput:

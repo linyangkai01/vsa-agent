@@ -10,13 +10,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol, cast
 
+from elasticsearch import AsyncElasticsearch
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from vsa_agent.config import get_config
+from vsa_agent.config import AppConfig, get_config
 from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
+from vsa_agent.recorded_video.es_index import ElasticsearchProjectionStore, RecordedVideoIndex
 from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, UploadSession
 from vsa_agent.recorded_video.ports import SearchProjectionStore
 from vsa_agent.recorded_video.repository import JobRepository
@@ -166,6 +168,22 @@ def _repository_and_store() -> tuple[JobRepository, LocalAssetStore, int]:
     store = LocalAssetStore(recorded_video.data_root)
     repository = JobRepository(recorded_video.data_root / "recorded-video.sqlite3")
     return repository, store, recorded_video.max_upload_bytes
+
+
+def build_recorded_video_projection_store(config: AppConfig) -> ElasticsearchProjectionStore | None:
+    """Compose the production projection dependency without test-only app state."""
+    search = config.search
+    if not config.recorded_video.enabled or not search.enabled or not search.es_endpoint or search.allow_mock_fallback:
+        return None
+    client = AsyncElasticsearch(
+        search.es_endpoint,
+        request_timeout=search.request_timeout_sec,
+        verify_certs=search.verify_certs,
+    )
+    return ElasticsearchProjectionStore(
+        client,
+        index=RecordedVideoIndex(client, alias=search.embed_index),
+    )
 
 
 def _assembled_source_exists(store: LocalAssetStore, asset_id: str) -> bool:
@@ -431,6 +449,13 @@ async def delete_recorded_video(asset_id: str, request: Request) -> Response:
         SearchProjectionStore,
         getattr(request.app.state, "recorded_video_projection_store", None),
     )
+    owns_projection_store = False
+    if projection_store is None:
+        try:
+            projection_store = build_recorded_video_projection_store(get_config())
+        except Exception:
+            raise HTTPException(status_code=503, detail="recorded-video projection store is unavailable") from None
+        owns_projection_store = projection_store is not None
     if projection_store is None:
         raise HTTPException(status_code=503, detail="recorded-video projection store is unavailable")
     try:
@@ -439,6 +464,11 @@ async def delete_recorded_video(asset_id: str, request: Request) -> Response:
         raise HTTPException(status_code=404, detail="asset not found") from exc
     except AssetDeletionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        if owns_projection_store:
+            close = getattr(projection_store, "close", None)
+            if callable(close):
+                await close()
     if result.pending:
         return JSONResponse(
             status_code=202,

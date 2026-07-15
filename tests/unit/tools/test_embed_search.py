@@ -227,7 +227,7 @@ class TestEmbedSearchToolWithRealEs:
             ),
         )
         monkeypatch.setattr(embed_search, "_create_es_client", lambda _cfg: fake_es)
-        monkeypatch.setattr(embed_search, "_create_default_embed_client", lambda: FakeEmbedClient())
+        monkeypatch.setattr(embed_search, "_create_default_embed_client", lambda **_: FakeEmbedClient())
 
         output = await embed_search.embed_search_tool("forklift near worker", top_k=3)
 

@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from vsa_agent.config import AppConfig, RecordedVideoConfig
+from vsa_agent.config import AppConfig, RecordedVideoConfig, SearchBackendConfig
 from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.models import AssetStatus, JobStage, JobStatus
 from vsa_agent.recorded_video.repository import JobRepository
@@ -44,6 +44,23 @@ class BlockingProjectionStore:
 class FailingProjectionStore:
     async def delete_asset(self, asset_id: str) -> None:
         raise KeyError(f"projection backend unavailable for {asset_id}")
+
+
+class FakeComposedElasticsearch:
+    def __init__(self) -> None:
+        self.delete_calls: list[dict[str, object]] = []
+        self.closed = False
+
+    def options(self, **kwargs):
+        self.options_kwargs = kwargs
+        return self
+
+    async def delete_by_query(self, **kwargs):
+        self.delete_calls.append(kwargs)
+        return {"deleted": 0, "failures": []}
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class OrderedAssetStore(LocalAssetStore):
@@ -268,6 +285,38 @@ def test_delete_fails_closed_when_projection_store_is_not_configured(
     assert response.status_code == 503
     assert response.json() == {"detail": "recorded-video projection store is unavailable"}
     assert (data_root / "assets" / asset_id / "source" / "original.mp4").is_file()
+
+
+def test_delete_composes_real_projection_store_when_production_search_is_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video
+
+    data_root = tmp_path / "recorded-video"
+    config = AppConfig(
+        search=SearchBackendConfig(
+            enabled=True,
+            es_endpoint="http://es:9200",
+            embed_index="vsa-video-segments",
+            allow_mock_fallback=False,
+        ),
+        recorded_video=RecordedVideoConfig(enabled=True, data_root=data_root, max_upload_bytes=1024),
+    )
+    fake_es = FakeComposedElasticsearch()
+    monkeypatch.setattr(recorded_video, "get_config", lambda: config)
+    monkeypatch.setattr(recorded_video, "AsyncElasticsearch", lambda *args, **kwargs: fake_es, raising=False)
+    app = FastAPI()
+    app.include_router(recorded_video.router)
+    client = TestClient(app)
+    asset_id, _ = _ready_asset(client)
+
+    response = client.delete(f"/api/v1/videos/{asset_id}")
+
+    assert response.status_code == 204
+    assert fake_es.delete_calls[0]["index"] == "vsa-video-segments"
+    assert fake_es.delete_calls[0]["query"] == {"term": {"asset_id": asset_id}}
+    assert fake_es.closed is True
 
 
 @pytest.mark.anyio
