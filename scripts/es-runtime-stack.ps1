@@ -337,35 +337,46 @@ function Stop-OwnedProcessTree {
         [int]$LogDrainTimeoutMs = 5000
     )
     if ($null -eq $Process) { return }
-    $Process.Refresh()
-    if (-not $Process.HasExited) {
-        & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T >nul 2>nul"
-        $graceTaskkillStatus = $LASTEXITCODE
-        if (-not $Process.WaitForExit($GraceTimeoutMs)) {
-            $Process.Refresh()
-            if (-not $Process.HasExited) {
-                & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T /F >nul 2>nul"
-                $forceTaskkillStatus = $LASTEXITCODE
-            }
-            if (-not $Process.WaitForExit($ForceTimeoutMs)) {
-                throw "Process $Component (PID $($Process.Id)) did not exit after forced shutdown"
-            }
-        }
-    }
-    $exitCode = $Process.ExitCode
-    $pumpError = $null
+    $exitStatus = "shutdown-failed"
+    $terminationError = $null
+    $finalizationErrors = [System.Collections.Generic.List[string]]::new()
     try {
-        if ($null -ne $Process.VsaLogPump) {
-            $Process.VsaLogPump.Complete($LogDrainTimeoutMs)
+        $Process.Refresh()
+        if (-not $Process.HasExited) {
+            & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T >nul 2>nul"
+            if (-not $Process.WaitForExit($GraceTimeoutMs)) {
+                $Process.Refresh()
+                if (-not $Process.HasExited) {
+                    & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T /F >nul 2>nul"
+                }
+                if (-not $Process.WaitForExit($ForceTimeoutMs)) {
+                    $exitStatus = "shutdown-timeout"
+                    throw "Process $Component (PID $($Process.Id)) did not exit after forced shutdown"
+                }
+            }
         }
+        $exitStatus = $Process.ExitCode
     } catch {
-        $pumpError = $_.Exception
+        $terminationError = $_.Exception
     } finally {
-        Set-ProcessExit -Component $Component -ExitStatus $exitCode
-        if ($null -ne $Process.VsaLogPump) { $Process.VsaLogPump.Dispose() }
-        $Process.Dispose()
+        if ($null -ne $Process.VsaLogPump) {
+            try { $Process.VsaLogPump.Complete($LogDrainTimeoutMs) } catch { $finalizationErrors.Add($_.Exception.Message) }
+        }
+        try { Set-ProcessExit -Component $Component -ExitStatus $exitStatus } catch { $finalizationErrors.Add($_.Exception.Message) }
+        if ($null -ne $Process.VsaLogPump) {
+            try { $Process.VsaLogPump.Dispose() } catch { $finalizationErrors.Add($_.Exception.Message) }
+        }
+        try { $Process.Dispose() } catch { $finalizationErrors.Add($_.Exception.Message) }
     }
-    if ($null -ne $pumpError) { throw $pumpError }
+    if ($null -ne $terminationError) {
+        if ($finalizationErrors.Count -gt 0) {
+            throw "$($terminationError.Message); finalization failed: $($finalizationErrors -join '; ')"
+        }
+        throw $terminationError
+    }
+    if ($finalizationErrors.Count -gt 0) {
+        throw "Process $Component finalization failed: $($finalizationErrors -join '; ')"
+    }
 }
 
 function DeleteValidationResources {

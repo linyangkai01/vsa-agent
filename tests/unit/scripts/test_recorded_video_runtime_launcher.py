@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -378,6 +379,7 @@ def _run_powershell_runtime(
     env: dict[str, str],
     *args: str,
     timeout: float = 60,
+    interrupt_after_trace: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     powershell = shutil.which("powershell")
     if powershell is None:
@@ -427,16 +429,41 @@ def _run_powershell_runtime(
     stdout_path = repo / "launcher.stdout.log"
     stderr_path = repo / "launcher.stderr.log"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(
-            command,
-            cwd=repo,
-            env=env,
-            check=False,
-            stdout=stdout,
-            stderr=stderr,
-            text=True,
-            timeout=timeout,
-        )
+        if interrupt_after_trace is None:
+            result = subprocess.run(
+                command,
+                cwd=repo,
+                env=env,
+                check=False,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                timeout=timeout,
+            )
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=repo,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+            deadline = time.monotonic() + timeout
+            trace_path = repo / "trace.log"
+            while time.monotonic() < deadline:
+                if trace_path.exists() and interrupt_after_trace in trace_path.read_text(encoding="utf-8"):
+                    break
+                if process.poll() is not None:
+                    raise AssertionError(f"PowerShell host exited before trace marker: {interrupt_after_trace}")
+                time.sleep(0.05)
+            else:
+                process.kill()
+                raise AssertionError(f"Timed out waiting for PowerShell trace marker: {interrupt_after_trace}")
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+            return_code = process.wait(timeout=max(1, deadline - time.monotonic()))
+            result = subprocess.CompletedProcess(command, return_code)
     return subprocess.CompletedProcess(
         command,
         result.returncode,
@@ -681,6 +708,32 @@ def test_powershell_worker_readiness_failure_cleans_started_runtime(tmp_path: Pa
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
     assert all(item["exit_status"] is not None for item in manifest["processes"])
     assert not (run_dir / "validation-config.yaml").exists()
+
+
+def test_powershell_host_interruption_cleans_validation_resources_and_finalizes_manifest(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    env["HARNESS_SMOKE_SLEEP_MS"] = "30000"
+
+    completed = _run_powershell_runtime(
+        repo,
+        env,
+        "-Validate",
+        "-SmokeOnly",
+        "-TimeoutSec",
+        "3",
+        interrupt_after_trace="smoke=",
+    )
+
+    assert completed.returncode != 0
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}-legacy-smoke" in trace
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / "config.yaml").exists()
+    assert manifest["processes"]
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
 
 
 def test_powershell_normal_start_never_invokes_validation_smoke(tmp_path: Path):
@@ -1026,6 +1079,61 @@ def test_powershell_shutdown_does_not_block_on_a_stubborn_process():
     $watch.Stop()
     if (Get-Process -Id $childId -ErrorAction SilentlyContinue) {{ Stop-Process -Id $childId -Force }}
     if ($watch.ElapsedMilliseconds -ge 1000) {{ exit 8 }}
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_powershell_forced_shutdown_timeout_still_finalizes_owned_process():
+    function = _powershell_function("Stop-OwnedProcessTree")
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System.Diagnostics;
+
+public sealed class VsaForcedTimeoutProcess : Process
+{{
+    public bool DisposedCalled {{ get; private set; }}
+    public new bool HasExited {{ get {{ return false; }} }}
+    public new int Id {{ get {{ return 424242; }} }}
+    public new int ExitCode {{ get {{ return 23; }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return false; }}
+    protected override void Dispose(bool disposing)
+    {{
+        DisposedCalled = true;
+        base.Dispose(disposing);
+    }}
+}}
+
+public sealed class VsaProbeLogPump
+{{
+    public bool CompleteCalled {{ get; private set; }}
+    public bool DisposeCalled {{ get; private set; }}
+    public void Complete(int milliseconds) {{ CompleteCalled = true; }}
+    public void Dispose() {{ DisposeCalled = true; }}
+}}
+'@
+    $script:exitStatus = $null
+    function cmd.exe {{ $global:LASTEXITCODE = 0 }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) $script:exitStatus = $ExitStatus }}
+    {function}
+    $child = [VsaForcedTimeoutProcess]::new()
+    $pump = [VsaProbeLogPump]::new()
+    $child | Add-Member -NotePropertyName VsaLogPump -NotePropertyValue $pump
+    try {{
+        Stop-OwnedProcessTree -Component 'worker' -Process $child -GraceTimeoutMs 0 -ForceTimeoutMs 0
+        exit 21
+    }} catch {{
+        if ($_.Exception.Message -notmatch 'forced shutdown') {{ exit 22 }}
+    }}
+    if (-not $pump.CompleteCalled) {{ exit 23 }}
+    if (-not $pump.DisposeCalled) {{ exit 24 }}
+    if (-not $child.DisposedCalled) {{ exit 25 }}
+    if ([string]::IsNullOrWhiteSpace("$script:exitStatus")) {{ exit 26 }}
+    exit 0
     """
 
     completed = _run_powershell_probe(probe)
