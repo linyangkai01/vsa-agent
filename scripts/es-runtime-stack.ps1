@@ -131,6 +131,9 @@ search:
         $updated = $raw.TrimEnd() + "`r`n" + $searchBlock + "`r`n"
     }
 
+    $recordedVideoPattern = "(?m)^(recorded_video:\r?\n[ \t]+enabled:)[ \t]*(?:true|false)"
+    $updated = [regex]::Replace($updated, $recordedVideoPattern, '${1} false', 1)
+
     Set-Content -LiteralPath $TargetConfig -Value $updated -Encoding UTF8
 }
 
@@ -194,6 +197,23 @@ try {
 
     $env:VSA_CONFIG = $configPath
     $env:PYTHONPATH = Join-Path $repoRoot "src"
+
+    $doctorArgs = @(
+        "scripts\runtime-doctor.py",
+        "--config", $configPath,
+        "--es-endpoint", $esEndpoint,
+        "--port", "$ApiPort",
+        "--port", "$UiPort",
+        "--json"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($CondaEnv)) {
+        $doctorArgs += @("--conda-env", $CondaEnv)
+    }
+    $doctor = PythonCommand -CondaEnv $CondaEnv -PythonArgs $doctorArgs
+    & $doctor.File @($doctor.Args)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime doctor failed with exit code $LASTEXITCODE"
+    }
 
     $uvicorn = PythonCommand -CondaEnv $CondaEnv -PythonArgs @(
         "-m", "uvicorn",

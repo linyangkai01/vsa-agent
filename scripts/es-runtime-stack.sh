@@ -270,6 +270,13 @@ if pattern.search(raw):
 else:
     updated = raw.rstrip() + "\n" + search_block + "\n"
 
+updated = re.sub(
+    r"(?m)^(recorded_video:\r?\n[ \t]+enabled:)[ \t]*(?:true|false)",
+    r"\1 false",
+    updated,
+    count=1,
+)
+
 target.parent.mkdir(parents=True, exist_ok=True)
 target.write_text(updated, encoding="utf-8")
 PY
@@ -363,6 +370,16 @@ write_search_config
 
 export VSA_CONFIG="$CONFIG_PATH"
 export PYTHONPATH="$REPO_ROOT/src"
+doctor_args=(scripts/runtime-doctor.py \
+  --config "$CONFIG_PATH" \
+  --es-endpoint "$ES_ENDPOINT" \
+  --port "$API_PORT" \
+  --port "$UI_PORT" \
+  --json)
+if [[ -n "$CONDA_ENV" ]]; then
+  doctor_args+=(--conda-env "$CONDA_ENV")
+fi
+python_cmd "${doctor_args[@]}"
 : >"$API_LOG_PATH"
 : >"$API_ERR_LOG_PATH"
 start_file_log_stream "api" "$API_LOG_PATH"
