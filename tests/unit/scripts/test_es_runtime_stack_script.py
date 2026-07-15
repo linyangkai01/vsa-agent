@@ -258,10 +258,9 @@ def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
         "UI_LOG_PATH=",
         "ES_LOG_PATH=",
         "Original UI process exited before readiness",
-        "start_file_log_stream",
+        "redact_component_output",
         "start_es_log_stream",
-        "tail -n +1 -F",
-        "LOG_STREAM_PIDS",
+        "wait_runtime_processes",
         "PYTHONUNBUFFERED=1",
     ):
         assert required in text
@@ -291,7 +290,7 @@ def test_linux_stack_preflights_python_and_reports_each_service_failure():
         "aiohttp",
         "elasticsearch[async]>=8.14,<9",
         "kill -KILL",
-        "Original UI exited after readiness",
+        "exited after readiness",
     ):
         assert required in text
 
@@ -318,7 +317,8 @@ def test_es_runtime_stack_bash_terminates_the_owned_process_group_and_checks_hea
 
     assert "setsid" in text
     assert "stop_managed_process" in text
-    assert 'kill -- "-$pid"' in text
+    assert "signal_process_tree" in text
+    assert 'kill -"$signal" -- "-$target_pgid"' in text
     assert 'json.load(sys.stdin).get("status") == "ok"' in text
     assert 'health_payload="$(curl -fsS' in text
 

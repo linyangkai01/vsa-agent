@@ -40,7 +40,6 @@ $workerProcess = $null
 $uiProcess = $null
 $esLogProcess = $null
 $esStartedByRun = $false
-$esContainerPid = $null
 $manifest = [ordered]@{ run_id = $runId; processes = @() }
 $oldVsaConfig = $env:VSA_CONFIG
 $oldPythonPath = $env:PYTHONPATH
@@ -65,13 +64,22 @@ New-Item -ItemType Junction -Path $latestLink -Target $runDir | Out-Null
 
 function Write-Stack {
     param([string]$Message, [switch]$ErrorLine)
-    $line = "[stack] $Message"
+    $line = "[stack] $(Protect-RuntimeText $Message)"
     [System.IO.File]::AppendAllText($stackLogPath, $line + [Environment]::NewLine)
     if ($ErrorLine) {
         [Console]::Error.WriteLine($line)
     } else {
         [Console]::WriteLine($line)
     }
+}
+
+function Protect-RuntimeText {
+    param([AllowEmptyString()][string]$Text)
+    $protected = [regex]::Replace($Text, '(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+', '${1}[REDACTED]')
+    $protected = [regex]::Replace($protected, '(?i)(["''](?:api[-_]?key|access[-_]?token|token|password)["'']\s*:\s*["''])[^"'']*(["''])', '${1}[REDACTED]${2}')
+    $protected = [regex]::Replace($protected, '(?i)((?:api[-_]?key|access[-_]?token|token|password)\s*[:=]\s*)[^\s,;]+', '${1}[REDACTED]')
+    $protected = [regex]::Replace($protected, '(?i)data:image/[^;\s"'']+;base64,[A-Za-z0-9+/=_-]+', '[REDACTED_IMAGE]')
+    return [regex]::Replace($protected, '(?i)(["''](?:image|image_url|input_image|b64_json)["'']\s*:\s*["''])[A-Za-z0-9+/=_-]{64,}(["''])', '${1}[REDACTED_IMAGE]${2}')
 }
 
 function Write-ProcessManifest {
@@ -83,12 +91,12 @@ function Write-ProcessManifest {
 function Add-ManagedProcess {
     param(
         [string]$Component,
-        [int]$Pid,
+        [int]$ProcessId,
         [string]$SafeCommand
     )
     $script:manifest.processes += [ordered]@{
         component = $Component
-        pid = $Pid
+        pid = $ProcessId
         command = $SafeCommand
         started_at = (Get-Date).ToUniversalTime().ToString("o")
         exit_status = $null
@@ -146,16 +154,18 @@ function Start-LoggedProcess {
     $onOutput = {
         param($sender, $eventArgs)
         if ($null -eq $eventArgs.Data) { return }
-        [System.IO.File]::AppendAllText($LogPath, $eventArgs.Data + [Environment]::NewLine)
-        $line = "$prefix $($eventArgs.Data)"
+        $redacted = Protect-RuntimeText $eventArgs.Data
+        [System.IO.File]::AppendAllText($LogPath, $redacted + [Environment]::NewLine)
+        $line = "$prefix $redacted"
         [System.IO.File]::AppendAllText($stackLogPath, $line + [Environment]::NewLine)
         [Console]::WriteLine($line)
     }.GetNewClosure()
     $onError = {
         param($sender, $eventArgs)
         if ($null -eq $eventArgs.Data) { return }
-        [System.IO.File]::AppendAllText($LogPath, $eventArgs.Data + [Environment]::NewLine)
-        $line = "$prefix $($eventArgs.Data)"
+        $redacted = Protect-RuntimeText $eventArgs.Data
+        [System.IO.File]::AppendAllText($LogPath, $redacted + [Environment]::NewLine)
+        $line = "$prefix $redacted"
         [System.IO.File]::AppendAllText($stackLogPath, $line + [Environment]::NewLine)
         [Console]::Error.WriteLine($line)
     }.GetNewClosure()
@@ -166,7 +176,7 @@ function Start-LoggedProcess {
     $process | Add-Member -NotePropertyName VsaOutputHandler -NotePropertyValue $onOutput
     $process | Add-Member -NotePropertyName VsaErrorHandler -NotePropertyValue $onError
     if ($Record) {
-        Add-ManagedProcess -Component $Component -Pid $process.Id -SafeCommand $SafeCommand
+        Add-ManagedProcess -Component $Component -ProcessId $process.Id -SafeCommand $SafeCommand
     }
     return $process
 }
@@ -180,15 +190,33 @@ function Invoke-StackCommand {
 }
 
 function Assert-CurrentUserProcess {
-    param([int]$Pid)
-    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$Pid" -ErrorAction SilentlyContinue
-    if ($null -eq $processInfo) { return }
-    $owner = Invoke-CimMethod -InputObject $processInfo -MethodName GetOwner
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $expected = if ($identity.Contains("\")) { $identity.Split("\", 2)[1] } else { $identity }
-    if ($owner.ReturnValue -ne 0 -or $owner.User -ine $expected) {
-        throw "FOREIGN_LISTENER: refusing to terminate PID $Pid owned by another user"
+    param([int]$ProcessId, [object]$ExpectedCreationDate = $null)
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $processInfo) {
+        throw "FOREIGN_LISTENER: refusing to terminate PID $ProcessId because process lookup failed"
     }
+    try {
+        $owner = Invoke-CimMethod -InputObject $processInfo -MethodName GetOwner -ErrorAction Stop
+    } catch {
+        throw "FOREIGN_LISTENER: refusing to terminate PID $ProcessId because owner lookup failed"
+    }
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $identityParts = $identity.Split("\", 2)
+    $expectedDomain = if ($identityParts.Count -eq 2) { $identityParts[0] } else { $env:COMPUTERNAME }
+    $expectedUser = if ($identityParts.Count -eq 2) { $identityParts[1] } else { $identityParts[0] }
+    if (
+        $owner.ReturnValue -ne 0 -or
+        [string]::IsNullOrWhiteSpace($owner.User) -or
+        [string]::IsNullOrWhiteSpace($owner.Domain) -or
+        $owner.User -ine $expectedUser -or
+        $owner.Domain -ine $expectedDomain
+    ) {
+        throw "FOREIGN_LISTENER: refusing to terminate PID $ProcessId owned by another user"
+    }
+    if ($null -ne $ExpectedCreationDate -and $processInfo.CreationDate -ne $ExpectedCreationDate) {
+        throw "PID_REUSED: refusing to terminate PID $ProcessId because its identity changed"
+    }
+    return $processInfo
 }
 
 function Wait-PortFree {
@@ -204,8 +232,9 @@ function Reclaim-Port {
     param([int]$Port, [int]$TimeoutSec)
     $owners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
     foreach ($ownerPid in $owners) {
-        Assert-CurrentUserProcess -Pid $ownerPid
+        $ownedProcess = Assert-CurrentUserProcess -ProcessId $ownerPid
         Write-Stack "reclaiming port $Port from current-user PID $ownerPid"
+        Assert-CurrentUserProcess -ProcessId $ownerPid -ExpectedCreationDate $ownedProcess.CreationDate | Out-Null
         & taskkill.exe /PID $ownerPid /T /F | Out-Null
     }
     Wait-PortFree -Port $Port -TimeoutSec $TimeoutSec
@@ -291,8 +320,8 @@ search:
   allow_mock_fallback: $mockValue
   force_mock_embedding: $mockValue
 "@
-    $updated = [regex]::Replace($raw, "(?ms)^search:\r?\n(?:^[ \t]+.*\r?\n?)*", $searchBlock + "`r`n", 1)
-    $enabled = if ($validationMode) { "false" } else { "true" }
+    $updated = [regex]::Replace($raw, "(?m)^search:\r?\n(?:^[ \t]+[^\r\n]*(?:\r?\n|$))*", $searchBlock + "`r`n", 1)
+    $enabled = "true"
     $updated = [regex]::Replace($updated, "(?m)^(recorded_video:\r?\n[ \t]+enabled:)[ \t]*(?:true|false)", "`${1} $enabled", 1)
     $yamlDataRoot = $SelectedDataRoot | ConvertTo-Json -Compress
     $dataRootPattern = "(?m)^(recorded_video:\r?\n(?:[ \t]+.*\r?\n)*?[ \t]+data_root:)[^\r\n]*"
@@ -313,19 +342,64 @@ function Ensure-UiRuntime {
 }
 
 function Stop-OwnedProcessTree {
-    param([string]$Component, [System.Diagnostics.Process]$Process)
+    param(
+        [string]$Component,
+        [System.Diagnostics.Process]$Process,
+        [int]$GraceTimeoutMs = 5000,
+        [int]$ForceTimeoutMs = 5000
+    )
     if ($null -eq $Process) { return }
-    if (-not $Process.HasExited) { & taskkill.exe /PID $Process.Id /T /F | Out-Null }
-    $Process.WaitForExit()
+    $Process.Refresh()
+    if (-not $Process.HasExited) {
+        & taskkill.exe /PID $Process.Id /T | Out-Null
+        if (-not $Process.WaitForExit($GraceTimeoutMs)) {
+            $Process.Refresh()
+            if (-not $Process.HasExited) { & taskkill.exe /PID $Process.Id /T /F | Out-Null }
+            if (-not $Process.WaitForExit($ForceTimeoutMs)) {
+                throw "Process $Component (PID $($Process.Id)) did not exit after forced shutdown"
+            }
+        }
+    }
+    if ($null -ne $Process.VsaOutputHandler) {
+        $Process.CancelOutputRead()
+        $Process.remove_OutputDataReceived($Process.VsaOutputHandler)
+    }
+    if ($null -ne $Process.VsaErrorHandler) {
+        $Process.CancelErrorRead()
+        $Process.remove_ErrorDataReceived($Process.VsaErrorHandler)
+    }
     Set-ProcessExit -Component $Component -ExitStatus $Process.ExitCode
 }
 
 function DeleteValidationResources {
     if (-not $Validate) { return }
-    try { Invoke-WebRequest -Uri "$esEndpoint/$validationSmokeIndex" -Method Delete -TimeoutSec 5 -UseBasicParsing | Out-Null } catch { }
+    $removed = $true
+    try {
+        Invoke-WebRequest -Uri "$esEndpoint/$validationSmokeIndex" -Method Delete -TimeoutSec 5 -UseBasicParsing | Out-Null
+    } catch {
+        Write-Stack "failed to remove validation index $validationSmokeIndex`: $($_.Exception.Message)" -ErrorLine
+        $removed = $false
+    }
     Remove-Item -LiteralPath $validationDataRoot -Force -Recurse -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $validationConfigPath, $configPath -Force -ErrorAction SilentlyContinue
-    Write-Stack "removed isolated validation namespace $validationIndex"
+    if ($removed) { Write-Stack "removed isolated validation namespace $validationIndex" }
+    return $removed
+}
+
+function Wait-RuntimeProcesses {
+    param([hashtable]$Processes, [int]$PollMilliseconds = 250)
+    while ($true) {
+        foreach ($component in $Processes.Keys) {
+            $managed = $Processes[$component]
+            if ($null -eq $managed) { continue }
+            $managed.Refresh()
+            if ($managed.HasExited) {
+                Set-ProcessExit -Component $component -ExitStatus $managed.ExitCode
+                throw "$component exited after readiness. ExitCode=$($managed.ExitCode)"
+            }
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
 }
 
 try {
@@ -358,9 +432,7 @@ try {
     if (-not $wasRunning) { $esStartedByRun = $true }
     & "$PSScriptRoot\es-dev-start.ps1" -Port $EsPort 2>&1 | ForEach-Object { Write-Stack "$_" }
     if ($LASTEXITCODE -ne 0) { throw "Elasticsearch startup failed with exit code $LASTEXITCODE" }
-    $esLogProcess = Start-LoggedProcess -Component "es" -FilePath "docker" -Arguments @("compose", "-f", "docker-compose.es.yml", "logs", "-f", "elasticsearch") -WorkingDirectory $repoRoot -LogPath $esLogPath -SafeCommand "docker compose logs -f elasticsearch" -Record:$false
-    $esContainerPid = & docker inspect -f '{{.State.Pid}}' vsa-agent-es
-    if ($esContainerPid -match '^\d+$') { Add-ManagedProcess -Component "es" -Pid ([int]$esContainerPid) -SafeCommand "docker compose -f docker-compose.es.yml up -d elasticsearch" }
+    $esLogProcess = Start-LoggedProcess -Component "es" -FilePath "docker" -Arguments @("compose", "-f", "docker-compose.es.yml", "logs", "-f", "elasticsearch") -WorkingDirectory $repoRoot -LogPath $esLogPath -SafeCommand "docker compose -f docker-compose.es.yml logs -f elasticsearch"
 
     $doctorArgs = @("scripts\runtime-doctor.py", "--config", $configPath, "--es-endpoint", $esEndpoint, "--phase", "elasticsearch", "--json")
     if (-not [string]::IsNullOrWhiteSpace($CondaEnv)) { $doctorArgs += @("--conda-env", $CondaEnv) }
@@ -370,11 +442,21 @@ try {
 
     $env:VSA_CONFIG = $apiConfigPath
     $uvicorn = PythonCommand -CondaEnv $CondaEnv -PythonArgs @("-m", "uvicorn", "vsa_agent.api.routes:app", "--host", "127.0.0.1", "--port", "$ApiPort")
-    $apiProcess = Start-LoggedProcess -Component "api" -FilePath $uvicorn.File -Arguments $uvicorn.Args -WorkingDirectory $repoRoot -LogPath $apiLogPath -SafeCommand "python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $ApiPort"
+    $apiSafeCommand = if ([string]::IsNullOrWhiteSpace($CondaEnv)) {
+        "python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $ApiPort"
+    } else {
+        "conda run --no-capture-output -n $CondaEnv python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $ApiPort"
+    }
+    $apiProcess = Start-LoggedProcess -Component "api" -FilePath $uvicorn.File -Arguments $uvicorn.Args -WorkingDirectory $repoRoot -LogPath $apiLogPath -SafeCommand $apiSafeCommand
     Wait-HttpHealth -Url $apiHealthUrl -TimeoutSec $TimeoutSec -Process $apiProcess
 
-    $worker = PythonCommand -CondaEnv $CondaEnv -PythonArgs @("scripts\recorded-video-worker.py", "--config", $configPath)
-    $workerProcess = Start-LoggedProcess -Component "worker" -FilePath $worker.File -Arguments $worker.Args -WorkingDirectory $repoRoot -LogPath $workerLogPath -SafeCommand "python scripts/recorded-video-worker.py --config <runtime-config>"
+    $worker = PythonCommand -CondaEnv $CondaEnv -PythonArgs @("scripts\recorded-video-worker.py", "--config", $apiConfigPath)
+    $workerSafeCommand = if ([string]::IsNullOrWhiteSpace($CondaEnv)) {
+        "python scripts/recorded-video-worker.py --config <runtime-config>"
+    } else {
+        "conda run --no-capture-output -n $CondaEnv python scripts/recorded-video-worker.py --config <runtime-config>"
+    }
+    $workerProcess = Start-LoggedProcess -Component "worker" -FilePath $worker.File -Arguments $worker.Args -WorkingDirectory $repoRoot -LogPath $workerLogPath -SafeCommand $workerSafeCommand
     Wait-WorkerReady -LogPath $workerLogPath -TimeoutSec $TimeoutSec -Process $workerProcess
 
     if (-not $SmokeOnly) {
@@ -397,18 +479,27 @@ try {
     else {
         Write-Stack "PASS: ES recorded-video runtime stack is ready"
         Write-Stack "api=$apiUrl es=$esEndpoint ui=$uiUrl index=$Index data_root=$DataRoot"
-        if ($null -ne $uiProcess) {
-            $uiProcess.WaitForExit()
-            Set-ProcessExit -Component "ui" -ExitStatus $uiProcess.ExitCode
-            if ($uiProcess.ExitCode -ne 0) { throw "Original UI exited after readiness. ExitCode=$($uiProcess.ExitCode)" }
-        }
+        Wait-RuntimeProcesses -Processes @{ api = $apiProcess; worker = $workerProcess; ui = $uiProcess }
     }
 } finally {
-    Stop-OwnedProcessTree -Component "ui" -Process $uiProcess
-    Stop-OwnedProcessTree -Component "worker" -Process $workerProcess
-    Stop-OwnedProcessTree -Component "api" -Process $apiProcess
-    if ($null -ne $esLogProcess -and -not $esLogProcess.HasExited) { & taskkill.exe /PID $esLogProcess.Id /T /F | Out-Null }
-    DeleteValidationResources
+    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+    foreach ($managedProcess in @(
+        @{ Component = "ui"; Process = $uiProcess },
+        @{ Component = "worker"; Process = $workerProcess },
+        @{ Component = "api"; Process = $apiProcess },
+        @{ Component = "es"; Process = $esLogProcess }
+    )) {
+        try {
+            Stop-OwnedProcessTree -Component $managedProcess.Component -Process $managedProcess.Process
+        } catch {
+            $cleanupErrors.Add($_.Exception.Message)
+        }
+    }
+    try {
+        if ((DeleteValidationResources) -eq $false) { $cleanupErrors.Add("validation cleanup failed") }
+    } catch {
+        $cleanupErrors.Add($_.Exception.Message)
+    }
 
     $env:VSA_CONFIG = $oldVsaConfig
     $env:PYTHONPATH = $oldPythonPath
@@ -421,15 +512,9 @@ try {
     if ($esStartedByRun -and $StopElasticsearch) {
         try {
             Invoke-StackCommand -FilePath (Join-Path $PSScriptRoot "es-dev-stop.ps1") -Arguments @()
-            Set-ProcessExit -Component "es" -ExitStatus 0
         } catch {
-            Set-ProcessExit -Component "es" -ExitStatus 1
-            throw
+            $cleanupErrors.Add($_.Exception.Message)
         }
-    } elseif ($esStartedByRun) {
-        Set-ProcessExit -Component "es" -ExitStatus "left_running"
-    } elseif ($null -ne $esContainerPid) {
-        Set-ProcessExit -Component "es" -ExitStatus "preexisting"
     }
 
     if (-not $Validate -and (Test-Path -LiteralPath $configPath)) {
@@ -437,4 +522,7 @@ try {
     }
     Write-Stack "process manifest: $processManifestPath"
     Write-Stack "stack log: $stackLogPath"
+    if ($cleanupErrors.Count -gt 0) {
+        throw "Runtime cleanup failed: $($cleanupErrors -join '; ')"
+    }
 }

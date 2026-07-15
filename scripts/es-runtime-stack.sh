@@ -12,6 +12,7 @@ STOP_ELASTICSEARCH=0
 SMOKE_ONLY=0
 VALIDATE=0
 PORT_TERMINATION_GRACE_SEC=5
+PROCESS_SHUTDOWN_GRACE_TICKS=10
 
 usage() {
   cat <<'EOF'
@@ -89,11 +90,10 @@ VALIDATION_DATA_ROOT="$RUN_DIR/$VALIDATION_INDEX"
 API_CONFIG_PATH="$CONFIG_PATH"
 STACK_STARTED_AT=""
 ES_STARTED_BY_RUN=0
-ES_CONTAINER_PID=""
+ES_LOG_PID=""
 API_PID=""
 WORKER_PID=""
 UI_PID=""
-LOG_STREAM_PIDS=()
 declare -A PROCESS_PIDS=()
 declare -A PROCESS_EXIT_RECORDED=()
 
@@ -109,17 +109,39 @@ elif [[ -e "$LATEST_LINK" ]]; then
 fi
 ln -sfn "$RUN_DIR" "$LATEST_LINK"
 
+redact_runtime_text() {
+  python -u -c '
+import re
+import sys
+
+def protect(text):
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)([\"'"'"'](?:api[-_]?key|access[-_]?token|token|password)[\"'"'"']\s*:\s*[\"'"'"'])[^\"'"'"']*([\"'"'"'])", r"\1[REDACTED]\2", text)
+    text = re.sub(r"(?i)((?:api[-_]?key|access[-_]?token|token|password)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)data:image/[^;\s\"'"'"']+;base64,[A-Za-z0-9+/=_-]+", "[REDACTED_IMAGE]", text)
+    return re.sub(r"(?i)([\"'"'"'](?:image|image_url|input_image|b64_json)[\"'"'"']\s*:\s*[\"'"'"'])[A-Za-z0-9+/=_-]{64,}([\"'"'"'])", r"\1[REDACTED_IMAGE]\2", text)
+
+for line in sys.stdin:
+    sys.stdout.write(protect(line))
+    sys.stdout.flush()
+'
+}
+
 log_stack() {
-  printf '[stack] %s\n' "$*" | tee -a "$STACK_LOG_PATH"
+  local message
+  message="$(printf '%s' "$*" | redact_runtime_text)"
+  printf '[stack] %s\n' "$message" | tee -a "$STACK_LOG_PATH"
 }
 
 log_stack_error() {
-  printf '[stack] ERROR: %s\n' "$*" | tee -a "$STACK_LOG_PATH" >&2
+  local message
+  message="$(printf '%s' "$*" | redact_runtime_text)"
+  printf '[stack] ERROR: %s\n' "$message" | tee -a "$STACK_LOG_PATH" >&2
 }
 
 run_stack_command() {
   set +e
-  "$@" 2>&1 | sed -u 's/^/[stack] /' | tee -a "$STACK_LOG_PATH"
+  "$@" 2>&1 | redact_runtime_text | sed -u 's/^/[stack] /' | tee -a "$STACK_LOG_PATH"
   local status=${PIPESTATUS[0]}
   set -e
   return "$status"
@@ -273,8 +295,8 @@ search_block = f"""search:
   allow_mock_fallback: {str(validation).lower()}
   force_mock_embedding: {str(validation).lower()}
 """
-updated = re.sub(r"(?ms)^search:\r?\n(?:^[ \t]+.*\r?\n?)*", search_block + "\n", raw, count=1)
-enabled = "false" if validation else "true"
+updated = re.sub(r"(?m)^search:\r?\n(?:^[ \t]+[^\r\n]*(?:\r?\n|$))*", search_block + "\n", raw, count=1)
+enabled = "true"
 updated = re.sub(
     r"(?m)^(recorded_video:\r?\n[ \t]+enabled:)[ \t]*(?:true|false)",
     rf"\1 {enabled}",
@@ -345,15 +367,15 @@ reclaim_port() {
   wait_for_port_free "$port"
 }
 
-start_file_log_stream() {
+redact_component_output() {
   local label="$1" path="$2"
-  setsid bash -c 'tail -n +1 -F "$1" 2>/dev/null | sed -u "s/^/[$2] /" | tee -a "$3"' bash "$path" "$label" "$STACK_LOG_PATH" &
-  LOG_STREAM_PIDS+=("$!")
+  redact_runtime_text | tee -a "$path" | sed -u "s/^/[$label] /" | tee -a "$STACK_LOG_PATH"
 }
 
 start_es_log_stream() {
-  setsid bash -c 'docker compose -f docker-compose.es.yml logs --since "$2" -f elasticsearch 2>&1 | tee -a "$1" | sed -u "s/^/[es] /" | tee -a "$3"' bash "$ES_LOG_PATH" "$STACK_STARTED_AT" "$STACK_LOG_PATH" &
-  LOG_STREAM_PIDS+=("$!")
+  setsid docker compose -f docker-compose.es.yml logs --since "$STACK_STARTED_AT" -f elasticsearch > >(redact_component_output es "$ES_LOG_PATH") 2>&1 &
+  ES_LOG_PID=$!
+  record_process es "$ES_LOG_PID" "docker compose -f docker-compose.es.yml logs --since <run-start> -f elasticsearch"
 }
 
 wait_http_health() {
@@ -432,61 +454,105 @@ wait_same_origin_proxy() {
   return 1
 }
 
-stop_log_streams() {
-  local pid
-  for pid in "${LOG_STREAM_PIDS[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill -- "-$pid" >/dev/null 2>&1 || true
-      wait "$pid" >/dev/null 2>&1 || true
-    fi
+wait_runtime_processes() {
+  local component pid status
+  while true; do
+    for component in api worker ui; do
+      pid="${PROCESS_PIDS[$component]:-}"
+      [[ -z "$pid" ]] && continue
+      if ! pid_is_running "$pid"; then
+        status=0
+        wait "$pid" >/dev/null 2>&1 || status=$?
+        record_process_exit "$component" "$status"
+        log_stack_error "$component exited after readiness with status $status"
+        [[ "$status" == "0" ]] && return 1
+        return "$status"
+      fi
+    done
+    sleep 0.25
   done
+}
+
+pid_is_running() {
+  local pid="$1" state
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  state="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
+  [[ -z "$state" || "$state" != Z* ]]
+}
+
+signal_process_tree() {
+  local signal="$1" pid="$2" target_pgid self_pgid
+  target_pgid="$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]')"
+  self_pgid="$(ps -p "$$" -o pgid= 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$target_pgid" =~ ^[0-9]+$ && "$target_pgid" == "$pid" && "$target_pgid" != "$self_pgid" ]]; then
+    kill -"$signal" -- "-$target_pgid" >/dev/null 2>&1 || true
+  else
+    kill -"$signal" "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+stop_pid_bounded() {
+  local pid="$1" tick status=0
+  if pid_is_running "$pid"; then
+    signal_process_tree TERM "$pid"
+    for ((tick = 0; tick < ${PROCESS_SHUTDOWN_GRACE_TICKS:-10}; tick++)); do
+      pid_is_running "$pid" || break
+      sleep 0.1
+    done
+  fi
+  if pid_is_running "$pid"; then
+    signal_process_tree KILL "$pid"
+  fi
+  wait "$pid" >/dev/null 2>&1 || status=$?
+  return "$status"
 }
 
 stop_managed_process() {
   local component="$1" pid="${PROCESS_PIDS[$1]:-}" status=0
   [[ -z "$pid" ]] && return 0
-  if kill -0 "$pid" >/dev/null 2>&1; then
-    kill -- "-$pid" >/dev/null 2>&1 || true
-  fi
-  set +e
-  wait "$pid" >/dev/null 2>&1
-  status=$?
-  set -e
+  stop_pid_bounded "$pid" || status=$?
   record_process_exit "$component" "$status"
 }
 
 delete_validation_resources() {
   [[ "$VALIDATE" != "1" ]] && return 0
-  curl -fsS -X DELETE "$ES_ENDPOINT/$VALIDATION_SMOKE_INDEX" >/dev/null 2>&1 || true
-  rm -rf -- "$VALIDATION_DATA_ROOT"
-  rm -f -- "$VALIDATION_CONFIG_PATH" "$CONFIG_PATH"
-  log_stack "removed isolated validation namespace $VALIDATION_INDEX"
+  local failed=0
+  if ! curl -fsS -X DELETE "$ES_ENDPOINT/$VALIDATION_SMOKE_INDEX" >/dev/null 2>&1; then
+    log_stack_error "failed to remove validation index $VALIDATION_SMOKE_INDEX"
+    failed=1
+  fi
+  rm -rf -- "$VALIDATION_DATA_ROOT" || failed=1
+  rm -f -- "$VALIDATION_CONFIG_PATH" "$CONFIG_PATH" || failed=1
+  if [[ "$failed" == "0" ]]; then
+    log_stack "removed isolated validation namespace $VALIDATION_INDEX"
+    return 0
+  fi
+  return 1
 }
 
 cleanup() {
-  local status=$?
+  local status=$? cleanup_failed=0
   trap - EXIT INT TERM
   stop_managed_process ui
   stop_managed_process worker
   stop_managed_process api
-  stop_log_streams
-  delete_validation_resources
+  stop_managed_process es
+  delete_validation_resources || cleanup_failed=1
   if [[ "$ES_STARTED_BY_RUN" == "1" && "$STOP_ELASTICSEARCH" == "1" ]]; then
     if run_stack_command docker compose -f docker-compose.es.yml down; then
-      record_process_exit es 0
+      :
     else
-      record_process_exit es 1
+      cleanup_failed=1
     fi
-  elif [[ "$ES_STARTED_BY_RUN" == "1" ]]; then
-    record_process_exit es left_running
-  elif [[ -n "$ES_CONTAINER_PID" ]]; then
-    record_process_exit es preexisting
   fi
   if [[ "$VALIDATE" != "1" && -f "$CONFIG_PATH" ]]; then
     log_stack "Temporary config retained: $CONFIG_PATH"
   fi
   log_stack "process manifest: $PROCESS_MANIFEST_PATH"
   log_stack "stack log: $STACK_LOG_PATH"
+  if [[ "$cleanup_failed" == "1" && "$status" == "0" ]]; then
+    status=1
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -544,10 +610,6 @@ if ! run_stack_command docker compose -f docker-compose.es.yml up -d; then
   exit 1
 fi
 start_es_log_stream
-ES_CONTAINER_PID="$(docker inspect -f '{{.State.Pid}}' vsa-agent-es 2>/dev/null || true)"
-if [[ "$ES_CONTAINER_PID" =~ ^[0-9]+$ ]]; then
-  record_process es "$ES_CONTAINER_PID" "docker compose -f docker-compose.es.yml up -d elasticsearch"
-fi
 
 deadline=$((SECONDS + TIMEOUT_SEC))
 until curl -fsS "$ES_ENDPOINT" >/dev/null 2>&1; do
@@ -565,29 +627,36 @@ fi
 log_stack "validating production alias and mapping without writes"
 run_stack_command python_cmd "${doctor_args[@]}"
 
-start_file_log_stream api "$API_LOG_PATH"
 if [[ -n "$CONDA_ENV" ]]; then
-  VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>&1 &
+  VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" > >(redact_component_output api "$API_LOG_PATH") 2>&1 &
 else
-  VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" >"$API_LOG_PATH" 2>&1 &
+  VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" > >(redact_component_output api "$API_LOG_PATH") 2>&1 &
 fi
 API_PID=$!
-record_process api "$API_PID" "python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT"
+if [[ -n "$CONDA_ENV" ]]; then
+  API_SAFE_COMMAND="conda run --no-capture-output -n $CONDA_ENV python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT"
+else
+  API_SAFE_COMMAND="python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT"
+fi
+record_process api "$API_PID" "$API_SAFE_COMMAND"
 wait_http_health # readiness: api health
 
-start_file_log_stream worker "$WORKER_LOG_PATH"
 if [[ -n "$CONDA_ENV" ]]; then
-  PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python scripts/recorded-video-worker.py --config "$CONFIG_PATH" >"$WORKER_LOG_PATH" 2>&1 &
+  PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python scripts/recorded-video-worker.py --config "$API_CONFIG_PATH" > >(redact_component_output worker "$WORKER_LOG_PATH") 2>&1 &
 else
-  PYTHONUNBUFFERED=1 setsid python scripts/recorded-video-worker.py --config "$CONFIG_PATH" >"$WORKER_LOG_PATH" 2>&1 &
+  PYTHONUNBUFFERED=1 setsid python scripts/recorded-video-worker.py --config "$API_CONFIG_PATH" > >(redact_component_output worker "$WORKER_LOG_PATH") 2>&1 &
 fi
 WORKER_PID=$!
-record_process worker "$WORKER_PID" "python scripts/recorded-video-worker.py --config <runtime-config>"
+if [[ -n "$CONDA_ENV" ]]; then
+  WORKER_SAFE_COMMAND="conda run --no-capture-output -n $CONDA_ENV python scripts/recorded-video-worker.py --config <runtime-config>"
+else
+  WORKER_SAFE_COMMAND="python scripts/recorded-video-worker.py --config <runtime-config>"
+fi
+record_process worker "$WORKER_PID" "$WORKER_SAFE_COMMAND"
 wait_worker_ready # readiness: recorded-video Worker
 
 if [[ "$SMOKE_ONLY" == "0" ]]; then
-  start_file_log_stream ui "$UI_LOG_PATH"
-  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" NEXT_PUBLIC_VST_API_URL="/api/v1/vst" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" >"$UI_LOG_PATH" 2>&1 &
+  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" NEXT_PUBLIC_VST_API_URL="/api/v1/vst" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" > >(redact_component_output ui "$UI_LOG_PATH") 2>&1 &
   UI_PID=$!
   record_process ui "$UI_PID" "bash scripts/run_original_ui_vss.sh"
   wait_ui_health # readiness: original UI
@@ -604,14 +673,4 @@ fi # validation
 
 log_stack "PASS: ES recorded-video runtime stack is ready"
 log_stack "api=$API_URL es=$ES_ENDPOINT ui=$UI_URL index=$INDEX data_root=$DATA_ROOT"
-if [[ -n "$UI_PID" ]]; then
-  set +e
-  wait "$UI_PID"
-  ui_status=$?
-  set -e
-  record_process_exit ui "$ui_status"
-  if [[ "$ui_status" -ne 0 ]]; then
-    log_stack_error "Original UI exited after readiness with status $ui_status"
-    exit "$ui_status"
-  fi
-fi
+wait_runtime_processes
