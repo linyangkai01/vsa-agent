@@ -493,7 +493,8 @@ async def _search_real_es(
             if identity is None:
                 if search_config.allow_mock_fallback:
                     ready_hits.append(hit)
-                continue
+                    continue
+                raise SearchDependencyError("recorded-video readiness data is unavailable")
             try:
                 ready = await repository.is_asset_search_ready(*identity)
             except Exception:
