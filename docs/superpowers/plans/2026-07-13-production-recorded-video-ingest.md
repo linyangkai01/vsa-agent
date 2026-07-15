@@ -411,7 +411,7 @@ async def test_production_embedding_failure_never_uses_mock(monkeypatch):
 **Interfaces:**
 - Produces: `CompletedUpload {asset_id,job_id,status,status_url}`；`pollRecordedVideoJob(statusUrl, signal): Promise<JobStatusResponse>`。
 
-- [ ] **Step 1: 写 processing 到终态 UI 测试。**
+- [x] **Step 1: 写 processing 到终态 UI 测试。**
 ```tsx
 it('keeps upload in processing until the job is completed', async () => {
   fetchMock.mockResolvedValueOnce(jsonResponse({status:'running'})).mockResolvedValueOnce(jsonResponse({status:'completed'}));
@@ -420,10 +420,10 @@ it('keeps upload in processing until the job is completed', async () => {
   expect(await screen.findByText('Completed')).toBeInTheDocument();
 });
 ```
-- [ ] **Step 2: 验证失败。** Run: `npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="jobStatus|VideoManagementComponent.jobs"`。Expected: FAIL。
-- [ ] **Step 3: 实现最小 UI 状态。** complete helper 返回 body；轮询仅在 `queued/running/retry_wait` 继续，`failed` 展示服务端安全摘要并提供 retry，`cancelled` 显示取消；AbortSignal 停止轮询，保留已有 chunk headers、路径和上传进度。
-- [ ] **Step 4: 验证通过。** Run: `npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="jobStatus|VideoManagementComponent.jobs"`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add frontend/original-ui/packages/common/lib-src/utils/videoUpload.ts frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management && git commit -m "feat: show recorded video processing status in ui"`。
+- [x] **Step 2: 验证失败。** Run: `npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="jobStatus|VideoManagementComponent.jobs"`。Expected: FAIL。
+- [x] **Step 3: 实现最小 UI 状态。** complete helper 返回 body；轮询仅在 `queued/running/retry_wait` 继续，`failed` 展示服务端安全摘要并提供 retry，`cancelled` 显示取消；AbortSignal 停止轮询，保留已有 chunk headers、路径和上传进度。
+- [x] **Step 4: 验证通过。** Run: `npm --prefix frontend/original-ui test --workspace @nv-metropolis-bp-vss-ui/video-management -- --runInBand --testPathPatterns="jobStatus|VideoManagementComponent.jobs"`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add frontend/original-ui/packages/common/lib-src/utils/videoUpload.ts frontend/original-ui/packages/nv-metropolis-bp-vss-ui/video-management && git commit -m "feat: show recorded video processing status in ui"`。
 
 ### Task 18: 同源流式代理与 UI 媒体验证（OpenSpec 6.3、6.4、7.5）
 

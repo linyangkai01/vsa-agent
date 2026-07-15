@@ -67,6 +67,9 @@ export interface UploadProgress {
   progress: number;
   status: 'pending' | 'uploading' | 'processing' | 'success' | 'error' | 'cancelled';
   error?: string;
+  assetId?: string;
+  jobId?: string;
+  statusUrl?: string;
 }
 
 /** Shape for chat sidebar context chips (aligned with search `QueryDataContext`). */

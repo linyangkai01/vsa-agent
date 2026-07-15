@@ -172,14 +172,42 @@ describe('notifyUploadComplete', () => {
   beforeEach(() => {
     fetchMock = jest.fn().mockResolvedValue({
       ok: true,
-      status: 200,
-      json: async () => ({}),
+      status: 202,
+      json: async () => ({
+        asset_id: 's1',
+        job_id: 'job-1',
+        status: 'queued',
+        status_url: '/api/v1/jobs/job-1',
+      }),
     });
     global.fetch = fetchMock;
   });
 
   // Minimal valid upload response — sensorId becomes the {sensor_id} path param
   const uploadResponse = { sensorId: 's1' } as any;
+
+  it('returns the validated processing job accepted by the agent', async () => {
+    await expect(
+      notifyUploadComplete('https://agent.example.com/api/v1', 'video.mp4', uploadResponse),
+    ).resolves.toEqual({
+      asset_id: 's1',
+      job_id: 'job-1',
+      status: 'queued',
+      status_url: '/api/v1/jobs/job-1',
+    });
+  });
+
+  it('rejects a successful response that does not identify a processing job', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ status: 'queued' }),
+    });
+
+    await expect(
+      notifyUploadComplete('https://agent.example.com/api/v1', 'video.mp4', uploadResponse),
+    ).rejects.toThrow('invalid response');
+  });
 
   it('POSTs to videos/{sensorId}/complete with filename + the full upload response in the body', async () => {
     const response = { sensorId: 'sensor-123', bytes: 100 } as any;

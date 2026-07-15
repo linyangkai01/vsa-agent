@@ -8,8 +8,15 @@
 // upload works on every profile (search/lvs/base/alerts).
 
 import type { FileUploadResponse } from './types';
-import { chunkedUpload as sharedChunkedUpload } from '@nemo-agent-toolkit/ui';
-import type { ChunkedUploadOptions, ChunkedUploadResponse } from '@nemo-agent-toolkit/ui';
+import {
+  chunkedUpload as sharedChunkedUpload,
+  parseCompletedUpload,
+} from '@nemo-agent-toolkit/ui';
+import type {
+  ChunkedUploadOptions,
+  ChunkedUploadResponse,
+  CompletedUpload,
+} from '@nemo-agent-toolkit/ui';
 
 export type { ChunkedUploadOptions };
 
@@ -40,7 +47,7 @@ export async function notifyUploadComplete(
   videoUploadApiResponse: FileUploadResponse,
   formData?: Record<string, any>,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<CompletedUpload> {
   const sensorId = (videoUploadApiResponse as unknown as { sensorId?: string }).sensorId;
   if (!sensorId) {
     throw new Error('notifyUploadComplete: VST upload response missing sensorId');
@@ -73,5 +80,14 @@ export async function notifyUploadComplete(
       }
     } catch { /* use default */ }
     throw new Error(message);
+  }
+
+  try {
+    return parseCompletedUpload(await response.json());
+  } catch (error) {
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error('Video processing returned an invalid response');
   }
 }

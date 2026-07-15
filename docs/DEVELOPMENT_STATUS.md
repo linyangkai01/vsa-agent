@@ -1,12 +1,12 @@
 # Development Status
 
-Last updated: 2026-07-13
+Last updated: 2026-07-15
 
 ## Current State
 
 - Active OpenSpec change: `production-recorded-video-ingest`.
 - Active branch: `codex/production-recorded-video-ingest`.
-- Phase: design is approved and the detailed implementation plan is ready for execution-mode selection.
+- Phase: build；主会话按 `executing-plans + TDD + thorough review` 连续执行。
 - Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
@@ -54,10 +54,10 @@ Result: valid before archive.
 
 ## Active Change
 
-- `production-recorded-video-ingest`: OpenSpec and Chinese design artifacts are approved; the 24-task TDD implementation plan is ready for Comet execution-mode selection.
+- `production-recorded-video-ingest`: Task 1-17 已完成；Common、Video Management 与 Chat 已接入 recorded-video job 的 processing/completed/failed/cancelled、retry、cancel 与卸载中止轮询。
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
 - Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
-- No implementation code has been started for this change.
+- 当前分支：`codex/production-recorded-video-ingest`；下一项为 Task 18 同源流式代理和 UI 媒体契约。
 
 ## Python Quality Program
 
@@ -141,4 +141,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-Choose whether to continue from the Comet plan-ready gate; if continuing, select isolation, execution, TDD and review modes before writing code.
+继续 Task 18：实现 Next 同源流式代理，验证 multipart chunk、任务 API、缩略图、Range 媒体和 VST facade。

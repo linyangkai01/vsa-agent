@@ -5,7 +5,10 @@ import toast from 'react-hot-toast';
 import { IconCheck, IconChevronDown, IconCopy, IconX } from '@tabler/icons-react';
 import {
   UploadFilesDialog,
+  cancelRecordedVideoJob,
   copyToClipboard,
+  pollRecordedVideoJob,
+  retryRecordedVideoJob,
   uploadFileChunked,
   type UploadFileConfigTemplate,
   type FileUploadResult,
@@ -17,7 +20,7 @@ import HomeContext from '@/pages/api/home/home.context';
 import type { ChatVideoUploadCompletePayload } from '@/types/chatVideoUpload';
 
 // Upload status for each file
-type FileUploadStatus = 'pending' | 'uploading' | 'success' | 'error' | 'cancelled';
+type FileUploadStatus = 'pending' | 'uploading' | 'processing' | 'success' | 'error' | 'cancelled';
 
 // Interface for file with form data
 interface FileWithFormData {
@@ -32,6 +35,9 @@ interface FileWithFormData {
   uploadProgress?: number;
   uploadStatus?: FileUploadStatus;
   uploadError?: string;
+  jobId?: string;
+  statusUrl?: string;
+  uploadResult?: FileUploadResult;
 }
 
 // CSS class constants
@@ -44,6 +50,7 @@ const POPUP_CONTAINER_CLASS =
 const UPLOAD_STATUS_STYLE: Record<FileUploadStatus, { progressBarClass: string; textClass: string }> = {
   pending: { progressBarClass: 'bg-gray-300', textClass: 'text-gray-400' },
   uploading: { progressBarClass: 'bg-[#76b900]', textClass: 'text-[#76b900]' },
+  processing: { progressBarClass: 'bg-amber-500', textClass: 'text-amber-500' },
   success: { progressBarClass: 'bg-green-500', textClass: 'text-green-500' },
   error: { progressBarClass: 'bg-red-500', textClass: 'text-red-500' },
   cancelled: { progressBarClass: 'bg-orange-500', textClass: 'text-orange-500' },
@@ -52,18 +59,27 @@ const UPLOAD_STATUS_STYLE: Record<FileUploadStatus, { progressBarClass: string; 
 function getUploadStatusLabel(status: FileUploadStatus, progress?: number): string {
   switch (status) {
     case 'uploading': return `${progress ?? 0}%`;
-    case 'success': return 'Done';
+    case 'processing': return 'Processing';
+    case 'success': return 'Completed';
     case 'error': return 'Failed';
     case 'cancelled': return 'Cancelled';
     default: return 'Pending';
   }
 }
 
-type UploadResultItem = { filename: string; result?: FileUploadResult; error?: string; cancelled?: boolean };
+type UploadResultItem = {
+  fileId: string;
+  filename: string;
+  result?: FileUploadResult;
+  jobResult?: FileUploadResult;
+  error?: string;
+  cancelled?: boolean;
+};
 
 function getUploadStatusIcon(status: FileUploadStatus, textClass: string) {
   switch (status) {
     case 'uploading':
+    case 'processing':
       return <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-[#76b900]" />;
     case 'success':
       return <IconCheck size={16} className="flex-shrink-0 text-green-500" />;
@@ -79,12 +95,18 @@ function UploadProgressPopup({
   files,
   onCancelAll,
   onCancelSingle,
+  onRetry,
+  onClose,
 }: Readonly<{
   files: FileWithFormData[];
   onCancelAll: () => void;
   onCancelSingle: (fileId: string) => void;
+  onRetry: (fileId: string) => void;
+  onClose: () => void;
 }>) {
-  const hasActive = files.some(f => f.uploadStatus === 'pending' || f.uploadStatus === 'uploading');
+  const hasActive = files.some(f =>
+    f.uploadStatus === 'pending' || f.uploadStatus === 'uploading' || f.uploadStatus === 'processing'
+  );
   return (
     <div className={POPUP_OVERLAY_CLASS}>
       <div className={POPUP_CONTAINER_CLASS}>
@@ -117,7 +139,7 @@ function UploadProgressPopup({
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-xs font-medium ${style.textClass}`}>{label}</span>
-                    {(status === 'uploading' || status === 'pending') && (
+                    {(status === 'uploading' || status === 'pending' || status === 'processing') && (
                       <button
                         type="button"
                         onClick={() => onCancelSingle(fileItem.id)}
@@ -125,6 +147,16 @@ function UploadProgressPopup({
                         title="Cancel upload"
                       >
                         <IconX size={14} />
+                      </button>
+                    )}
+                    {status === 'error' && fileItem.jobId && fileItem.statusUrl && (
+                      <button
+                        type="button"
+                        onClick={() => onRetry(fileItem.id)}
+                        className="text-xs font-medium text-green-600 hover:underline dark:text-green-400"
+                        aria-label={`Retry ${fileItem.uploadFilename ?? fileItem.file.name}`}
+                      >
+                        Retry
                       </button>
                     )}
                   </div>
@@ -135,11 +167,23 @@ function UploadProgressPopup({
                     style={{ width: `${fileItem.uploadProgress ?? 0}%` }}
                   />
                 </div>
-                {fileItem.uploadError && <p className="mt-1 text-xs text-red-500">{fileItem.uploadError}</p>}
+                {status === 'error' && fileItem.uploadError && (
+                  <p className="mt-1 text-xs text-red-500">{fileItem.uploadError}</p>
+                )}
               </div>
             );
           })}
         </div>
+        {!hasActive && (
+          <button
+            type="button"
+            aria-label="Close upload status"
+            onClick={onClose}
+            className="mt-4 w-full rounded-lg bg-[#76b900] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#5a8f00]"
+          >
+            Close
+          </button>
+        )}
       </div>
     </div>
   );
@@ -336,7 +380,7 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [showSuccessPopup, setShowSuccessPopup] = useState(false);
   const [showProgressPopup, setShowProgressPopup] = useState(false);
-  const [allUploadResults, setAllUploadResults] = useState<{ filename: string; result?: FileUploadResult; error?: string; cancelled?: boolean }[]>([]);
+  const [allUploadResults, setAllUploadResults] = useState<UploadResultItem[]>([]);
   const [uploadingFiles, setUploadingFiles] = useState<FileWithFormData[]>([]);
   const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
   const [copiedResultIndex, setCopiedResultIndex] = useState<number | null>(null);
@@ -345,6 +389,7 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
 
   const abortControllerMapRef = useRef<Map<string, AbortController>>(new Map());
   const cancelledFileIdsRef = useRef<Set<string>>(new Set());
+  const uploadingFilesRef = useRef<FileWithFormData[]>([]);
 
   const [showFileSelectPopup, setShowFileSelectPopup] = useState(false);
   const [initialFilesForDialog, setInitialFilesForDialog] = useState<File[] | null>(null);
@@ -371,6 +416,16 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
       onUploadFlowActiveChangeRef.current?.(uploadFlowSourceId, false);
     };
   }, [uploadDialogOpen, uploadFlowSourceId]);
+
+  useEffect(() => {
+    uploadingFilesRef.current = uploadingFiles;
+  }, [uploadingFiles]);
+
+  useEffect(() => () => {
+    abortControllerMapRef.current.forEach((controller) => controller.abort());
+    abortControllerMapRef.current.clear();
+    cancelledFileIdsRef.current.clear();
+  }, []);
 
   // Warn user before leaving page while uploading
   useEffect(() => {
@@ -541,25 +596,64 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
     ));
   }, []);
 
+  const publishSuccessfulUploads = useCallback((
+    successes: Array<{ filename: string; result: FileUploadResult }>,
+    conversationId?: string,
+  ) => {
+    successes.forEach(({ result }) => onUploadSuccessRef.current?.(result));
+    onUploadBatchCompleteRef.current?.({ results: successes });
+
+    if (!conversationId || !onSendHiddenMessageRef.current || !chatUploadFileHiddenMessageTemplate) {
+      return;
+    }
+    const videoFilenames = successes
+      .map(({ filename, result }) => result.filename || result.video_id || result.id || filename)
+      .filter((name): name is string => !!name);
+    if (videoFilenames.length > 0) {
+      onSendHiddenMessageRef.current(
+        chatUploadFileHiddenMessageTemplate.replaceAll('{filenames}', videoFilenames.join(' ')),
+        conversationId,
+      );
+    }
+  }, [chatUploadFileHiddenMessageTemplate]);
+
   // Cancel a single file upload
   const handleCancelSingleUpload = useCallback((fileId: string) => {
     // Mark as cancelled to prevent upload from starting
     cancelledFileIdsRef.current.add(fileId);
+
+    const fileItem = uploadingFilesRef.current.find((file) => file.id === fileId);
+    if (agentApiUrlBase && fileItem?.uploadStatus === 'processing' && fileItem.jobId) {
+      void cancelRecordedVideoJob(fileItem.jobId, { agentApiUrl: agentApiUrlBase })
+        .catch(() => undefined);
+    }
     
-    // Abort upload if in progress
+    // Abort upload or job polling if in progress
     abortControllerMapRef.current.get(fileId)?.abort();
     abortControllerMapRef.current.delete(fileId);
     
     // Update status immediately
     updateUploadingFileStatus(fileId, 'cancelled', 'Cancelled');
-  }, [updateUploadingFileStatus]);
+  }, [agentApiUrlBase, updateUploadingFileStatus]);
 
   // Cancel all uploads
   const handleCancelAllUploads = useCallback(() => {
-    // Mark all pending/uploading files as cancelled and update UI
+    const activeFiles = uploadingFilesRef.current.filter((file) =>
+      file.uploadStatus === 'pending' ||
+      file.uploadStatus === 'uploading' ||
+      file.uploadStatus === 'processing'
+    );
+    activeFiles.forEach((file) => {
+      cancelledFileIdsRef.current.add(file.id);
+      if (agentApiUrlBase && file.uploadStatus === 'processing' && file.jobId) {
+        void cancelRecordedVideoJob(file.jobId, { agentApiUrl: agentApiUrlBase })
+          .catch(() => undefined);
+      }
+    });
+
+    // Mark all active uploads/jobs as cancelled and update UI
     setUploadingFiles(prev => prev.map(f => {
-      if (f.uploadStatus === 'pending' || f.uploadStatus === 'uploading') {
-        cancelledFileIdsRef.current.add(f.id);
+      if (f.uploadStatus === 'pending' || f.uploadStatus === 'uploading' || f.uploadStatus === 'processing') {
         return { ...f, uploadStatus: 'cancelled' as FileUploadStatus, uploadError: 'Cancelled' };
       }
       return f;
@@ -568,16 +662,21 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
     // Abort all uploads and clear map
     abortControllerMapRef.current.forEach(controller => controller.abort());
     abortControllerMapRef.current.clear();
-  }, []);
+  }, [agentApiUrlBase]);
 
   // Helper to check if file is cancelled
   const isFileCancelled = useCallback((fileId: string) => cancelledFileIdsRef.current.has(fileId), []);
 
   // Upload a single file (for progress popup)
-  const uploadSingleFileWithTracking = async (fileItem: FileWithFormData): Promise<{ filename: string; result?: FileUploadResult; error?: string; cancelled?: boolean }> => {
+  const uploadSingleFileWithTracking = async (fileItem: FileWithFormData): Promise<UploadResultItem> => {
     const { id: fileId, file, formData } = fileItem;
     const filename = fileItem.uploadFilename ?? file.name;
-    const cancelledResult = { filename, error: 'Upload was cancelled', cancelled: true };
+    const cancelledResult: UploadResultItem = {
+      fileId,
+      filename,
+      error: 'Upload was cancelled',
+      cancelled: true,
+    };
 
     // Check if already cancelled before starting
     if (isFileCancelled(fileId)) {
@@ -587,7 +686,7 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
     if (!agentApiUrlBase) {
       const errorMessage = 'Agent API URL is not configured';
       updateUploadingFileStatus(fileId, 'error', errorMessage);
-      return { filename, error: errorMessage, cancelled: false };
+      return { fileId, filename, error: errorMessage, cancelled: false };
     }
 
     updateUploadingFileStatus(fileId, 'uploading');
@@ -611,17 +710,40 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
         fileItem.uploadFilename
       );
       
-      // Clean up AbortController after successful upload
-      abortControllerMapRef.current.delete(fileId);
-
       // Check if cancelled after upload
       if (isFileCancelled(fileId)) {
         return cancelledResult;
       }
 
+      setUploadingFiles(prev => prev.map(item => item.id === fileId ? {
+        ...item,
+        uploadStatus: 'processing',
+        uploadProgress: 100,
+        uploadError: undefined,
+        jobId: result.job_id,
+        statusUrl: result.status_url,
+        uploadResult: result,
+      } : item));
+
+      const terminalJob = await pollRecordedVideoJob(result.status_url, {
+        agentApiUrl: agentApiUrlBase,
+        signal: abortController.signal,
+      });
+      abortControllerMapRef.current.delete(fileId);
+
+      if (isFileCancelled(fileId) || terminalJob.status === 'cancelled') {
+        updateUploadingFileStatus(fileId, 'cancelled', 'Cancelled');
+        return { ...cancelledResult, jobResult: result };
+      }
+      if (terminalJob.status === 'failed') {
+        const errorMessage = terminalJob.error || 'Recorded video processing failed';
+        updateUploadingFileStatus(fileId, 'error', errorMessage);
+        return { fileId, filename, jobResult: result, error: errorMessage, cancelled: false };
+      }
+
       updateUploadingFileStatus(fileId, 'success');
       updateUploadingFileProgress(fileId, 100);
-      return { filename, result };
+      return { fileId, filename, result };
     } catch (error) {
       // Clean up AbortController on error
       abortControllerMapRef.current.delete(fileId);
@@ -635,7 +757,7 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
       
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       updateUploadingFileStatus(fileId, 'error', errorMessage);
-      return { filename, error: errorMessage, cancelled: false };
+      return { fileId, filename, error: errorMessage, cancelled: false };
     }
   };
 
@@ -681,45 +803,23 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
       }
 
       if (successes.length > 0) {
-        successes.forEach(({ result }) => {
-          if (result) onUploadSuccessRef.current?.(result);
-        });
-
-        onUploadBatchCompleteRef.current?.({
-          results: successes.filter(
-            (entry): entry is { filename: string; result: FileUploadResult } =>
-              !!entry.result,
+        publishSuccessfulUploads(
+          successes.filter(
+            (entry): entry is UploadResultItem & { result: FileUploadResult } => !!entry.result,
           ),
-        });
-
-        // Send hidden message to chat API with the uploaded video filenames
-        if (
-          conversationIdAtUploadStart &&
-          onSendHiddenMessageRef.current &&
-          chatUploadFileHiddenMessageTemplate
-        ) {
-          // Fallback order: result.filename -> result.video_id -> result.id -> original filename
-          const videoFilenames = successes
-            .map(({ filename, result }) => (result as any)?.filename || (result as any)?.video_id || (result as any)?.id || filename)
-            .filter((name): name is string => !!name);
-          
-          if (videoFilenames.length > 0) {
-            const filenamesStr = videoFilenames.join(' ');
-            // Replace {filenames} placeholder with actual filenames
-            const hiddenMessage = chatUploadFileHiddenMessageTemplate.replaceAll('{filenames}', filenamesStr);
-            onSendHiddenMessageRef.current(hiddenMessage, conversationIdAtUploadStart);
-          }
-        }
+          conversationIdAtUploadStart,
+        );
       }
 
-      // Show success popup after a short delay (even if some were cancelled)
-      setTimeout(() => {
-        setShowProgressPopup(false);
-        // Only show success popup if there were any results (not all cancelled)
-        if (successes.length > 0 || errors.length > 0 || cancelled.length > 0) {
-          setShowSuccessPopup(true);
-        }
-      }, 1000);
+      // Failed jobs stay in the progress view so Retry remains available.
+      if (errors.length === 0) {
+        setTimeout(() => {
+          setShowProgressPopup(false);
+          if (successes.length > 0 || cancelled.length > 0) {
+            setShowSuccessPopup(true);
+          }
+        }, 1000);
+      }
 
     } catch (error) {
       const err = error instanceof Error ? error : new Error('Unknown error');
@@ -733,6 +833,74 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
       cancelledFileIdsRef.current.clear();
     }
   };
+
+  const handleRetryUpload = useCallback(async (fileId: string) => {
+    const fileItem = uploadingFilesRef.current.find((file) => file.id === fileId);
+    if (
+      !agentApiUrlBase ||
+      !fileItem?.jobId ||
+      !fileItem.statusUrl ||
+      !fileItem.uploadResult
+    ) return;
+
+    const controller = new AbortController();
+    abortControllerMapRef.current.get(fileId)?.abort();
+    abortControllerMapRef.current.set(fileId, controller);
+    cancelledFileIdsRef.current.delete(fileId);
+    setIsUploading(true);
+    updateUploadingFileStatus(fileId, 'processing');
+
+    try {
+      await retryRecordedVideoJob(fileItem.jobId, {
+        agentApiUrl: agentApiUrlBase,
+        signal: controller.signal,
+      });
+      const terminalJob = await pollRecordedVideoJob(fileItem.statusUrl, {
+        agentApiUrl: agentApiUrlBase,
+        signal: controller.signal,
+      });
+
+      if (terminalJob.status === 'completed') {
+        updateUploadingFileStatus(fileId, 'success');
+        const successfulResult = {
+          fileId,
+          filename: fileItem.uploadFilename ?? fileItem.file.name,
+          result: fileItem.uploadResult,
+        };
+        setAllUploadResults(prev => prev.map(result =>
+          result.fileId === fileId ? successfulResult : result
+        ));
+        publishSuccessfulUploads(
+          [successfulResult],
+          getActiveConversationIdRef.current?.(),
+        );
+      } else if (terminalJob.status === 'cancelled') {
+        updateUploadingFileStatus(fileId, 'cancelled', 'Cancelled');
+      } else {
+        const errorMessage = terminalJob.error || 'Recorded video processing failed';
+        updateUploadingFileStatus(fileId, 'error', errorMessage);
+        setAllUploadResults(prev => prev.map(result =>
+          result.fileId === fileId ? { ...result, error: errorMessage } : result
+        ));
+      }
+    } catch (error) {
+      const cancelled = error instanceof Error && error.name === 'AbortError';
+      updateUploadingFileStatus(
+        fileId,
+        cancelled ? 'cancelled' : 'error',
+        cancelled
+          ? 'Cancelled'
+          : error instanceof Error
+            ? error.message
+            : 'Unable to retry video processing',
+      );
+    } finally {
+      if (abortControllerMapRef.current.get(fileId) === controller) {
+        abortControllerMapRef.current.delete(fileId);
+      }
+      setIsUploading(false);
+    }
+  }, [agentApiUrlBase, publishSuccessfulUploads, updateUploadingFileStatus]);
 
   const handleDialogConfirm = useCallback(
     (entries: { id: string; file: File; formData: Record<string, any>; uploadFilename?: string; metadataFile?: File | null }[]) => {
@@ -780,6 +948,8 @@ export const ChatFileUpload: React.FC<ChatFileUploadProps> = ({
           files={uploadingFiles}
           onCancelAll={handleCancelAllUploads}
           onCancelSingle={handleCancelSingleUpload}
+          onRetry={handleRetryUpload}
+          onClose={handleClosePopup}
         />
       )}
 

@@ -20,6 +20,8 @@
 
 import { chunkedUpload } from './chunkedUpload';
 import type { ChunkedUploadResponse } from './chunkedUpload';
+import { parseCompletedUpload } from './recordedVideoJob';
+import type { CompletedUpload, RecordedVideoJobStatus } from './recordedVideoJob';
 
 interface AgentUploadUrlResponse {
   url: string;
@@ -32,6 +34,10 @@ export interface FileUploadResult {
   streamId: string;
   filePath: string;
   timestamp: string;
+  asset_id: string;
+  job_id: string;
+  status: RecordedVideoJobStatus;
+  status_url: string;
 }
 
 /**
@@ -95,7 +101,7 @@ export async function notifyGenericUploadComplete(
   uploadResponse: ChunkedUploadResponse,
   formData?: Record<string, any>,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<CompletedUpload> {
   if (!sensorId) {
     throw new Error('notifyGenericUploadComplete: sensorId is required');
   }
@@ -122,6 +128,15 @@ export async function notifyGenericUploadComplete(
       }
     } catch { /* use default */ }
     throw new Error(message);
+  }
+
+  try {
+    return parseCompletedUpload(await response.json());
+  } catch (error) {
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error('Video processing returned an invalid response');
   }
 }
 
@@ -167,7 +182,7 @@ export async function uploadFileChunked(
   }
 
   const sensorId = uploadResponse.sensorId as string;
-  await notifyGenericUploadComplete(
+  const completedUpload = await notifyGenericUploadComplete(
     agentApiUrl,
     sensorId,
     filenameForRequest,
@@ -183,5 +198,6 @@ export async function uploadFileChunked(
     streamId: (uploadResponse.streamId as string) ?? sensorId,
     filePath: (uploadResponse.filePath as string) ?? '',
     timestamp: '2025-01-01T00:00:00.000Z',
+    ...completedUpload,
   };
 }

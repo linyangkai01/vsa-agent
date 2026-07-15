@@ -6,9 +6,13 @@ import { filterStreams, isRtspStream } from './utils';
 import {
   UploadFilesDialog,
   VideoModal,
+  cancelRecordedVideoJob,
+  pollRecordedVideoJob,
+  retryRecordedVideoJob,
   useVideoModal,
   useChatVideoUploadCompleteSubscription,
 } from '@nemo-agent-toolkit/ui';
+import type { JobStatusResponse } from '@nemo-agent-toolkit/ui';
 import { chunkedUpload, notifyUploadComplete } from './chunkedUpload';
 import { createApiEndpoints } from './api';
 import { deleteRtspStream } from './rtspStream';
@@ -93,11 +97,21 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
   const isUploadingRef = useRef(false);
   const uploadSessionIdRef = useRef(0);
   const uploadAbortControllerRef = useRef<AbortController | null>(null);
+  const retryAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingFilesQueueRef = useRef<Array<{ id: string; file: File }>>([]);
 
   useEffect(() => {
     isUploadingRef.current = isUploading;
   }, [isUploading]);
+
+  useEffect(() => () => {
+    pendingFilesQueueRef.current = [];
+    uploadSessionIdRef.current += 1;
+    uploadAbortControllerRef.current?.abort();
+    uploadAbortControllerRef.current = null;
+    retryAbortControllersRef.current.forEach((controller) => controller.abort());
+    retryAbortControllersRef.current.clear();
+  }, []);
 
   // Sync display filter state with enabled features so label and filter stay correct
   useEffect(() => {
@@ -153,6 +167,26 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
     refreshStreamsAfterChatUpload,
   );
 
+  const applyTerminalJobStatus = useCallback((id: string, job: JobStatusResponse) => {
+    setUploadProgress((prev) => prev.map((progress) => {
+      if (progress.id !== id || progress.status !== 'processing') return progress;
+      if (job.status === 'completed') {
+        return { ...progress, status: 'success', progress: 100, error: undefined };
+      }
+      if (job.status === 'failed') {
+        return {
+          ...progress,
+          status: 'error',
+          error: job.error || 'Recorded video processing failed',
+        };
+      }
+      if (job.status === 'cancelled') {
+        return { ...progress, status: 'cancelled', error: undefined };
+      }
+      return progress;
+    }));
+  }, []);
+
   const processUploadQueue = useCallback(async (fileEntries: Array<{ id: string; file: File; formData?: Record<string, any> }>) => {
     const abortController = new AbortController();
     uploadAbortControllerRef.current = abortController;
@@ -161,6 +195,7 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
 
     setIsUploading(true);
     const isSessionValid = () => uploadSessionIdRef.current === currentSessionId;
+    let completedAny = false;
 
     const uploadSingleFile = async (entry: { id: string; file: File; formData?: Record<string, any> }): Promise<void> => {
       const { id, file, formData } = entry;
@@ -206,7 +241,7 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
         // Forward the per-upload custom params collected by the dialog
         // (from chatUploadFileConfigTemplateJson) so the agent can use them
         // downstream. Sent as `custom_params` on the /complete body.
-        await notifyUploadComplete(
+        const completedUpload = await notifyUploadComplete(
           agentApiUrl,
           file.name,
           videoUploadApiResponse,
@@ -217,12 +252,22 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
         if (!isSessionValid()) return;
 
         setUploadProgress((prev) =>
-          prev.map((p) => (p.id === id && (p.status === 'uploading' || p.status === 'processing') ? {
+          prev.map((p) => (p.id === id && p.status === 'processing' ? {
             ...p,
-            status: 'success',
-            progress: 100,
+            assetId: completedUpload.asset_id,
+            jobId: completedUpload.job_id,
+            statusUrl: completedUpload.status_url,
           } : p))
         );
+
+        const terminalJob = await pollRecordedVideoJob(completedUpload.status_url, {
+          agentApiUrl,
+          signal: abortController.signal,
+        });
+
+        if (!isSessionValid()) return;
+        completedAny = completedAny || terminalJob.status === 'completed';
+        applyTerminalJobStatus(id, terminalJob);
       } catch (err) {
         if (!isSessionValid()) return;
 
@@ -261,8 +306,11 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
     }
 
     setIsUploading(false);
-    await Promise.all([refetchRef.current(), refetchTimelinesRef.current()]);
-  }, [vstApiUrl, agentApiUrl]);
+    uploadAbortControllerRef.current = null;
+    if (completedAny) {
+      await Promise.all([refetchRef.current(), refetchTimelinesRef.current()]);
+    }
+  }, [vstApiUrl, agentApiUrl, applyTerminalJobStatus]);
 
   const handleFilesSelected = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
@@ -284,13 +332,68 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
     uploadProgressRef.current = uploadProgress;
   }, [uploadProgress]);
 
+  const handleRetryUpload = useCallback(async (upload: UploadProgress) => {
+    if (!agentApiUrl || !upload.jobId || !upload.statusUrl) return;
+
+    const controller = new AbortController();
+    retryAbortControllersRef.current.get(upload.id)?.abort();
+    retryAbortControllersRef.current.set(upload.id, controller);
+    setUploadProgress((prev) => prev.map((progress) => (
+      progress.id === upload.id
+        ? { ...progress, status: 'processing', error: undefined }
+        : progress
+    )));
+
+    try {
+      await retryRecordedVideoJob(upload.jobId, {
+        agentApiUrl,
+        signal: controller.signal,
+      });
+      const terminalJob = await pollRecordedVideoJob(upload.statusUrl, {
+        agentApiUrl,
+        signal: controller.signal,
+      });
+      applyTerminalJobStatus(upload.id, terminalJob);
+      if (terminalJob.status === 'completed') {
+        await Promise.all([refetchRef.current(), refetchTimelinesRef.current()]);
+      }
+    } catch (error) {
+      const isCancelled = error instanceof Error && error.name === 'AbortError';
+      setUploadProgress((prev) => prev.map((progress) => (
+        progress.id === upload.id && progress.status === 'processing'
+          ? {
+            ...progress,
+            status: isCancelled ? 'cancelled' : 'error',
+            error: isCancelled
+              ? undefined
+              : error instanceof Error
+                ? error.message
+                : 'Unable to retry video processing',
+          }
+          : progress
+      )));
+    } finally {
+      if (retryAbortControllersRef.current.get(upload.id) === controller) {
+        retryAbortControllersRef.current.delete(upload.id);
+      }
+    }
+  }, [agentApiUrl, applyTerminalJobStatus]);
+
   const handleCancelUploads = useCallback(async () => {
     pendingFilesQueueRef.current = [];
+
+    const cancelRequests = agentApiUrl
+      ? uploadProgressRef.current
+        .filter((progress) => progress.status === 'processing' && progress.jobId)
+        .map((progress) => cancelRecordedVideoJob(progress.jobId!, { agentApiUrl }))
+      : [];
 
     if (uploadAbortControllerRef.current) {
       uploadAbortControllerRef.current.abort();
       uploadAbortControllerRef.current = null;
     }
+    retryAbortControllersRef.current.forEach((controller) => controller.abort());
+    retryAbortControllersRef.current.clear();
 
     uploadSessionIdRef.current += 1;
     const successCount = uploadProgressRef.current.filter((p) => p.status === 'success').length;
@@ -300,10 +403,12 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
     );
     setIsUploading(false);
 
+    await Promise.allSettled(cancelRequests);
+
     if (successCount > 0) {
       await Promise.all([refetchRef.current(), refetchTimelinesRef.current()]);
     }
-  }, []);
+  }, [agentApiUrl]);
 
   const handleSearch = useCallback(() => {
     const currentValue = searchInputValueRef.current;
@@ -642,6 +747,7 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
           uploads={uploadProgress}
           onClose={handleClearUploadProgress}
           onCancel={handleCancelUploads}
+          onRetry={handleRetryUpload}
         />
 
         <AddRtspDialog

@@ -7,12 +7,14 @@ interface UploadProgressPanelProps {
   uploads: UploadProgress[];
   onClose: () => void;
   onCancel: () => void;
+  onRetry?: (upload: UploadProgress) => void;
 }
 
 export const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({
   uploads,
   onClose,
   onCancel,
+  onRetry,
 }) => {
   if (uploads.length === 0) return null;
 
@@ -137,28 +139,45 @@ export const UploadProgressPanel: React.FC<UploadProgressPanelProps> = ({
                     <span className="text-xs text-amber-500">Processing...</span>
                   )}
                   {upload.status === 'success' && (
-                    <svg
-                      className="w-4 h-4 text-green-500"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                    >
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
+                    <span className="flex items-center gap-1 text-xs text-green-500">
+                      <svg
+                        className="w-4 h-4"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        aria-hidden="true"
+                      >
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      Completed
+                    </span>
                   )}
                   {upload.status === 'error' && (
-                    <svg
-                      className="w-4 h-4 text-red-500"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                    >
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="15" y1="9" x2="9" y2="15" />
-                      <line x1="9" y1="9" x2="15" y2="15" />
-                    </svg>
+                    <>
+                      <svg
+                        className="w-4 h-4 text-red-500"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        aria-hidden="true"
+                      >
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="15" y1="9" x2="9" y2="15" />
+                        <line x1="9" y1="9" x2="15" y2="15" />
+                      </svg>
+                      {onRetry && upload.jobId && (
+                        <button
+                          type="button"
+                          aria-label={`Retry ${upload.fileName}`}
+                          className="text-xs text-green-600 hover:underline dark:text-green-400"
+                          onClick={() => onRetry(upload)}
+                        >
+                          Retry
+                        </button>
+                      )}
+                    </>
                   )}
                   {upload.status === 'cancelled' && (
                     <span className="text-xs text-gray-400 dark:text-gray-500">

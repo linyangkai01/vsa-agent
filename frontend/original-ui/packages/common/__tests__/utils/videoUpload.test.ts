@@ -119,12 +119,21 @@ describe('notifyGenericUploadComplete', () => {
   let fetchMock: jest.Mock;
 
   beforeEach(() => {
-    fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({
+        asset_id: 'sensor-1',
+        job_id: 'job-1',
+        status: 'queued',
+        status_url: '/api/v1/jobs/job-1',
+      }),
+    });
     global.fetch = fetchMock;
   });
 
   it('POSTs to /videos/{sensorId}/complete using the VST sensor id as the path param', async () => {
-    await notifyGenericUploadComplete(
+    const completed = await notifyGenericUploadComplete(
       'https://agent.example.com/api/v1',
       'sensor-1',
       'my_video.mp4',
@@ -136,6 +145,12 @@ describe('notifyGenericUploadComplete', () => {
     expect(url).not.toContain('videos-for-search');
     expect(init.method).toBe('POST');
     expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(completed).toEqual({
+      asset_id: 'sensor-1',
+      job_id: 'job-1',
+      status: 'queued',
+      status_url: '/api/v1/jobs/job-1',
+    });
   });
 
   it('forwards the upload response plus filename as the request body', async () => {
@@ -206,7 +221,16 @@ describe('uploadFileChunked', () => {
           json: async () => ({ url: 'https://vst.example.com/v1/storage/file' }),
         };
       }
-      return { ok: true, status: 200, json: async () => ({}) };
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({
+          asset_id: 'chat-sensor-1',
+          job_id: 'job-1',
+          status: 'queued',
+          status_url: '/api/v1/jobs/job-1',
+        }),
+      };
     }) as any;
   });
 
@@ -247,6 +271,10 @@ describe('uploadFileChunked', () => {
     expect(result.sensorId).toBe('chat-sensor-1');
     expect(result.filename).toBe('chat_video');
     expect(result.bytes).toBe(25);
+    expect(result.asset_id).toBe('chat-sensor-1');
+    expect(result.job_id).toBe('job-1');
+    expect(result.status).toBe('queued');
+    expect(result.status_url).toBe('/api/v1/jobs/job-1');
   });
 
   it('uses requestFilename override when provided', async () => {

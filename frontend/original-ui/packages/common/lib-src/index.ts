@@ -39,6 +39,21 @@ export { copyToClipboard } from './utils/clipboard';
 export { formatTimestamp } from './utils/formatters';
 export { getUploadUrl, uploadFileChunked, notifyGenericUploadComplete } from './utils/videoUpload';
 export type { FileUploadResult } from './utils/videoUpload';
+export {
+  cancelRecordedVideoJob,
+  parseCompletedUpload,
+  parseJobStatusResponse,
+  pollRecordedVideoJob,
+  resolveRecordedVideoJobUrl,
+  retryRecordedVideoJob,
+} from './utils/recordedVideoJob';
+export type {
+  CompletedUpload,
+  JobStatusResponse,
+  PollRecordedVideoJobOptions,
+  RecordedVideoJobActionOptions,
+  RecordedVideoJobStatus,
+} from './utils/recordedVideoJob';
 export { chunkedUpload, CHUNK_SIZE_BYTES, MAX_CHUNK_RETRIES } from './utils/chunkedUpload';
 export type { ChunkedUploadOptions, ChunkedUploadResponse } from './utils/chunkedUpload';
 export { checkVideoUrl, fetchVideoUrlFromVst, replaceVideoUrlBase } from './utils/videoModal';
