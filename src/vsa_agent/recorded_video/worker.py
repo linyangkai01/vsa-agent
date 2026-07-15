@@ -214,6 +214,11 @@ class RecordedVideoWorker:
 
     async def run(self) -> None:
         """Run until stopped, waiting between idle claim cycles without busy looping."""
+        initialize = getattr(self._repository, "initialize", None)
+        if initialize is not None:
+            initialization = initialize()
+            if inspect.isawaitable(initialization):
+                await initialization
         self.readiness()
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
@@ -445,8 +450,12 @@ async def run_configured_worker(config_path: Path, worker_factory: WorkerFactory
     try:
         config = AppConfig.from_yaml(config_path)
         diagnostics = validate_recorded_video_runtime(config)
-        if not config.recorded_video.enabled or not diagnostics.ok or worker_factory is None:
+        if not config.recorded_video.enabled or not diagnostics.ok:
             raise ValueError("recorded-video worker dependencies are not ready")
+        if worker_factory is None:
+            from vsa_agent.recorded_video.composition import build_recorded_video_worker
+
+            worker_factory = build_recorded_video_worker
         worker_or_awaitable = worker_factory(config)
         worker = await worker_or_awaitable if inspect.isawaitable(worker_or_awaitable) else worker_or_awaitable
     except Exception:
