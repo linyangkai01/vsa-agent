@@ -196,6 +196,16 @@ def _assembled_source_exists(store: LocalAssetStore, asset_id: str) -> bool:
     return any((source_root / f"original.{extension}").is_file() for extension in _ALLOWED_EXTENSIONS)
 
 
+def _source_integrity(path: str | Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with Path(path).open("rb") as source:
+        while block := source.read(1024 * 1024):
+            size_bytes += len(block)
+            digest.update(block)
+    return size_bytes, digest.hexdigest()
+
+
 def _public_job(job: Job) -> dict[str, object]:
     return {
         "asset_id": job.asset_id,
@@ -369,11 +379,23 @@ async def upload_recorded_video_chunk(
         file_path = await store.assemble_source(session, asset)
     except RecordedVideoError as exc:
         raise _recorded_video_http_exception(exc) from exc
+    size_bytes, sha256 = _source_integrity(file_path)
+    try:
+        await repository.finalize_assembled_source(
+            upload_session_id,
+            asset.asset_id,
+            size_bytes=size_bytes,
+            sha256=sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="upload session not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "sensorId": asset.asset_id,
         "streamId": asset.asset_id,
         "filePath": file_path,
-        "bytes": await repository.stored_upload_bytes(upload_session_id),
+        "bytes": size_bytes,
         "chunkCount": session.received_chunks,
     }
 

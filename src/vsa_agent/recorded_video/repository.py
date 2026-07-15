@@ -852,6 +852,77 @@ class JobRepository:
             )
             return job
 
+    async def finalize_assembled_source(
+        self,
+        session_id: str,
+        asset_id: str,
+        *,
+        size_bytes: int,
+        sha256: str,
+        now: datetime | None = None,
+    ) -> Asset:
+        """Persist the assembled source integrity exactly once after every chunk is durable."""
+        if size_bytes < 0:
+            raise ValueError("size_bytes cannot be negative")
+        normalized_sha256 = sha256.lower()
+        if len(normalized_sha256) != 64 or any(character not in "0123456789abcdef" for character in normalized_sha256):
+            raise ValueError("sha256 must be a lowercase hexadecimal digest")
+        finalized_at = _require_aware(now or self._now(), "now")
+
+        async with self._write_transaction() as connection:
+            row = await self._fetchone(
+                connection,
+                """
+                SELECT assets.*, sessions.total_chunks,
+                    (
+                        SELECT COUNT(*) FROM upload_chunks
+                        WHERE upload_chunks.session_id = sessions.session_id
+                            AND upload_chunks.status = 'confirmed'
+                    ) AS confirmed_chunks,
+                    (
+                        SELECT COALESCE(SUM(size_bytes), 0) FROM upload_chunks
+                        WHERE upload_chunks.session_id = sessions.session_id
+                            AND upload_chunks.status = 'confirmed'
+                    ) AS confirmed_bytes
+                FROM upload_sessions AS sessions
+                JOIN assets ON assets.asset_id = sessions.asset_id
+                WHERE sessions.session_id = ? AND sessions.asset_id = ?
+                """,
+                (session_id, asset_id),
+            )
+            if row is None:
+                raise KeyError(f"unknown upload session for asset: {session_id}")
+            if int(row["confirmed_chunks"]) != int(row["total_chunks"]):
+                raise ValueError("upload is incomplete")
+            if int(row["confirmed_bytes"]) != size_bytes:
+                raise ValueError("assembled source size does not match confirmed chunks")
+
+            existing_sha256 = str(row["sha256"])
+            existing_size = int(row["size_bytes"])
+            if existing_sha256:
+                if existing_sha256 != normalized_sha256 or existing_size != size_bytes:
+                    raise ValueError("assembled source has different integrity than the finalized asset")
+                return self._row_to_asset(row)
+
+            updated = await self._fetchone(
+                connection,
+                """
+                UPDATE assets
+                SET size_bytes = ?, sha256 = ?, updated_at = ?
+                WHERE asset_id = ? AND sha256 = ''
+                RETURNING *
+                """,
+                (size_bytes, normalized_sha256, _to_iso(finalized_at), asset_id),
+            )
+            if updated is None:
+                current = await self._fetchone(connection, "SELECT * FROM assets WHERE asset_id = ?", (asset_id,))
+                if current is None:
+                    raise KeyError(f"unknown asset: {asset_id}")
+                if int(current["size_bytes"]) != size_bytes or str(current["sha256"]) != normalized_sha256:
+                    raise ValueError("assembled source has different integrity than the finalized asset")
+                updated = current
+            return self._row_to_asset(updated)
+
     async def get_asset(self, asset_id: str) -> Asset:
         """Load one durable asset by identifier."""
         async with self._connect() as connection:

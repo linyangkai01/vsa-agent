@@ -532,6 +532,50 @@ async def test_only_confirmed_chunk_reservations_count_toward_completion(repo: J
 
 
 @pytest.mark.asyncio
+async def test_finalize_assembled_source_is_atomic_and_integrity_idempotent(repo: JobRepository) -> None:
+    asset = _asset().model_copy(update={"size_bytes": 0, "sha256": ""})
+    session = _session().model_copy(update={"total_chunks": 1})
+    await repo.create_upload_session(asset, session)
+    reservation = await repo.reserve_upload_chunk(
+        session.session_id,
+        identifier="client-identifier",
+        chunk_number=1,
+        total_chunks=1,
+        checksum="chunk-checksum",
+        size_bytes=5,
+        max_upload_bytes=10,
+        path="000001.part",
+    )
+    assert await repo.confirm_reserved_upload_chunk(session.session_id, 1, reservation) is True
+
+    first = await repo.finalize_assembled_source(
+        session.session_id,
+        asset.asset_id,
+        size_bytes=5,
+        sha256="b" * 64,
+        now=NOW,
+    )
+    duplicate = await repo.finalize_assembled_source(
+        session.session_id,
+        asset.asset_id,
+        size_bytes=5,
+        sha256="b" * 64,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert first.size_bytes == duplicate.size_bytes == 5
+    assert first.sha256 == duplicate.sha256 == "b" * 64
+    with pytest.raises(ValueError, match="different integrity"):
+        await repo.finalize_assembled_source(
+            session.session_id,
+            asset.asset_id,
+            size_bytes=5,
+            sha256="c" * 64,
+            now=NOW + timedelta(seconds=2),
+        )
+
+
+@pytest.mark.asyncio
 async def test_record_chunk_rejects_unknown_sessions_and_numbers_outside_the_session(repo: JobRepository):
     with pytest.raises(KeyError, match="unknown upload session"):
         await repo.record_chunk("missing-session", 1, "chunk")

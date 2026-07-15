@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -75,6 +76,30 @@ def test_final_chunk_returns_same_sensor_and_stream_id(client: TestClient) -> No
     assert body["bytes"] == 5
     assert body["chunkCount"] == 1
     assert Path(body["filePath"]).is_file()
+
+
+def test_final_chunk_persists_assembled_integrity_before_idempotent_complete(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    created = _create_upload(client, "yard.mp4")
+    content = b"video"
+
+    first = _upload_chunk(client, created["url"], content, filename="yard.mp4")
+    duplicate = _upload_chunk(client, created["url"], content, filename="yard.mp4")
+    completion = client.post(f"/api/v1/videos/{created['asset_id']}/complete", json={})
+    conflicting = _upload_chunk(client, created["url"], b"other", filename="yard.mp4")
+
+    assert first.status_code == duplicate.status_code == 200
+    assert completion.status_code == 202
+    assert conflicting.status_code == 409
+    database_path = tmp_path / "recorded-video" / "recorded-video.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        persisted = connection.execute(
+            "SELECT size_bytes, sha256 FROM assets WHERE asset_id = ?",
+            (created["asset_id"],),
+        ).fetchone()
+    assert persisted == (len(content), hashlib.sha256(content).hexdigest())
 
 
 def test_chunk_cumulative_size_limit_rejects_before_assembly(client: TestClient, tmp_path: Path) -> None:
