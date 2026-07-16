@@ -104,3 +104,53 @@ PASS
 - The app TypeScript 4.9 `typecheck` remains blocked before reaching the E2E files by the existing `zod/v4` declaration syntax incompatibility. The targeted TypeScript 5.9 check passed.
 - The app lint gate remains blocked by the existing ESLint 9 setup because no `eslint.config.js`, `.mjs`, or `.cjs` exists.
 - `.runtime/` was not read, modified, deleted, staged, or committed.
+
+## Playwright review repair round 2 (2026-07-16)
+
+### Repaired behavior
+
+- The MP4/MKV success flow captures both real `POST /api/v1/videos/{asset_id}/complete` 202 responses and identifies each response by the filename in its real request body.
+- Each completion validates non-empty `asset_id`, `job_id`, and `status_url`, the concrete `queued` status, the asset identity in the request path, and the exact `/api/v1/jobs/{job_id}` status URL.
+- The search-card media helper now returns its thumbnail-derived asset ID. The test binds the MP4 card to the MP4 completion, binds the MKV card to the MKV completion, and proves the two assets and jobs are distinct.
+- The cancellation flow no longer treats UI text as job binding. After parsing the real completion, it waits for a real GET 200 response at that exact `status_url`, then asserts the poll body belongs to the same asset/job and is in `queued`, `running`, or `retry_wait`.
+- Only after the matching non-terminal poll is observed does the test install the exact cancel response waiter and click `Cancel All`. It asserts the POST path, absent request body, HTTP 200, matching asset/job, and `running` or `cancelled` response status.
+- No Playwright route or API mocks were added.
+
+### RED and GREEN evidence
+
+The read-only static review contract failed against the round-1 implementation with all five expected findings:
+
+```text
+MISSING: captures two accepted completion responses
+MISSING: validates complete asset_id/job_id/status/status_url
+MISSING: returns the card-derived asset identity
+MISSING: binds MP4 and MKV cards to distinct completion assets
+MISSING: poll-binds exact job before installing cancel waiter
+Exit 1
+```
+
+After the minimal spec repair and formatting, the same five behavioral constraints passed:
+
+```text
+static review contract passed
+
+npm --prefix frontend/original-ui run test:e2e --workspace nv-metropolis-bp-vss-ui -- recorded-video.spec.ts --list
+Total: 3 tests in 1 file (PASS)
+
+npx --yes --package typescript@5.9.3 tsc --noEmit --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck --types node,jest --typeRoots "node_modules/@types,apps/nv-metropolis-bp-vss-ui/node_modules/@types" apps/nv-metropolis-bp-vss-ui/playwright.config.ts apps/nv-metropolis-bp-vss-ui/e2e/fixtures.ts apps/nv-metropolis-bp-vss-ui/e2e/recorded-video.spec.ts
+PASS
+
+npm --prefix frontend/original-ui run test --workspace nv-metropolis-bp-vss-ui
+85 passed, 1 Playwright-only placeholder skipped (PASS)
+
+npx prettier --check apps/nv-metropolis-bp-vss-ui/e2e/recorded-video.spec.ts
+PASS
+
+git diff --check
+PASS (Windows LF-to-CRLF working-copy warning only)
+```
+
+### Full E2E dependency gate
+
+- Full Playwright E2E was not run and is not reported as passing: `docker` and `ffmpeg` are absent from PATH, and the local Playwright browser cache is absent.
+- The existing launcher/backend/validator/OpenSpec/plan/runtime files were not modified as part of this repair.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext, Page, Response } from "@playwright/test";
 import path from "node:path";
 
 if (process.env.JEST_WORKER_ID) {
@@ -42,12 +42,89 @@ if (process.env.JEST_WORKER_ID) {
     return `${url.pathname.slice(vstPathIndex)}${url.search}${url.hash}`;
   }
 
+  type CompletedUploadEvidence = {
+    assetId: string;
+    filename: string;
+    jobId: string;
+    status: "queued";
+    statusUrl: string;
+  };
+
+  function requiredString(value: unknown, field: string): string {
+    expect(typeof value, `${field} must be a string`).toBe("string");
+    const result = value as string;
+    expect(result.trim(), `${field} must not be empty`).not.toBe("");
+    return result;
+  }
+
+  async function parseCompletedUpload(
+    response: Response
+  ): Promise<CompletedUploadEvidence> {
+    expect(response.request().method()).toBe("POST");
+    expect(response.status()).toBe(202);
+    const completePath = new URL(response.url()).pathname;
+    const completeIdentity = /^\/api\/v1\/videos\/([^/]+)\/complete$/.exec(
+      completePath
+    );
+    expect(completeIdentity).not.toBeNull();
+
+    const requestPayload = response.request().postDataJSON() as {
+      filename?: unknown;
+    };
+    const filename = requiredString(requestPayload.filename, "filename");
+    const payload = (await response.json()) as {
+      asset_id?: unknown;
+      job_id?: unknown;
+      status?: unknown;
+      status_url?: unknown;
+    };
+    const assetId = requiredString(payload.asset_id, "asset_id");
+    const jobId = requiredString(payload.job_id, "job_id");
+    const statusUrl = requiredString(payload.status_url, "status_url");
+    expect(payload.status).toBe("queued");
+    expect(decodeURIComponent(completeIdentity![1])).toBe(assetId);
+    expect(statusUrl).toBe(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+
+    return { assetId, filename, jobId, status: "queued", statusUrl };
+  }
+
+  async function captureCompletedUploads(
+    page: Page,
+    count: number,
+    action: () => Promise<void>
+  ): Promise<CompletedUploadEvidence[]> {
+    const responses: Response[] = [];
+    const capture = (response: Response) => {
+      if (
+        response.request().method() === "POST" &&
+        response.status() === 202 &&
+        /^\/api\/v1\/videos\/[^/]+\/complete$/.test(
+          new URL(response.url()).pathname
+        )
+      ) {
+        responses.push(response);
+      }
+    };
+
+    page.on("response", capture);
+    try {
+      await action();
+      await expect
+        .poll(() => responses.length, { timeout: 120_000 })
+        .toBe(count);
+    } finally {
+      page.off("response", capture);
+    }
+
+    return Promise.all(responses.map(parseCompletedUpload));
+  }
+
   async function verifySearchResultMedia(
     page: Page,
     request: APIRequestContext,
     runtimeBaseUrl: string,
     fixturePath: string
-  ): Promise<void> {
+  ): Promise<string> {
     const filename = path.basename(fixturePath);
     const playButton = page.getByRole("button", {
       name: `Play ${filename}`,
@@ -128,6 +205,7 @@ if (process.env.JEST_WORKER_ID) {
 
     await videoModal.getByRole("button", { name: "Close video" }).click();
     await expect(videoModal).toBeHidden();
+    return assetId;
   }
 
   test("uploads, indexes and plays MP4 and MKV recorded-video segments", async ({
@@ -138,7 +216,22 @@ if (process.env.JEST_WORKER_ID) {
     const media = await createRecordedVideoFixtures(testInfo.outputDir);
 
     await page.goto(runtimeBaseUrl);
-    await chooseRecordedVideos(page, [media.mp4, media.mkv]);
+    const completedUploads = await captureCompletedUploads(page, 2, () =>
+      chooseRecordedVideos(page, [media.mp4, media.mkv])
+    );
+    const mp4Upload = completedUploads.find(
+      (upload) => upload.filename === path.basename(media.mp4)
+    );
+    const mkvUpload = completedUploads.find(
+      (upload) => upload.filename === path.basename(media.mkv)
+    );
+    expect(mp4Upload).toBeDefined();
+    expect(mkvUpload).toBeDefined();
+    if (!mp4Upload || !mkvUpload) {
+      throw new Error("MP4 and MKV completion responses must both be captured");
+    }
+    expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
+    expect(mp4Upload.jobId).not.toBe(mkvUpload.jobId);
 
     await expect(page.getByText("Processing...").first()).toBeVisible({
       timeout: 120_000,
@@ -153,9 +246,21 @@ if (process.env.JEST_WORKER_ID) {
     await searchInput.fill("forklift");
     await page.getByRole("button", { name: "Search", exact: true }).click();
 
-    for (const fixturePath of [media.mp4, media.mkv]) {
-      await verifySearchResultMedia(page, request, runtimeBaseUrl, fixturePath);
-    }
+    const mp4AssetId = await verifySearchResultMedia(
+      page,
+      request,
+      runtimeBaseUrl,
+      media.mp4
+    );
+    const mkvAssetId = await verifySearchResultMedia(
+      page,
+      request,
+      runtimeBaseUrl,
+      media.mkv
+    );
+    expect(mp4AssetId).toBe(mp4Upload.assetId);
+    expect(mkvAssetId).toBe(mkvUpload.assetId);
+    expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
   });
 
   test("shows a real failed job and retries the same recorded-video job", async ({
@@ -188,46 +293,52 @@ if (process.env.JEST_WORKER_ID) {
     const media = await createRecordedVideoFixtures(testInfo.outputDir);
 
     await page.goto(runtimeBaseUrl);
-    const accepted = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        /\/api\/v1\/videos\/[^/]+\/complete$/.test(
-          new URL(response.url()).pathname
-        ) &&
-        response.status() === 202
+    const [complete] = await captureCompletedUploads(page, 1, () =>
+      chooseRecordedVideos(page, [media.cancelMkv])
     );
-    await chooseRecordedVideos(page, [media.cancelMkv]);
-    const acceptedResponse = await accepted;
-    const completePayload = (await acceptedResponse.json()) as {
-      job_id?: unknown;
-      status_url?: unknown;
-    };
-    expect(typeof completePayload.job_id).toBe("string");
-    const jobId = completePayload.job_id as string;
-    expect(jobId.trim()).not.toBe("");
-    const jobPath = `/api/v1/jobs/${encodeURIComponent(jobId)}`;
-    expect(completePayload.status_url).toBe(jobPath);
+    expect(complete.filename).toBe(path.basename(media.cancelMkv));
 
-    // This exact progress-dialog state is committed together with jobId.
-    await expect(page.getByText("Processing", { exact: true })).toBeVisible();
+    const polled = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === complete.statusUrl &&
+        response.status() === 200
+    );
+    const polledResponse = await polled;
+    expect(polledResponse.request().method()).toBe("GET");
+    expect(new URL(polledResponse.request().url()).pathname).toBe(
+      complete.statusUrl
+    );
+    expect(polledResponse.status()).toBe(200);
+    const pollPayload = (await polledResponse.json()) as {
+      asset_id?: unknown;
+      job_id?: unknown;
+      status?: unknown;
+    };
+    expect(pollPayload.asset_id).toBe(complete.assetId);
+    expect(pollPayload.job_id).toBe(complete.jobId);
+    expect(["queued", "running", "retry_wait"]).toContain(pollPayload.status);
 
     const cancelled = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        new URL(response.url()).pathname === `${jobPath}/cancel`
+        new URL(response.url()).pathname === `${complete.statusUrl}/cancel`
     );
     await page.getByRole("button", { name: "Cancel All" }).click();
     const cancelledResponse = await cancelled;
     expect(cancelledResponse.request().method()).toBe("POST");
     expect(new URL(cancelledResponse.request().url()).pathname).toBe(
-      `${jobPath}/cancel`
+      `${complete.statusUrl}/cancel`
     );
+    expect(cancelledResponse.request().postData()).toBeNull();
     expect(cancelledResponse.status()).toBe(200);
     const cancelPayload = (await cancelledResponse.json()) as {
+      asset_id?: unknown;
       job_id?: unknown;
       status?: unknown;
     };
-    expect(cancelPayload.job_id).toBe(jobId);
+    expect(cancelPayload.asset_id).toBe(complete.assetId);
+    expect(cancelPayload.job_id).toBe(complete.jobId);
     expect(["running", "cancelled"]).toContain(cancelPayload.status);
     await expect(page.getByText("Cancelled")).toBeVisible();
     await expect(page.getByText("1 cancelled")).toBeVisible();
