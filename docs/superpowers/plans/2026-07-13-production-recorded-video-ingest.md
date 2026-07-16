@@ -478,17 +478,17 @@ def test_doctor_reports_ffmpeg_and_foreign_port_without_killing(monkeypatch):
 - Produces: `--data-root PATH`、`--validate`；`.runtime/es-stack/runs/{run_id}/{stack,api,worker,ui,es}.log` 和 `processes.json`。
 - Produces: `build_recorded_video_worker(config) -> RecordedVideoWorker`，作为 CLI 的默认生产 composition；测试仍可通过显式 `worker_factory` 注入替身。
 
-- [ ] **Step 1: 写脚本文本/行为测试。**
+- [x] **Step 1: 写脚本文本/行为测试。**
 ```python
 def test_launcher_starts_worker_and_default_mode_does_not_run_ingest_smoke():
     text = BASH_SCRIPT.read_text(); assert "recorded-video-worker.py" in text
     assert "--validate" in text and "es_ingest_smoke.py" not in normal_start_block(text)
 ```
 - 写默认 Worker composition 测试：当 recorded-video 配置有效时 CLI 不再因缺少 `worker_factory` 固定返回 `ready:false`；composition 显式装配 SQLite repository、LocalAssetStore、媒体处理器、Segmenter、真实 provider、ES projector、pipeline 和 Worker，生产配置失败时仍 fail closed。
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/scripts/test_recorded_video_runtime_launcher.py -q`。Expected: FAIL。
-- [ ] **Step 3: 实现默认 composition 与 run lifecycle。** Python composition 只负责依赖装配，不复制 pipeline/Worker 业务逻辑；CLI 未显式注入 factory 时使用默认 composition。启动器先 doctor/ES alias/API health/Worker readiness/UI proxy；生成 UUID run directory 和 latest 指针；`[stack]/[api]/[worker]/[ui]/[es]` 聚合行，进程 manifest 写 PID/command/start；终止仅当前用户进程；默认不调用 smoke，`--validate` 使用 `validation-{run_id}` alias 并 finally 删除。
-- [ ] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_composition.py tests/unit/recorded_video/test_worker.py tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_recorded_video_runtime_launcher.py -q`。Expected: PASS。
-- [ ] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/composition.py src/vsa_agent/recorded_video/worker.py scripts/es-runtime-stack.sh scripts/es-runtime-stack.ps1 tests/unit/recorded_video/test_composition.py tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_recorded_video_runtime_launcher.py && git commit -m "feat: run recorded video stack with worker logs"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/scripts/test_recorded_video_runtime_launcher.py -q`。Expected: FAIL。
+- [x] **Step 3: 实现默认 composition 与 run lifecycle。** Python composition 只负责依赖装配，不复制 pipeline/Worker 业务逻辑；CLI 未显式注入 factory 时使用默认 composition。启动器先 doctor/ES alias/API health/Worker readiness/UI proxy；生成 UUID run directory 和 latest 指针；`[stack]/[api]/[worker]/[ui]/[es]` 聚合行，进程 manifest 写 PID/command/start；终止仅当前用户进程；默认不调用 smoke，`--validate` 使用 `validation-{run_id}` alias 并 finally 删除。
+- [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_composition.py tests/unit/recorded_video/test_worker.py tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_recorded_video_runtime_launcher.py -q`。Expected: PASS。
+- [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/composition.py src/vsa_agent/recorded_video/worker.py scripts/es-runtime-stack.sh scripts/es-runtime-stack.ps1 tests/unit/recorded_video/test_composition.py tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_recorded_video_runtime_launcher.py && git commit -m "feat: run recorded video stack with worker logs"`。
 
 ### Task 21: 后端集成与故障注入（OpenSpec 8.1、8.2、8.3）
 

@@ -47,10 +47,10 @@
 ## 7. 单脚本运行、doctor 与日志
 
 - [x] 7.1 将 runtime doctor 加入单一启动入口，检查 conda/Python、npm、Docker、ffprobe/ffmpeg、写权限、磁盘、模型和 ES mapping
-- [ ] 7.2 提供默认生产 Worker composition，并扩展启动脚本管理 Worker PID/readiness/信号；端口只回收当前用户拥有的监听进程
-- [ ] 7.3 实现按 run ID 保存 stack/API/Worker/UI/ES/process manifest 日志、终端前缀汇聚、敏感字段脱敏和保留策略
-- [ ] 7.4 将默认启动改为非写入 readiness，并实现使用隔离索引且自动清理的显式 `--validate` 模式
-- [ ] 7.5 配置 UI 相对 `/api/v1` 和 `/api/v1/vst` 同源访问，验证单个 UI SSH 隧道覆盖完整业务流
+- [x] 7.2 提供默认生产 Worker composition，并扩展启动脚本管理 Worker PID/readiness/信号；端口只回收当前用户拥有的监听进程
+- [x] 7.3 实现按 run ID 保存 stack/API/Worker/UI/ES/process manifest 日志、终端前缀汇聚、敏感字段脱敏和保留策略
+- [x] 7.4 将默认启动改为非写入 readiness，并实现使用隔离索引且自动清理的显式 `--validate` 模式
+- [x] 7.5 配置 UI 相对 `/api/v1` 和 `/api/v1/vst` 同源访问，验证单个 UI SSH 隧道覆盖完整业务流
 
 ## 8. 自动化验证与质量门槛
 
