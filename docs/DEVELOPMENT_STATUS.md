@@ -54,11 +54,11 @@ Result: valid before archive.
 
 ## Active Change
 
-- `production-recorded-video-ingest`: Task 1-19 已完成；原版 UI 已接入任务状态轮询和流式同源代理，runtime doctor 已覆盖依赖、目录/磁盘、provider、端口及只读 Elasticsearch mapping 检查，并以静态 preflight 与 ES readiness 两阶段接入 Bash/PowerShell 启动器。Task 20 已确认运行契约：启动器管理 API、Worker、UI、ES 的独立 PID 与 readiness，按 run ID 保存分组件日志和 process manifest，默认启动不写入生产索引，显式 `--validate` 使用隔离索引并自动清理。
+- `production-recorded-video-ingest`: Task 1-20 已完成；原版 UI 已接入任务状态轮询和流式同源代理，runtime doctor 与 Bash/PowerShell 单入口已管理 API、Worker、UI、ES readiness、run-id 分组件日志、process manifest、敏感字段脱敏和隔离 `--validate` 清理。Task 21-23 正在并行补齐集成/E2E/运行验收门；Task 23 已实现真实顺序验证器和中文运行/同步文档，等待本地质量门与 Task 24 Ubuntu 证据。
 - Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
 - Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
-- 当前分支：`codex/production-recorded-video-ingest`；Task 19 提交为 `e39a10b`，审查修复为 `cf1f377`，独立验证结果为 `49 passed`，Ruff、Bash 和 PowerShell 语法检查通过。
-- 下一项为 Task 20：实现单脚本 Worker 生命周期、run-id 日志和显式隔离验证模式。生产 embedding 维度、默认 Worker runtime composition 与独立索引 provision 路径已在前序任务中确认并作为启动 readiness 契约。
+- 当前分支：`codex/production-recorded-video-ingest`；Task 20 运行时实现与加固提交为 `473a001`、`71d5d71`、`a7f6f71`、`5252ddb`。启动器 focused tests、脚本语法与生命周期验证由对应任务记录。
+- Task 23 新增 `scripts/recorded-video-validate.py`：按 `runtime/job_stages/provider/es/search/media/delete` 记录证据，任何依赖或质量失败均写失败报告并返回非零，且在中途失败后仍尝试清理验证资产。中文手册为 `docs/recorded-video-runtime.md`；Ubuntu 真实模型证据仍须由 Task 24 采集，当前报告不得视为服务器通过。
 
 ## Python Quality Program
 
@@ -142,4 +142,4 @@ Server validation status: Ubuntu browser validation has passed. Through the SSH 
 
 ## Next Recommended Work
 
-继续 Task 20：实现启动脚本的 Worker PID/readiness 管理、run-id 分组件日志与 process manifest，并让默认启动保持非写入、`--validate` 使用隔离索引且自动清理。
+完成 Task 21/22 自动化门后进入 Task 24：运行全量 Python/前端/lint/OpenSpec strict，定向同步到 Ubuntu，并采集真实 provider、并发、恢复、搜索、Range 媒体和生命周期清理证据。

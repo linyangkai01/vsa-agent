@@ -1,0 +1,579 @@
+#!/usr/bin/env python3
+"""Validate one production recorded-video business flow and write evidence."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sqlite3
+import sys
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+import httpx
+
+REPORT_FIELDS = ("runtime", "job_stages", "provider", "es", "search", "media", "delete")
+REQUIRED_STAGES = (
+    "probing",
+    "segmenting",
+    "extracting",
+    "analyzing",
+    "embedding",
+    "indexing",
+    "publish",
+)
+_TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+class HttpClient(Protocol):
+    def get(self, url: str, **kwargs: Any) -> httpx.Response: ...
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response: ...
+
+    def delete(self, url: str, **kwargs: Any) -> httpx.Response: ...
+
+
+@dataclass(frozen=True)
+class ValidationOptions:
+    api_url: str
+    ui_url: str
+    report: Path
+    data_root: Path
+    video: Path
+    query: str
+    timeout_seconds: float = 600.0
+    poll_interval_seconds: float = 1.0
+    minimum_similarity: float = 0.0
+
+
+@dataclass(frozen=True)
+class StepResult:
+    status: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class StageEvidence:
+    stage: str
+    status: str
+    output_manifest: str | None
+    output_checksum: str | None
+    model: str | None
+    elapsed_ms: int | None
+
+
+@dataclass(frozen=True)
+class SearchEvidence:
+    description: str
+    start_time: str
+    end_time: str
+    screenshot_url: str
+    similarity: float
+
+
+class ValidationError(RuntimeError):
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
+        self.message = message
+
+
+def _fail(field: str, message: str) -> None:
+    raise ValidationError(field, message)
+
+
+def _normalize_base_url(value: str, label: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        _fail("runtime", f"{label} 必须是不含凭据的绝对 HTTP(S) URL")
+    if parsed.query or parsed.fragment:
+        _fail("runtime", f"{label} 不得包含查询参数或片段")
+    netloc = parsed.hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _same_origin_url(base_url: str, path_or_url: str, field: str) -> str:
+    candidate = urljoin(f"{base_url}/", path_or_url)
+    base = urlsplit(base_url)
+    parsed = urlsplit(candidate)
+    if (parsed.scheme, parsed.hostname, parsed.port) != (base.scheme, base.hostname, base.port):
+        _fail(field, "服务返回了跨源 URL，验证器拒绝访问")
+    return candidate
+
+
+def _request(field: str, operation: str, request: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+    try:
+        return request(*args, **kwargs)
+    except httpx.RequestError as exc:
+        _fail(field, f"{operation} 请求失败（{type(exc).__name__}）")
+    except TimeoutError:
+        _fail(field, f"{operation} 请求超时")
+    raise AssertionError("unreachable")
+
+
+def _require_status(field: str, operation: str, response: httpx.Response, expected: set[int]) -> None:
+    if response.status_code not in expected:
+        expected_text = "/".join(str(value) for value in sorted(expected))
+        _fail(field, f"{operation} 返回 HTTP {response.status_code}，期望 {expected_text}")
+
+
+def _json_object(field: str, operation: str, response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        _fail(field, f"{operation} 未返回 JSON 对象")
+    if not isinstance(payload, dict):
+        _fail(field, f"{operation} 未返回 JSON 对象")
+    return payload
+
+
+def _check_runtime(options: ValidationOptions, client: HttpClient) -> tuple[str, str]:
+    api_url = _normalize_base_url(options.api_url, "api-url")
+    ui_url = _normalize_base_url(options.ui_url, "ui-url")
+    if not options.video.is_file() or options.video.stat().st_size <= 0:
+        _fail("runtime", "验证视频不存在或为空")
+    if not options.query.strip():
+        _fail("runtime", "语义质量查询不能为空")
+    database_path = options.data_root / "recorded-video.sqlite3"
+    if not options.data_root.is_dir() or not database_path.is_file():
+        _fail("runtime", "验证数据根目录或 SQLite 状态库不可用")
+
+    health = _request("runtime", "API readiness", client.get, f"{api_url}/health")
+    _require_status("runtime", "API readiness", health, {200})
+    health_payload = _json_object("runtime", "API readiness", health)
+    if health_payload.get("status") != "ok" or health_payload.get("service") != "vsa-agent":
+        _fail("runtime", "API readiness 响应不符合生产契约")
+
+    ui = _request("runtime", "UI readiness", client.get, f"{ui_url}/")
+    _require_status("runtime", "UI readiness", ui, {200})
+    proxy = _request(
+        "runtime",
+        "UI same-origin proxy readiness",
+        client.get,
+        f"{ui_url}/api/v1/vst/v1/replay/streams",
+    )
+    _require_status("runtime", "UI same-origin proxy readiness", proxy, {200})
+    return api_url, ui_url
+
+
+def _upload_and_complete(
+    options: ValidationOptions,
+    client: HttpClient,
+    api_url: str,
+    created_assets: list[str],
+) -> tuple[str, str, list[str]]:
+    created = _request(
+        "job_stages",
+        "创建上传会话",
+        client.post,
+        f"{api_url}/api/v1/videos",
+        json={"filename": options.video.name},
+    )
+    _require_status("job_stages", "创建上传会话", created, {200})
+    create_payload = _json_object("job_stages", "创建上传会话", created)
+    asset_id = create_payload.get("asset_id")
+    upload_url = create_payload.get("url")
+    if not isinstance(asset_id, str) or not asset_id or not isinstance(upload_url, str) or not upload_url:
+        _fail("job_stages", "上传会话缺少稳定 asset_id 或同源 URL")
+    created_assets.append(asset_id)
+
+    identifier = f"validation-{uuid.uuid4()}"
+    headers = {
+        "nvstreamer-chunk-number": "1",
+        "nvstreamer-total-chunks": "1",
+        "nvstreamer-is-last-chunk": "true",
+        "nvstreamer-identifier": identifier,
+        "nvstreamer-file-name": options.video.name,
+    }
+    with options.video.open("rb") as source:
+        uploaded = _request(
+            "job_stages",
+            "上传视频",
+            client.post,
+            _same_origin_url(api_url, upload_url, "job_stages"),
+            files={"mediaFile": (options.video.name, source, "application/octet-stream")},
+            headers=headers,
+        )
+    _require_status("job_stages", "上传视频", uploaded, {200})
+    upload_payload = _json_object("job_stages", "上传视频", uploaded)
+    if upload_payload.get("sensorId") != asset_id or upload_payload.get("streamId") != asset_id:
+        _fail("job_stages", "上传响应的 sensor/stream identity 与 asset_id 不一致")
+
+    completed = _request(
+        "job_stages",
+        "完成上传",
+        client.post,
+        f"{api_url}/api/v1/videos/{asset_id}/complete",
+        json={},
+    )
+    _require_status("job_stages", "完成上传", completed, {202})
+    complete_payload = _json_object("job_stages", "完成上传", completed)
+    job_id = complete_payload.get("job_id")
+    status_url = complete_payload.get("status_url")
+    if complete_payload.get("asset_id") != asset_id or not isinstance(job_id, str) or not job_id:
+        _fail("job_stages", "完成响应缺少匹配的 asset/job identity")
+    if not isinstance(status_url, str) or not status_url:
+        _fail("job_stages", "完成响应缺少任务状态 URL")
+
+    deadline = time.monotonic() + options.timeout_seconds
+    observed: list[str] = []
+    while True:
+        response = _request(
+            "job_stages",
+            "查询任务",
+            client.get,
+            _same_origin_url(api_url, status_url, "job_stages"),
+        )
+        _require_status("job_stages", "查询任务", response, {200})
+        job = _json_object("job_stages", "查询任务", response)
+        if job.get("asset_id") != asset_id or job.get("job_id") != job_id:
+            _fail("job_stages", "任务查询返回了不一致的 asset/job identity")
+        status = job.get("status")
+        stage = job.get("stage")
+        marker = f"{status}:{stage or '-'}"
+        if not observed or observed[-1] != marker:
+            observed.append(marker)
+        if status in _TERMINAL_JOB_STATUSES:
+            if status != "completed" or stage != "publish":
+                _fail("job_stages", f"任务未完成 publish，终态为 {status}:{stage or '-'}")
+            return asset_id, job_id, observed
+        if time.monotonic() >= deadline:
+            _fail("job_stages", "任务在验收超时前未进入终态")
+        time.sleep(options.poll_interval_seconds)
+
+
+def _read_stage_evidence(data_root: Path, job_id: str) -> list[StageEvidence]:
+    database_path = data_root / "recorded-video.sqlite3"
+    try:
+        with sqlite3.connect(database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT stage, status, output_manifest, output_checksum, model, elapsed_ms
+                FROM job_steps WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        _fail("job_stages", "无法读取 SQLite stage checkpoints")
+    order = {stage: ordinal for ordinal, stage in enumerate(REQUIRED_STAGES)}
+    evidence = [StageEvidence(*row) for row in rows]
+    evidence.sort(key=lambda item: order.get(item.stage, len(order)))
+    return evidence
+
+
+def _check_job_stages(data_root: Path, job_id: str, observed: list[str]) -> list[StageEvidence]:
+    evidence = _read_stage_evidence(data_root, job_id)
+    stages = tuple(item.stage for item in evidence)
+    if stages != REQUIRED_STAGES:
+        _fail("job_stages", "SQLite stage history 不完整或顺序错误")
+    for item in evidence:
+        if item.status != "completed":
+            _fail("job_stages", f"stage {item.stage} 未完成")
+        if not item.output_manifest or not item.output_checksum:
+            _fail("job_stages", f"stage {item.stage} 缺少 manifest/checksum")
+        if item.elapsed_ms is None or item.elapsed_ms < 0:
+            _fail("job_stages", f"stage {item.stage} 缺少有效耗时")
+    if not observed:
+        _fail("job_stages", "任务 API 未记录任何状态变化")
+    return evidence
+
+
+def _check_provider(evidence: list[StageEvidence]) -> str:
+    by_stage = {item.stage: item for item in evidence}
+    vision_model = by_stage["analyzing"].model
+    embedding_model = by_stage["embedding"].model
+    if not vision_model or not embedding_model:
+        _fail("provider", "provider checkpoint 缺少 vision/embedding 模型标识")
+    return f"vision={vision_model}; embedding={embedding_model}"
+
+
+def _check_es(evidence: list[StageEvidence]) -> None:
+    by_stage = {item.stage: item for item in evidence}
+    for stage in ("indexing", "publish"):
+        checkpoint = by_stage[stage]
+        if checkpoint.status != "completed" or not checkpoint.output_checksum:
+            _fail("es", f"Elasticsearch {stage} checkpoint 未完成")
+
+
+def _search(client: HttpClient, api_url: str, query: str, field: str) -> list[dict[str, Any]]:
+    response = _request(
+        field,
+        "语义搜索",
+        client.post,
+        f"{api_url}/api/v1/search",
+        json={
+            "query": query,
+            "source_type": "video_file",
+            "top_k": 10,
+            "min_cosine_similarity": 0.0,
+            "agent_mode": False,
+        },
+    )
+    _require_status(field, "语义搜索", response, {200})
+    payload = _json_object(field, "语义搜索", response)
+    data = payload.get("data")
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        _fail(field, "语义搜索响应缺少 data 数组")
+    return data
+
+
+def _check_search(
+    options: ValidationOptions,
+    client: HttpClient,
+    api_url: str,
+    asset_id: str,
+) -> SearchEvidence:
+    matches = [item for item in _search(client, api_url, options.query, "search") if item.get("sensor_id") == asset_id]
+    if not matches:
+        _fail("search", "语义查询未命中验证资产")
+    match = max(matches, key=lambda item: float(item.get("similarity", -1)))
+    description = match.get("description")
+    start_time = match.get("start_time")
+    end_time = match.get("end_time")
+    screenshot_url = match.get("screenshot_url")
+    try:
+        similarity = float(match.get("similarity"))
+    except (TypeError, ValueError):
+        _fail("search", "搜索结果缺少有效相似度")
+    if similarity < options.minimum_similarity:
+        _fail("search", f"搜索质量低于阈值 {options.minimum_similarity:.3f}")
+    if not all(isinstance(value, str) and value for value in (description, start_time, end_time, screenshot_url)):
+        _fail("search", "搜索结果缺少 segment 描述、时间或缩略图 identity")
+    return SearchEvidence(description, start_time, end_time, screenshot_url, similarity)
+
+
+def _check_media(client: HttpClient, api_url: str, asset_id: str, search: SearchEvidence) -> None:
+    screenshot = _request(
+        "media",
+        "缩略图",
+        client.get,
+        _same_origin_url(api_url, search.screenshot_url, "media"),
+    )
+    _require_status("media", "缩略图", screenshot, {200})
+    if not screenshot.content:
+        _fail("media", "缩略图响应为空")
+
+    media_url = f"{api_url}/api/v1/vst/v1/storage/file/{asset_id}"
+    ranged = _request("media", "HTTP Range", client.get, media_url, headers={"Range": "bytes=0-0"})
+    if ranged.status_code != 206:
+        _fail("media", f"HTTP Range 请求未返回 206，而是 {ranged.status_code}")
+    if ranged.headers.get("Accept-Ranges", "").lower() != "bytes":
+        _fail("media", "HTTP 206 缺少 Accept-Ranges: bytes")
+    if not re.fullmatch(r"bytes 0-0/[1-9][0-9]*", ranged.headers.get("Content-Range", "")):
+        _fail("media", "HTTP 206 的 Content-Range 不符合单字节请求")
+    if len(ranged.content) != 1:
+        _fail("media", "HTTP 206 未返回一个字节")
+
+
+def _database_cleanup_complete(data_root: Path, asset_id: str) -> bool:
+    database_path = data_root / "recorded-video.sqlite3"
+    try:
+        with sqlite3.connect(database_path) as connection:
+            asset = connection.execute(
+                "SELECT status, deleted_at FROM assets WHERE asset_id = ?",
+                (asset_id,),
+            ).fetchone()
+            jobs = connection.execute("SELECT COUNT(*) FROM jobs WHERE asset_id = ?", (asset_id,)).fetchone()[0]
+            segments = connection.execute("SELECT COUNT(*) FROM segments WHERE asset_id = ?", (asset_id,)).fetchone()[0]
+            steps = connection.execute(
+                "SELECT COUNT(*) FROM job_steps WHERE job_id IN (SELECT job_id FROM jobs WHERE asset_id = ?)",
+                (asset_id,),
+            ).fetchone()[0]
+    except sqlite3.Error:
+        return False
+    return asset is not None and asset[0] == "deleted" and asset[1] is not None and jobs == segments == steps == 0
+
+
+def _delete_and_confirm(
+    options: ValidationOptions,
+    client: HttpClient,
+    api_url: str,
+    asset_id: str,
+) -> None:
+    deadline = time.monotonic() + options.timeout_seconds
+    delete_url = f"{api_url}/api/v1/videos/{asset_id}"
+    while True:
+        response = _request("delete", "删除验证资产", client.delete, delete_url)
+        if response.status_code == 204:
+            break
+        if response.status_code != 202:
+            _fail("delete", f"删除验证资产返回 HTTP {response.status_code}，期望 202/204")
+        if time.monotonic() >= deadline:
+            _fail("delete", "删除验证资产在超时前未完成")
+        time.sleep(options.poll_interval_seconds)
+
+    remaining = [
+        item for item in _search(client, api_url, options.query, "delete") if item.get("sensor_id") == asset_id
+    ]
+    if remaining:
+        _fail("delete", "删除后 Elasticsearch 搜索仍返回验证资产")
+    media = _request(
+        "delete",
+        "删除后媒体确认",
+        client.get,
+        f"{api_url}/api/v1/vst/v1/storage/file/{asset_id}",
+        headers={"Range": "bytes=0-0"},
+    )
+    if media.status_code not in {404, 410}:
+        _fail("delete", f"删除后媒体仍可访问（HTTP {media.status_code}）")
+    if not _database_cleanup_complete(options.data_root, asset_id):
+        _fail("delete", "删除后 SQLite job/segment/tombstone 清理不完整")
+
+
+def _write_report(options: ValidationOptions, results: dict[str, StepResult]) -> None:
+    overall = "PASS" if all(results[field].status == "PASS" for field in REPORT_FIELDS) else "FAIL"
+    lines = [
+        "# 录播视频生产运行验证报告",
+        "",
+        f"- 生成时间（UTC）：{datetime.now(UTC).isoformat()}",
+        f"- 总体结果：{overall}",
+        f"- API：{_report_url(options.api_url)}",
+        f"- UI：{_report_url(options.ui_url)}",
+        f"- 验证视频：{options.video.name}（{options.video.stat().st_size if options.video.is_file() else 0} bytes）",
+        "- 配置摘要：仅记录非敏感运行标识；未记录环境变量、Authorization 或 API key。",
+        "",
+    ]
+    for field in REPORT_FIELDS:
+        result = results[field]
+        lines.extend((f"## {field}", "", result.status, "", result.detail, ""))
+    options.report.parent.mkdir(parents=True, exist_ok=True)
+    temporary = options.report.with_name(f".{options.report.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text("\n".join(lines), encoding="utf-8")
+    temporary.replace(options.report)
+
+
+def _report_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "invalid"
+    netloc = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def run_validation(options: ValidationOptions, *, client: HttpClient | None = None) -> int:
+    results = {field: StepResult("FAIL", "未执行：前置验证尚未完成。") for field in REPORT_FIELDS}
+    current_field = "runtime"
+    asset_id: str | None = None
+    created_assets: list[str] = []
+    owned_client = client is None
+    http_client: HttpClient = client or httpx.Client(timeout=options.timeout_seconds, follow_redirects=False)
+    api_url = _report_url(options.api_url)
+    failure: ValidationError | None = None
+    try:
+        api_url, _ = _check_runtime(options, http_client)
+        results["runtime"] = StepResult(
+            "PASS",
+            "API、原版 UI 与 UI 同源代理 readiness 通过；本地 SQLite 与验证视频可读。",
+        )
+
+        current_field = "job_stages"
+        asset_id, job_id, observed = _upload_and_complete(options, http_client, api_url, created_assets)
+        stages = _check_job_stages(options.data_root, job_id, observed)
+        results["job_stages"] = StepResult(
+            "PASS",
+            f"任务 {job_id} 完成；持久化阶段顺序：{' -> '.join(item.stage for item in stages)}；"
+            f"API 轨迹：{', '.join(observed)}。",
+        )
+
+        current_field = "provider"
+        provider_detail = _check_provider(stages)
+        results["provider"] = StepResult("PASS", f"真实 provider checkpoints 完成：{provider_detail}。")
+
+        current_field = "es"
+        _check_es(stages)
+        results["es"] = StepResult("PASS", "indexing 与 publish checkpoints 均完成并包含 checksum。")
+
+        current_field = "search"
+        search = _check_search(options, http_client, api_url, asset_id)
+        segment_identity = f"{asset_id}|{search.start_time}|{search.end_time}"
+        results["search"] = StepResult(
+            "PASS",
+            f"语义查询命中验证资产；segment identity={segment_identity}；similarity={search.similarity:.3f}。",
+        )
+
+        current_field = "media"
+        _check_media(http_client, api_url, asset_id, search)
+        results["media"] = StepResult("PASS", "缩略图非空；单字节 Range 返回 HTTP 206 与有效 Content-Range。")
+    except ValidationError as exc:
+        failure = exc
+        results[exc.field] = StepResult("FAIL", exc.message)
+        for field in REPORT_FIELDS[REPORT_FIELDS.index(exc.field) + 1 :]:
+            results[field] = StepResult("FAIL", f"未执行：受 {exc.field} 失败阻断。")
+    except Exception as exc:
+        failure = ValidationError(current_field, f"验证器发生未预期错误（{type(exc).__name__}）")
+        results[current_field] = StepResult("FAIL", failure.message)
+        for field in REPORT_FIELDS[REPORT_FIELDS.index(current_field) + 1 :]:
+            results[field] = StepResult("FAIL", f"未执行：受 {current_field} 失败阻断。")
+    finally:
+        cleanup_asset_id = asset_id or (created_assets[-1] if created_assets else None)
+        if cleanup_asset_id is not None:
+            try:
+                _delete_and_confirm(options, http_client, api_url, cleanup_asset_id)
+                results["delete"] = StepResult("PASS", "ES、媒体和 SQLite 生命周期数据均已清理，资产仅保留 tombstone。")
+            except ValidationError as exc:
+                results["delete"] = StepResult("FAIL", exc.message)
+                failure = failure or exc
+            except Exception as exc:
+                results["delete"] = StepResult("FAIL", f"清理发生未预期错误（{type(exc).__name__}）")
+                failure = failure or ValidationError("delete", results["delete"].detail)
+        if owned_client:
+            close = getattr(http_client, "close", None)
+            if callable(close):
+                close()
+        try:
+            _write_report(options, results)
+        except OSError as exc:
+            print(f"recorded-video validation report write failed: {type(exc).__name__}", file=sys.stderr)
+            return 1
+
+    return 0 if failure is None and all(results[field].status == "PASS" for field in REPORT_FIELDS) else 1
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--api-url", required=True, help="Loopback FastAPI base URL")
+    parser.add_argument("--ui-url", required=True, help="Loopback original UI base URL")
+    parser.add_argument("--report", required=True, type=Path, help="Markdown evidence report path")
+    parser.add_argument("--data-root", default=os.getenv("VSA_RECORDED_VIDEO_DATA_ROOT", ""), type=Path)
+    parser.add_argument("--video", default=os.getenv("VSA_VALIDATION_VIDEO", ""), type=Path)
+    parser.add_argument("--query", default=os.getenv("VSA_VALIDATION_QUERY", ""))
+    parser.add_argument("--timeout", dest="timeout_seconds", type=float, default=600.0)
+    parser.add_argument("--poll-interval", dest="poll_interval_seconds", type=float, default=1.0)
+    parser.add_argument("--minimum-similarity", type=float, default=0.0)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.timeout_seconds <= 0 or args.poll_interval_seconds < 0:
+        print("timeout must be positive and poll interval must be non-negative", file=sys.stderr)
+        return 2
+    if not 0.0 <= args.minimum_similarity <= 1.0:
+        print("minimum similarity must be between 0 and 1", file=sys.stderr)
+        return 2
+    options = ValidationOptions(
+        api_url=args.api_url,
+        ui_url=args.ui_url,
+        report=args.report,
+        data_root=args.data_root,
+        video=args.video,
+        query=args.query,
+        timeout_seconds=args.timeout_seconds,
+        poll_interval_seconds=args.poll_interval_seconds,
+        minimum_similarity=args.minimum_similarity,
+    )
+    exit_code = run_validation(options)
+    print(f"recorded-video validation {'passed' if exit_code == 0 else 'failed'}: {options.report}")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

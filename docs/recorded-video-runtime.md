@@ -1,0 +1,156 @@
+# 录播视频生产运行手册
+
+本文面向批准的 Ubuntu 单机环境。生产栈只监听 `127.0.0.1`，由一个脚本管理 Elasticsearch、FastAPI、录播 Worker 和原版 UI；不要求 `sudo`，也不会终止其他用户拥有的端口监听进程。
+
+## 1. 运行前提
+
+当前用户需要能够直接执行以下命令：
+
+```bash
+conda --version
+docker compose version
+ffprobe -version
+ffmpeg -version
+node --version
+npm --version
+```
+
+如果 Docker 只能通过 `sudo docker` 使用，应先由服务器管理员把当前账号加入批准的 Docker 运行方式；启动脚本不会尝试提权。数据目录必须由当前用户可写，并为上传源文件、代理视频、缩略图、SQLite WAL 和模型中间结果预留足够空间。
+
+生产 profile 的 VLM 与 embedding 必须是真实 OpenAI-compatible provider。密钥只通过配置中 `api_key_env` 指定的环境变量注入。例如默认 `dashscope_remote` profile 使用：
+
+```bash
+export DASHSCOPE_API_KEY='在当前 shell 安全设置，不写入仓库或命令历史'
+```
+
+不要把密钥写入 `config.yaml`、临时 YAML、验证报告、manifest 或日志。`search.allow_mock_fallback` 和 `search.force_mock_embedding` 在生产录播 profile 中必须为 `false`。
+
+## 2. Ubuntu 单命令启动
+
+在仓库根目录运行：
+
+```bash
+./scripts/es-runtime-stack.sh \
+  --api-port 8000 \
+  --es-port 9200 \
+  --ui-port 3000 \
+  --index vsa-video-embeddings \
+  --data-root /data/project/lyk/vsa-data \
+  --conda-env vsa-agent
+```
+
+脚本依次执行静态 doctor、Elasticsearch 启动与只读 mapping readiness、API readiness、Worker heartbeat readiness、UI readiness 和同源代理检查。任一必需依赖失败时命令返回非零，并打印本次 run 的日志路径。正常启动不会调用写入型 ingest smoke，也不会向生产 alias 写入验证视频。
+
+停止时在前台终端按 `Ctrl-C`。脚本只回收本次 run 记录的进程；`--stop-elasticsearch` 也只会停止由本次 run 启动的 Elasticsearch。
+
+## 3. 唯一的 SSH UI 隧道
+
+在客户端只转发 UI 端口：
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 <user>@10.157.68.44
+```
+
+浏览器访问 `http://127.0.0.1:3000`。上传、任务状态、搜索、缩略图和 Range 媒体请求全部经 Next 同源 `/api/v1` 与 `/api/v1/vst` 代理转发。不要再开放或转发 API `8000`、Elasticsearch `9200`；浏览器也不应直连这两个端口。
+
+## 4. run ID、日志与进程 manifest
+
+每次启动都会生成 UUID `run_id`：
+
+```text
+.runtime/es-stack/runs/{run_id}/
+├── stack.log
+├── api.log
+├── worker.log
+├── ui.log
+├── es.log
+├── processes.json
+└── config.yaml
+```
+
+`.runtime/es-stack/latest` 指向最近一次 run。`processes.json` 记录受管组件的 PID、安全命令摘要、启动时间和最终退出状态。终端聚合行使用 `[stack]`、`[api]`、`[worker]`、`[ui]`、`[es]` 前缀。
+
+排查单个业务流时，优先用 `run_id` 找到 run 目录，再按 `asset_id`、`job_id`、`stage` 和 `attempt` 搜索 API/Worker 日志。日志脱敏是防线，不是记录密钥的许可；发现 Authorization、API key、视频字节或完整模型图像请求时，应立即把该次验收判为失败。
+
+## 5. normal 与 `--validate`
+
+### normal 模式
+
+第 2 节命令用于持续交互运行。它只做非写入 readiness，业务视频由原版 UI 上传，并写入配置的生产 alias 与数据根目录。
+
+### 隔离 `--validate` 模式
+
+下面命令创建 `validation-{run_id}` 索引和 run 内独立数据目录，执行隔离 readiness/smoke 后退出；成功、失败或中断都会清理临时配置、隔离数据和验证索引：
+
+```bash
+./scripts/es-runtime-stack.sh \
+  --api-port 8000 \
+  --es-port 9200 \
+  --ui-port 3000 \
+  --index vsa-video-embeddings \
+  --data-root /data/project/lyk/vsa-data \
+  --conda-env vsa-agent \
+  --validate
+```
+
+它用于证明启动器的隔离与清理契约，不替代真实录播语义验收。
+
+### 真实录播链路验证器
+
+保持 normal 栈在第一个服务器终端运行，在第二个服务器终端执行：
+
+```bash
+conda run --no-capture-output -n vsa-agent python scripts/recorded-video-validate.py \
+  --api-url http://127.0.0.1:8000 \
+  --ui-url http://127.0.0.1:3000 \
+  --data-root /data/project/lyk/vsa-data \
+  --video /data/project/lyk/validation/forklift-worker.mp4 \
+  --query 'forklift near worker' \
+  --minimum-similarity 0.20 \
+  --report docs/superpowers/reports/2026-07-13-production-recorded-video-validation.md
+```
+
+验证器真实按 `runtime → job_stages → provider → es → search → media → delete` 执行：
+
+1. 检查 API、UI、同源代理和不含密钥的配置摘要。
+2. 上传样例并等待任务完成，从同一数据根目录的 SQLite 读取完整阶段 checkpoint。
+3. 验证 VLM/embedding 模型标识以及 indexing/publish checksum。
+4. 要求语义搜索命中同一 asset 与时间段，缩略图非空，单字节 Range 返回 HTTP 206。
+5. 删除验证资产，并确认 Elasticsearch、媒体和 SQLite 生命周期数据均已清理。
+
+任何依赖或质量断言失败都会写出 `FAIL` 报告并返回 `1`；后续被阻断字段也明确记为失败，不会静默跳过。已创建资产无论主流程成功或失败都会进入清理尝试。`--video`、`--query`、`--data-root` 也可分别由 `VSA_VALIDATION_VIDEO`、`VSA_VALIDATION_QUERY`、`VSA_RECORDED_VIDEO_DATA_ROOT` 提供。
+
+## 6. 故障诊断
+
+| 现象 | 首查证据 | 处理方向 |
+|---|---|---|
+| doctor 在启动前失败 | `stack.log` 的首个错误码 | 补齐 conda/npm/Docker/ffmpeg，修正目录权限、磁盘、provider 环境变量或端口占用；不要用 sudo 绕过 |
+| Elasticsearch readiness 失败 | `stack.log`、`es.log` | 核对 alias、显式 mapping 和 embedding dims；脚本不会动态改写不兼容索引 |
+| API 未 ready | `api.log`、`processes.json` | 查看配置校验、SQLite 路径和 Python 依赖；确认 PID 是否已退出 |
+| Worker heartbeat 失败 | `worker.log`、`processes.json` | 核对生产 composition、ffmpeg/ffprobe、provider 和数据目录写权限 |
+| UI 或同源代理失败 | `ui.log`、`api.log` | 核对 npm 安装、UI 端口，以及相对 `/api/v1`、`/api/v1/vst` 配置 |
+| 任务停在 retry_wait | `worker.log` 中的 job/stage/attempt | 区分 provider 429/5xx/超时与永久媒体错误，等待退避或修复后显式重试 |
+| 搜索没有目标资产 | 验证报告的 `provider`、`es`、`search` | 先确认 publish checkpoint，再查 query embedding、alias 和相似度阈值；禁止 mock fallback |
+| 媒体不是 206 | 报告 `media`、API 日志 | 检查同一 asset 的 ready 状态、Range 转发及 `Content-Range`，不要让代理缓冲完整视频 |
+| 删除未完成 | 报告 `delete`、Worker/API 日志 | 检查 running job 是否先取消，以及 ES、派生文件、源文件、SQLite 的可重试步骤 |
+
+## 7. 服务器同步清单
+
+服务器同步只使用显式文件白名单，不递归复制仓库：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps1 -PreflightOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps1 -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps1
+```
+
+`scripts/sync-server-files.ps1` 的 `IncludePaths` 逐项覆盖：
+
+- API 与配置：录播 upload/job/delete、VST facade、原版 UI search、路由注册、生产配置。
+- 领域与 Worker：asset store、SQLite repository、模型、ports、segmenter、media、providers、pipeline、ES projection、composition、Worker。
+- 运行脚本：Bash/PowerShell 单入口、doctor、Worker CLI、验证器、日志泵和已有 ES smoke。
+- 前端：Next 同源代理、公共上传/任务工具、Chat 状态轮询、Video Management 上传/任务/删除及其测试。
+- Python 测试：录播 API、领域、Worker、ES、runtime/validator 脚本测试。
+- 文档与 OpenSpec：本手册、开发状态、验收报告、active change 的 proposal/design/tasks/delta spec。
+
+脚本会拒绝绝对路径和逃逸目标根目录的相对路径，只创建白名单文件所需的父目录并覆盖对应文件；不要使用 `robocopy /E` 或其他全盘递归同步替代它。
