@@ -91,3 +91,13 @@
 - GREEN：相同定向命令得到 `2 passed in 0.18s`。
 - 最终 Task 21 回归：`128 passed, 1 warning in 26.52s`；warning 仍为既有 FastAPI/Starlette `TestClient` 弃用提示。
 - 最终 Ruff：`All checks passed!`；`git diff --check` 无输出并返回 0。
+
+## Partial ES 同 backend 修复（2026-07-16）
+
+- RED：`VSA_RECORDED_VIDEO_TEST_FALLBACK=1 pytest tests/integration/test_recorded_video_failures.py::test_partial_elasticsearch_bulk_failure_rolls_back_then_retries -q` 得到 `1 failed in 1.64s`；新增身份断言直接显示 attempt 1 的 `_ControlledBulkProjection` 与 `ids()` 使用的 `_MemoryProjection` 不同。
+- 修复：fallback 全程使用同一个 controlled bulk backend；真实 ES 模式在同一真实 client 的 bulk 流中写入首个 action，并为最后一个 action 注入 503。fixture 在生产 pipeline rollback 前从同一 backend/隔离 alias 快照可见 ID，随后由生产 rollback 清除。
+- 定向 GREEN：相同 partial failure 测试得到 `1 passed in 3.43s`；断言 rollback 前恰有一个成功 ID、rollback 后为空，retry 后最终 ID 精确等于两个确定性 segment ID。
+- Integration：首次整组运行出现一次既有 claim-time 边界信号（503 provider 用例的 `run_once()` 返回 `None`，其余 9 个通过）；该用例隔离重跑通过，随后两个 integration 文件整组得到 `10 passed in 25.21s`。未扩大范围修改 worker/clock。
+- Task 21 focused：upload API、repository、ES index/projection 与两个 integration 文件合计 `128 passed, 1 warning in 33.47s`；warning 仍为既有 Starlette `TestClient` 弃用提示。
+- Ruff：`All checks passed!`；`ruff format --check` 为 `2 files already formatted`；scoped `git diff --check` 无输出并返回 0。
+- 风险：本机未配置 `VSA_TEST_ES_URL`，因此真实 ES 分支未执行，不计入 GREEN；未配置 ES 且未显式启用 fallback 时仍由 fixture `pytest.fail`，没有 silent skip。

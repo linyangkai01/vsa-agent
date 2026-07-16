@@ -30,6 +30,7 @@ async def test_provider_failures_retry_without_duplicate_documents(recorded_vide
 
 async def test_partial_elasticsearch_bulk_failure_rolls_back_then_retries(recorded_video_stack):
     job = await recorded_video_stack.upload_and_complete("partial-es.mp4")
+    assert recorded_video_stack.projection.partial_backend is recorded_video_stack.projection.backend
     recorded_video_stack.inject_partial_bulk_failure()
 
     retry_wait = await recorded_video_stack.worker.run_once()
@@ -38,12 +39,17 @@ async def test_partial_elasticsearch_bulk_failure_rolls_back_then_retries(record
     assert retry_wait.attempt == 1
     assert retry_wait.last_error == "ES_5XX"
     assert recorded_video_stack.partial_bulk_failures == 1
+    assert len(recorded_video_stack.partial_bulk_success_ids) == 1
     assert await recorded_video_stack.es_ids() == set()
     assert recorded_video_stack.temporary_files() == set()
 
     completed = (await recorded_video_stack.wait_completed([job]))[0]
     assert completed.attempt == 2
-    assert await recorded_video_stack.es_ids() == await recorded_video_stack.expected_segment_ids([job])
+    expected_ids = await recorded_video_stack.expected_segment_ids([job])
+    assert recorded_video_stack.partial_bulk_success_ids < expected_ids
+    final_ids = await recorded_video_stack.es_ids()
+    assert final_ids == expected_ids
+    assert len(final_ids) == len(expected_ids)
 
 
 async def test_worker_kill_reclaims_expired_lease_without_duplicate_segments(recorded_video_stack):

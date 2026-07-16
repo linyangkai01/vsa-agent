@@ -259,8 +259,6 @@ class _ControlledBulkIndex:
 class _ControlledBulkClient:
     def __init__(self) -> None:
         self.documents: dict[str, dict[str, Any]] = {}
-        self.partial_failure_once = False
-        self.partial_failures = 0
 
     def options(self, **_kwargs):
         return self
@@ -283,19 +281,36 @@ class _ControlledBulkClient:
         return None
 
 
-async def _controlled_streaming_bulk(client, actions, **kwargs):
+class _PartialBulkFailure:
+    def __init__(self) -> None:
+        self.armed = False
+        self.failures = 0
+
+    def arm(self) -> None:
+        self.armed = True
+
+    def consume(self) -> bool:
+        if not self.armed:
+            return False
+        self.armed = False
+        self.failures += 1
+        return True
+
+    def disarm(self) -> None:
+        self.armed = False
+
+
+async def _controlled_streaming_bulk(client, actions, *, fail_last: bool = False, **kwargs):
     assert kwargs == {
         "raise_on_error": False,
         "raise_on_exception": False,
         "refresh": "wait_for",
     }
     action_list = list(actions)
-    fail_index = len(action_list) - 1 if client.partial_failure_once else -1
-    client.partial_failure_once = False
+    fail_index = len(action_list) - 1 if fail_last else -1
     for index, action in enumerate(action_list):
         document_id = str(action["_id"])
         if index == fail_index:
-            client.partial_failures += 1
             yield False, {"update": {"_id": document_id, "status": 503, "error": {"reason": "injected"}}}
             continue
         document = dict(action["script"]["params"]["document"])
@@ -320,33 +335,42 @@ class _ControlledBulkProjection:
     async def delete_asset(self, asset_id: str) -> None:
         await self.store.delete_asset(asset_id)
 
+    async def ids(self) -> set[str]:
+        return set(self.client.documents)
+
+    async def attempts(self) -> set[int]:
+        return {int(document["job_attempt"]) for document in self.client.documents.values()}
+
     async def close(self) -> None:
         await self.store.close()
 
 
 class _FaultInjectingProjection:
-    def __init__(self, backend: _MemoryProjection | _ElasticsearchProjection) -> None:
+    def __init__(
+        self,
+        backend: _ControlledBulkProjection | _ElasticsearchProjection,
+        partial_failure: _PartialBulkFailure,
+    ) -> None:
         self.backend = backend
-        self.partial_backend = _ControlledBulkProjection()
+        self.partial_backend = backend
+        self._partial_failure = partial_failure
         self._partial_armed = False
-        self._partial_attempts: set[tuple[str, str, int]] = set()
+        self.partial_success_ids: set[str] = set()
         self.delete_failure_once = False
 
     async def project(self, documents, *, job_id: str, attempt: int) -> ProjectionResult:
         if self._partial_armed:
             self._partial_armed = False
-            self.partial_backend.client.partial_failure_once = True
-            asset_id = str(documents[0]["asset_id"])
-            self._partial_attempts.add((asset_id, job_id, attempt))
-            return await self.partial_backend.project(documents, job_id=job_id, attempt=attempt)
+            self._partial_failure.arm()
+            try:
+                result = await self.backend.project(documents, job_id=job_id, attempt=attempt)
+                self.partial_success_ids = await self.backend.ids()
+                return result
+            finally:
+                self._partial_failure.disarm()
         return await self.backend.project(documents, job_id=job_id, attempt=attempt)
 
     async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
-        key = (asset_id, job_id, attempt)
-        if key in self._partial_attempts:
-            await self.partial_backend.delete_projection(asset_id, job_id, attempt)
-            self._partial_attempts.remove(key)
-            return
         await self.backend.delete_projection(asset_id, job_id, attempt)
 
     async def delete_asset(self, asset_id: str) -> None:
@@ -354,21 +378,19 @@ class _FaultInjectingProjection:
             self.delete_failure_once = False
             raise RecordedVideoError(ErrorCode.ES_5XX, retryable=True, message="ES_5XX: injected delete interruption")
         await self.backend.delete_asset(asset_id)
-        await self.partial_backend.delete_asset(asset_id)
 
     def inject_partial_bulk_failure(self) -> None:
         self._partial_armed = True
 
     @property
     def partial_bulk_failures(self) -> int:
-        return self.partial_backend.client.partial_failures
+        return self._partial_failure.failures
 
     async def ids(self) -> set[str]:
         return await self.backend.ids()
 
     async def close(self) -> None:
         await self.backend.close()
-        await self.partial_backend.close()
 
 
 class _FaultyAssetStore(LocalAssetStore):
@@ -573,6 +595,10 @@ class RecordedVideoStack:
     def partial_bulk_failures(self) -> int:
         return self.projection.partial_bulk_failures
 
+    @property
+    def partial_bulk_success_ids(self) -> set[str]:
+        return self.projection.partial_success_ids
+
     async def projection_attempts(self) -> set[int]:
         return await self.projection.backend.attempts()
 
@@ -629,11 +655,26 @@ async def recorded_video_stack(
         )
 
     production_streaming_bulk = es_index_module.async_streaming_bulk
+    partial_failure = _PartialBulkFailure()
 
     async def streaming_bulk_dispatch(client, actions, **kwargs):
+        inject_failure = partial_failure.consume()
         if isinstance(client, _ControlledBulkClient):
-            async for result in _controlled_streaming_bulk(client, actions, **kwargs):
+            async for result in _controlled_streaming_bulk(
+                client,
+                actions,
+                fail_last=inject_failure,
+                **kwargs,
+            ):
                 yield result
+            return
+        if inject_failure:
+            action_list = list(actions)
+            assert len(action_list) >= 2
+            async for result in production_streaming_bulk(client, action_list[:-1], **kwargs):
+                yield result
+            failed_id = str(action_list[-1]["_id"])
+            yield False, {"update": {"_id": failed_id, "status": 503, "error": {"reason": "injected"}}}
             return
         async for result in production_streaming_bulk(client, actions, **kwargs):
             yield result
@@ -682,14 +723,14 @@ async def recorded_video_stack(
         if not await es_client.ping():
             await es_client.close()
             pytest.fail(f"VSA_TEST_ES_URL is not reachable: {es_url}")
-        backend: _MemoryProjection | _ElasticsearchProjection = _ElasticsearchProjection(
+        backend: _ControlledBulkProjection | _ElasticsearchProjection = _ElasticsearchProjection(
             es_client,
             config.search.embed_index,
         )
         await backend.bootstrap()
     else:
-        backend = _MemoryProjection()
-    projection = _FaultInjectingProjection(backend)
+        backend = _ControlledBulkProjection()
+    projection = _FaultInjectingProjection(backend, partial_failure)
 
     base_url = httpserver.url_for("/v1/")
     vision = OpenAIVisionProvider(
