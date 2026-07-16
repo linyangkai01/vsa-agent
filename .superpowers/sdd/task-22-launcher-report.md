@@ -133,3 +133,66 @@ none
 ```
 
 One intermediate full-suite retry reached the 720-second outer timeout without a pytest summary. Its post-timeout owned-process scan was empty. The immediately following `-vv` full run completed all 91 tests in 303.45 seconds and did not identify a repeatable single-test stall; this remains a Windows process-startup timing risk rather than evidence of a forced-cleanup success.
+
+## Review Repair Round 2
+
+The second repair changed only `tests/unit/scripts/test_recorded_video_runtime_launcher.py` and this report. No production launcher defect was found: both launchers already remove the run config, validation config/data, primary validation index and legacy smoke index in their lifecycle cleanup.
+
+### Root Cause and RED
+
+The PowerShell harness still had three ownership gaps:
+
+- its lifecycle `try/finally` began after initial CIM identity capture;
+- its scanner reconstructed ownership only from current repo command lines and current PPIDs;
+- a cleanup scan exception skipped later cleanup and replaced the original failure.
+
+Focused RED reproduced all three failures:
+
+```text
+3 failed in 34.12s
+
+- Initial identity capture failure left the start-gated PowerShell host alive.
+- Cleanup scan failure replaced the intentional polling failure.
+- A generic `python -c` descendant remained alive after its recorded API parent exited.
+```
+
+Each RED test used PID plus CreationDate emergency cleanup after observing the failure.
+
+### Repair and GREEN
+
+- The outer lifecycle guard now starts immediately after `Popen`; identity capture, gate release, polling, assertions and waits are inside it.
+- The helper records PID, CreationDate, ExecutablePath, CommandLine, ParentProcessId and validated host lineage in an accumulated registry persisted under the unique temporary harness repo.
+- Descendants are accepted only when their creation is not earlier than the recorded parent. A live reused parent PID must match the complete recorded identity; exact termination rechecks all recorded identity fields.
+- Polling records owned descendants while the tree is intact, so cleanup can reclaim a generic descendant after its parent exits.
+- Cleanup scan, graceful trigger, trace diagnostics, exact tree termination and final residual verification are best-effort stages. Cleanup errors are aggregated as notes when a primary exception exists, so the primary remains dominant.
+- Pipeline `.Stop()` never writes the helper API-exit fallback. Its test proves `wrapper=pipeline-stopped`, no forced cleanup, complete component finalization and removal of both indexes, both configs and validation data.
+- Bash and PowerShell plain validation tests now prove the same complete resource removal and all expected component finalization.
+
+```text
+focused fault-injection GREEN
+3 passed in 57.71s
+
+focused lifecycle/resource GREEN
+8 passed in 142.87s
+
+pytest tests/unit/scripts/test_recorded_video_runtime_launcher.py tests/unit/scripts/test_es_runtime_stack_script.py -vv --tb=short
+95 passed in 365.61s
+
+ruff check tests/unit/scripts/test_recorded_video_runtime_launcher.py tests/unit/scripts/test_es_runtime_stack_script.py
+All checks passed!
+
+ruff format --check tests/unit/scripts/test_recorded_video_runtime_launcher.py tests/unit/scripts/test_es_runtime_stack_script.py
+2 files already formatted
+
+bash -n scripts/es-runtime-stack.sh
+PASS
+
+PowerShell Language.Parser.ParseFile scripts/es-runtime-stack.ps1
+PowerShell parser: OK
+
+git diff --check -- tests/unit/scripts/test_recorded_video_runtime_launcher.py .superpowers/sdd/task-22-launcher-report.md
+PASS
+
+temporary-repo absolute command-line plus persisted full-identity registry residual scan
+none
+```

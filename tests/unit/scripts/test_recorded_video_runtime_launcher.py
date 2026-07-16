@@ -318,6 +318,7 @@ def _powershell_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         import json
         import os
         from pathlib import Path
+        import subprocess
         import sys
         import time
 
@@ -334,6 +335,15 @@ def _powershell_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         + """
 with trace.open("a", encoding="utf-8") as stream:
     stream.write(f"api_config={os.environ.get('VSA_CONFIG', '')}\\n")
+if os.environ.get("HARNESS_DETACHED_CHILD") == "1":
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(3600)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    with trace.open("a", encoding="utf-8") as stream:
+        stream.write(f"detached_child_pid={child.pid}\\n")
+    time.sleep(0.75)
+    raise SystemExit(17)
 delay = int(os.environ.get("HARNESS_API_EXIT_AFTER_MS", "0"))
 if delay:
     time.sleep(delay / 1000)
@@ -406,6 +416,7 @@ def _powershell_process_snapshot() -> list[dict[str, object]]:
             pid = [int]$_.ProcessId
             parent_pid = [int]$_.ParentProcessId
             creation = $_.CreationDate.ToUniversalTime().ToString('o')
+            executable_path = [string]$_.ExecutablePath
             command_line = [string]$_.CommandLine
         }
     }) | ConvertTo-Json -Compress
@@ -422,17 +433,104 @@ def _powershell_process_snapshot() -> list[dict[str, object]]:
     return snapshot if isinstance(snapshot, list) else [snapshot]
 
 
+def _powershell_identity_key(item: dict[str, object]) -> str:
+    return f"{int(item['pid'])}|{item['creation']}"
+
+
+def _same_powershell_process_identity(left: dict[str, object], right: dict[str, object]) -> bool:
+    return all(
+        left[field] == right[field] for field in ("pid", "parent_pid", "creation", "executable_path", "command_line")
+    )
+
+
+def _powershell_registry_path(repo: Path) -> Path:
+    return repo / "harness-owned-processes.json"
+
+
+def _load_powershell_process_registry(repo: Path) -> dict[str, dict[str, object]]:
+    path = _powershell_registry_path(repo)
+    if not path.exists():
+        return {}
+    records = json.loads(path.read_text(encoding="utf-8"))
+    return {_powershell_identity_key(item): item for item in records}
+
+
+def _persist_powershell_process_registry(repo: Path, registry: dict[str, dict[str, object]]) -> None:
+    records = sorted(registry.values(), key=lambda item: (str(item["creation"]), int(item["pid"])))
+    _powershell_registry_path(repo).write_text(json.dumps(records, indent=2), encoding="utf-8")
+
+
+def _register_powershell_root_identity(
+    registry: dict[str, dict[str, object]], root_identity: dict[str, object]
+) -> None:
+    record = dict(root_identity)
+    record["lineage"] = [{"pid": int(record["pid"]), "creation": str(record["creation"])}]
+    registry[_powershell_identity_key(record)] = record
+
+
+def _record_owned_powershell_descendants(
+    registry: dict[str, dict[str, object]], snapshot: list[dict[str, object]]
+) -> None:
+    current_by_pid = {int(item["pid"]): item for item in snapshot}
+    while True:
+        added = False
+        for child in snapshot:
+            child_key = _powershell_identity_key(child)
+            if child_key in registry:
+                continue
+            parent_pid = int(child["parent_pid"])
+            parents = [
+                item
+                for item in registry.values()
+                if int(item["pid"]) == parent_pid and str(child["creation"]) >= str(item["creation"])
+            ]
+            if not parents:
+                continue
+            current_parent = current_by_pid.get(parent_pid)
+            if current_parent is not None:
+                parents = [item for item in parents if _same_powershell_process_identity(item, current_parent)]
+                if not parents:
+                    continue
+            parent = max(parents, key=lambda item: str(item["creation"]))
+            record = dict(child)
+            record["lineage"] = [
+                *list(parent["lineage"]),
+                {"pid": int(record["pid"]), "creation": str(record["creation"])},
+            ]
+            registry[child_key] = record
+            added = True
+        if not added:
+            return
+
+
+def _current_registered_powershell_processes(
+    registry: dict[str, dict[str, object]], snapshot: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    registered = {_powershell_identity_key(item): item for item in registry.values()}
+    return [
+        item
+        for item in snapshot
+        if (record := registered.get(_powershell_identity_key(item))) is not None
+        and _same_powershell_process_identity(record, item)
+    ]
+
+
 def _powershell_repo_processes(repo: Path) -> list[dict[str, object]]:
     snapshot = _powershell_process_snapshot()
+    registry = _load_powershell_process_registry(repo)
+    if registry:
+        _record_owned_powershell_descendants(registry, snapshot)
+        _persist_powershell_process_registry(repo, registry)
+        return _current_registered_powershell_processes(registry, snapshot)
+
     needle = str(repo.resolve()).casefold()
-    owned_pids = {int(item["pid"]) for item in snapshot if needle in str(item["command_line"] or "").casefold()}
-    while True:
-        descendants = {int(item["pid"]) for item in snapshot if int(item["parent_pid"]) in owned_pids}
-        expanded = owned_pids | descendants
-        if expanded == owned_pids:
-            break
-        owned_pids = expanded
-    return [item for item in snapshot if int(item["pid"]) in owned_pids]
+    roots = [item for item in snapshot if needle in str(item["command_line"] or "").casefold()]
+    for root in roots:
+        _register_powershell_root_identity(registry, root)
+    _record_owned_powershell_descendants(registry, snapshot)
+    if registry:
+        _persist_powershell_process_registry(repo, registry)
+    return _current_registered_powershell_processes(registry, snapshot)
 
 
 def _terminate_exact_powershell_processes(processes: list[dict[str, object]]) -> None:
@@ -460,6 +558,9 @@ def _terminate_exact_powershell_processes(processes: list[dict[str, object]]) ->
         if ($null -eq $current) { continue }
         $creation = $current.CreationDate.ToUniversalTime().ToString('o')
         if ($creation -ne $record.creation) { continue }
+        if ([int]$current.ParentProcessId -ne [int]$record.parent_pid) { continue }
+        if ([string]$current.ExecutablePath -cne [string]$record.executable_path) { continue }
+        if ([string]$current.CommandLine -cne [string]$record.command_line) { continue }
         Stop-Process -Id $record.pid -Force -ErrorAction SilentlyContinue
     }
     """
@@ -601,6 +702,30 @@ def _run_powershell_runtime(
     exit_trigger = repo / "api-exit.trigger"
     process_env = env.copy()
     process_env["HARNESS_API_EXIT_TRIGGER"] = str(exit_trigger)
+    owned_registry: dict[str, dict[str, object]] = {}
+    primary_failure: BaseException | None = None
+    start_released = False
+    next_observation = 0.0
+    process: subprocess.Popen[str]
+
+    def observe_owned_processes() -> None:
+        nonlocal next_observation
+        now = time.monotonic()
+        if now < next_observation:
+            return
+        snapshot = _powershell_process_snapshot()
+        _record_owned_powershell_descendants(owned_registry, snapshot)
+        _persist_powershell_process_registry(repo, owned_registry)
+        next_observation = time.monotonic() + 0.2
+
+    def wait_with_observation(deadline: float) -> None:
+        while process.poll() is None:
+            observe_owned_processes()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            time.sleep(min(0.05, remaining))
+
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
             command,
@@ -611,23 +736,24 @@ def _run_powershell_runtime(
             text=True,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
-        root_identity = next(
-            (item for item in _powershell_process_snapshot() if int(item["pid"]) == process.pid),
-            None,
-        )
-        if root_identity is None:
-            process.kill()
-            process.wait(timeout=5)
-            raise AssertionError(f"Could not capture PowerShell host identity for PID {process.pid}")
-        start_trigger.write_text("start", encoding="utf-8")
         try:
+            snapshot = _powershell_process_snapshot()
+            root_identity = next((item for item in snapshot if int(item["pid"]) == process.pid), None)
+            if root_identity is None:
+                raise AssertionError(f"Could not capture PowerShell host identity for PID {process.pid}")
+            _register_powershell_root_identity(owned_registry, root_identity)
+            _record_owned_powershell_descendants(owned_registry, snapshot)
+            _persist_powershell_process_registry(repo, owned_registry)
+            start_trigger.write_text("start", encoding="utf-8")
+            start_released = True
             deadline = time.monotonic() + timeout
             if exit_after_trace is None:
-                process.wait(timeout=timeout)
+                wait_with_observation(deadline)
             else:
                 trace_path = repo / "trace.log"
                 trace_ready_at: float | None = None
                 while time.monotonic() < deadline:
+                    observe_owned_processes()
                     trace_ready = trace_path.exists() and exit_after_trace in trace_path.read_text(encoding="utf-8")
                     if trace_ready:
                         trace_ready_at = trace_ready_at or time.monotonic()
@@ -650,35 +776,68 @@ def _run_powershell_runtime(
                 assert process.poll() is None
                 trigger = pipeline_stop_trigger if stop_pipeline_after_trace else exit_trigger
                 trigger.write_text("stop", encoding="utf-8")
-                process.wait(timeout=max(1, deadline - time.monotonic()))
+                wait_with_observation(max(time.monotonic() + 1, deadline))
         except BaseException as exc:
-            exc.add_note(_powershell_runtime_diagnostics(repo))
+            primary_failure = exc
+            try:
+                exc.add_note(_powershell_runtime_diagnostics(repo))
+            except BaseException as diagnostic_error:
+                exc.add_note(f"PowerShell harness diagnostics failed: {diagnostic_error!r}")
             raise
         finally:
-            captured_owned = {int(item["pid"]): item for item in _powershell_repo_processes(repo)}
-            captured_owned[int(root_identity["pid"])] = root_identity
-            if process.poll() is None:
-                exit_trigger.write_text("exit", encoding="utf-8")
+            cleanup_errors: list[str] = []
+
+            def cleanup_stage(name: str, action) -> None:
+                try:
+                    action()
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(f"{name}: {cleanup_error!r}")
+
+            def cleanup_scan() -> None:
+                _powershell_repo_processes(repo)
+                owned_registry.update(_load_powershell_process_registry(repo))
+
+            def graceful_cleanup() -> None:
+                if process.poll() is None and start_released and not stop_pipeline_after_trace:
+                    exit_trigger.write_text("exit", encoding="utf-8")
+                if process.poll() is not None or not start_released:
+                    return
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     pass
-            survivors = _powershell_repo_processes(repo)
-            if process.poll() is None or survivors:
-                for item in survivors:
-                    captured_owned[int(item["pid"])] = item
-                with (repo / "trace.log").open("a", encoding="utf-8") as stream:
-                    stream.write("harness=forced-cleanup\n")
-                _terminate_exact_powershell_processes(list(captured_owned.values()))
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-            remaining = _powershell_repo_processes(repo)
-            if remaining:
-                raise AssertionError(
-                    f"PowerShell harness left owned processes: {remaining}\n{_powershell_runtime_diagnostics(repo)}"
-                )
+
+            def exact_cleanup() -> None:
+                snapshot = _powershell_process_snapshot()
+                _record_owned_powershell_descendants(owned_registry, snapshot)
+                _persist_powershell_process_registry(repo, owned_registry)
+                survivors = _current_registered_powershell_processes(owned_registry, snapshot)
+                if process.poll() is None or survivors:
+                    with (repo / "trace.log").open("a", encoding="utf-8") as stream:
+                        stream.write("harness=forced-cleanup\n")
+                    _terminate_exact_powershell_processes(list(owned_registry.values()))
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+
+            def verify_cleanup() -> None:
+                remaining = _powershell_repo_processes(repo)
+                if remaining:
+                    raise AssertionError(f"PowerShell harness left owned processes: {remaining}")
+
+            cleanup_stage("owned-process scan", cleanup_scan)
+            cleanup_stage("graceful launcher trigger", graceful_cleanup)
+            cleanup_stage("trace diagnostics", lambda: _powershell_runtime_diagnostics(repo))
+            cleanup_stage("exact tree termination", exact_cleanup)
+            cleanup_stage("final residual verification", verify_cleanup)
+
+            if cleanup_errors:
+                details = "PowerShell harness cleanup errors: " + "; ".join(cleanup_errors)
+                if primary_failure is not None:
+                    primary_failure.add_note(details)
+                else:
+                    raise AssertionError(f"{details}\n{_powershell_runtime_diagnostics(repo)}")
         result = subprocess.CompletedProcess(command, process.returncode)
     return subprocess.CompletedProcess(
         command,
@@ -861,6 +1020,15 @@ def test_bash_plain_validate_starts_ui_runs_smoke_passes_and_cleans_isolation(tm
     trace = (repo / "trace.log").read_text(encoding="utf-8")
     assert "smoke=" in trace
     assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert (
+        f"curl=-fsS -X DELETE --get --data-urlencode ignore_unavailable=true http://127.0.0.1:9200/validation-{run_dir.name}-legacy-smoke"
+        in trace
+    )
+    assert (
+        f"curl=-fsS -X DELETE --get --data-urlencode ignore_unavailable=true http://127.0.0.1:9200/validation-{run_dir.name}"
+        in trace
+    )
+    assert not (run_dir / "config.yaml").exists()
     assert not (run_dir / "validation-config.yaml").exists()
     assert not (run_dir / f"validation-{run_dir.name}").exists()
 
@@ -1034,6 +1202,9 @@ def test_powershell_plain_validate_starts_ui_runs_smoke_passes_and_cleans_isolat
     trace = (repo / "trace.log").read_text(encoding="utf-8")
     assert "smoke=" in trace
     assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}-legacy-smoke" in trace
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}" in trace
+    assert not (run_dir / "config.yaml").exists()
     assert not (run_dir / "validation-config.yaml").exists()
     assert not (run_dir / f"validation-{run_dir.name}").exists()
 
@@ -1120,6 +1291,161 @@ def test_powershell_helper_abandoned_wait_reclaims_only_its_owned_process_tree(
         _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
 
 
+def test_powershell_helper_initial_identity_capture_failure_reclaims_start_gated_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    original_snapshot = _powershell_process_snapshot
+    snapshot_calls = 0
+
+    class HarnessIdentityCaptureError(RuntimeError):
+        pass
+
+    def fail_initial_identity_capture() -> list[dict[str, object]]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            raise HarnessIdentityCaptureError("intentional initial identity capture failure")
+        return original_snapshot()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                sys.modules[__name__],
+                "_powershell_process_snapshot",
+                fail_initial_identity_capture,
+            )
+            with pytest.raises(
+                HarnessIdentityCaptureError,
+                match="intentional initial identity capture failure",
+            ):
+                _run_powershell_runtime(repo, env, "-Validate", "-KeepRunning", "-TimeoutSec", "3")
+        assert _powershell_repo_processes(repo) == []
+    finally:
+        _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
+
+
+def test_powershell_helper_cleanup_scan_failure_preserves_primary_and_reclaims_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    original_sleep = time.sleep
+    original_repo_processes = _powershell_repo_processes
+    cleanup_scan_calls = 0
+
+    class HarnessPollingError(RuntimeError):
+        pass
+
+    class HarnessCleanupScanError(RuntimeError):
+        pass
+
+    def fail_after_runtime_ready(_: float) -> None:
+        trace = repo / "trace.log"
+        if trace.exists() and "proxy=ready" in trace.read_text(encoding="utf-8"):
+            raise HarnessPollingError("intentional polling failure")
+        original_sleep(0.05)
+
+    def fail_first_cleanup_scan(path: Path) -> list[dict[str, object]]:
+        nonlocal cleanup_scan_calls
+        cleanup_scan_calls += 1
+        if cleanup_scan_calls == 1:
+            raise HarnessCleanupScanError("intentional cleanup scan failure")
+        return original_repo_processes(path)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(time, "sleep", fail_after_runtime_ready)
+            patch.setattr(sys.modules[__name__], "_powershell_repo_processes", fail_first_cleanup_scan)
+            with pytest.raises(HarnessPollingError, match="intentional polling failure") as captured:
+                _run_powershell_runtime(
+                    repo,
+                    env,
+                    "-Validate",
+                    "-KeepRunning",
+                    "-TimeoutSec",
+                    "3",
+                    exit_after_trace="marker-that-never-arrives",
+                )
+        assert any("intentional cleanup scan failure" in note for note in captured.value.__notes__)
+        assert _powershell_repo_processes(repo) == []
+    finally:
+        _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
+
+
+def test_powershell_helper_reclaims_recorded_descendant_after_its_parent_exits(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    env["HARNESS_DETACHED_CHILD"] = "1"
+    detached_identity: dict[str, object] | None = None
+
+    try:
+        completed = _run_powershell_runtime(
+            repo,
+            env,
+            "-Validate",
+            "-KeepRunning",
+            "-TimeoutSec",
+            "3",
+        )
+
+        assert completed.returncode != 0
+        trace = (repo / "trace.log").read_text(encoding="utf-8")
+        detached_pid = int(re.search(r"^detached_child_pid=(\d+)$", trace, re.MULTILINE).group(1))  # type: ignore[union-attr]
+        registry = _load_powershell_process_registry(repo)
+        detached_record = next(item for item in registry.values() if int(item["pid"]) == detached_pid)
+        assert {
+            "pid",
+            "parent_pid",
+            "creation",
+            "executable_path",
+            "command_line",
+            "lineage",
+        } <= detached_record.keys()
+        assert detached_record["lineage"][-1] == {
+            "pid": detached_pid,
+            "creation": detached_record["creation"],
+        }
+        assert len(detached_record["lineage"]) >= 3
+        detached_identity = next(
+            (item for item in _powershell_process_snapshot() if int(item["pid"]) == detached_pid),
+            None,
+        )
+        assert detached_identity is None
+    finally:
+        if detached_identity is not None:
+            _terminate_exact_powershell_processes([detached_identity])
+
+
+def test_powershell_registry_rejects_preexisting_children_and_reused_parent_pid():
+    def identity(pid: int, parent_pid: int, creation: str) -> dict[str, object]:
+        return {
+            "pid": pid,
+            "parent_pid": parent_pid,
+            "creation": creation,
+            "executable_path": f"C:\\fake\\{pid}.exe",
+            "command_line": f"process-{pid}-{creation}",
+        }
+
+    registry: dict[str, dict[str, object]] = {}
+    root = identity(10, 1, "2026-07-16T01:00:00.0000000Z")
+    _register_powershell_root_identity(registry, root)
+
+    older_child = identity(11, 10, "2026-07-16T00:59:59.0000000Z")
+    reused_root = identity(10, 1, "2026-07-16T02:00:00.0000000Z")
+    reused_child = identity(12, 10, "2026-07-16T02:00:01.0000000Z")
+    _record_owned_powershell_descendants(registry, [reused_root, older_child, reused_child])
+    assert {_powershell_identity_key(item) for item in registry.values()} == {_powershell_identity_key(root)}
+
+    child = identity(13, 10, "2026-07-16T01:00:01.0000000Z")
+    _record_owned_powershell_descendants(registry, [root, child])
+    grandchild = identity(14, 13, "2026-07-16T01:00:02.0000000Z")
+    _record_owned_powershell_descendants(registry, [grandchild])
+    assert registry[_powershell_identity_key(grandchild)]["lineage"] == [
+        {"pid": 10, "creation": root["creation"]},
+        {"pid": 13, "creation": child["creation"]},
+        {"pid": 14, "creation": grandchild["creation"]},
+    ]
+
+
 def test_powershell_external_pipeline_stop_runs_launcher_finally_and_cleans_owned_runtime(tmp_path: Path):
     repo, env = _powershell_runtime_harness(tmp_path)
 
@@ -1142,8 +1468,12 @@ def test_powershell_external_pipeline_stop_runs_launcher_finally_and_cleans_owne
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
     assert "wrapper=pipeline-stopped" in trace
     assert "harness=forced-cleanup" not in trace
+    assert not (repo / "api-exit.trigger").exists()
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker", "ui"}
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}-legacy-smoke" in trace
     assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}" in trace
     assert all(item["exit_status"] is not None for item in manifest["processes"])
+    assert not (run_dir / "config.yaml").exists()
     assert not (run_dir / "validation-config.yaml").exists()
     assert not (run_dir / f"validation-{run_dir.name}").exists()
     assert _powershell_repo_processes(repo) == []
