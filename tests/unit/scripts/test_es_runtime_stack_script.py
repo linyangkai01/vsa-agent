@@ -98,6 +98,7 @@ def test_es_runtime_stack_exposes_expected_parameters():
         "[switch]$SmokeOnly",
         '[string]$DataRoot = ""',
         "[switch]$Validate",
+        "[switch]$KeepRunning",
     ):
         assert parameter in text
 
@@ -178,6 +179,8 @@ def test_es_runtime_stack_bash_exposes_expected_options():
         "--smoke-only",
         "--data-root",
         "--validate",
+        "--keep-running",
+        "-KeepRunning",
     ):
         assert option in text
 

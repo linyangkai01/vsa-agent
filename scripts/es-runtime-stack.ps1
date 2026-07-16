@@ -8,10 +8,18 @@ param(
     [int]$TimeoutSec = 90,
     [switch]$StopElasticsearch,
     [switch]$SmokeOnly,
-    [switch]$Validate
+    [switch]$Validate,
+    [switch]$KeepRunning
 )
 
 $ErrorActionPreference = "Stop"
+$explicitValidation = $Validate.IsPresent
+if ($KeepRunning -and $SmokeOnly) {
+    throw "-KeepRunning cannot be combined with -SmokeOnly"
+}
+if ($KeepRunning -and -not $explicitValidation) {
+    throw "-KeepRunning requires explicit validation via -Validate"
+}
 $Validate = $Validate -or $SmokeOnly
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $runtimeDir = Join-Path $repoRoot ".runtime\es-stack"
@@ -382,11 +390,14 @@ function Stop-OwnedProcessTree {
 function DeleteValidationResources {
     if (-not $Validate) { return }
     $removed = $true
-    try {
-        Invoke-WebRequest -Uri "$esEndpoint/$validationSmokeIndex" -Method Delete -TimeoutSec 5 -UseBasicParsing | Out-Null
-    } catch {
-        Write-Stack "failed to remove validation index $validationSmokeIndex`: $($_.Exception.Message)" -ErrorLine
-        $removed = $false
+    foreach ($validationResource in @($validationSmokeIndex, $validationIndex)) {
+        try {
+            $deleteUri = ("$esEndpoint/$validationResource" + "?ignore_unavailable=true")
+            Invoke-WebRequest -Uri $deleteUri -Method Delete -TimeoutSec 5 -UseBasicParsing | Out-Null
+        } catch {
+            Write-Stack "failed to remove validation index $validationResource`: $($_.Exception.Message)" -ErrorLine
+            $removed = $false
+        }
     }
     foreach ($resource in @(
         @{ Path = $validationDataRoot; Recurse = $true },
@@ -490,10 +501,15 @@ try {
     }
 
     if ($Validate) { # validation
-        $smoke = PythonCommand -CondaEnv $CondaEnv -PythonArgs @("scripts\es_ingest_smoke.py", "--api-url", $apiUrl, "--es-endpoint", $esEndpoint, "--index", $validationSmokeIndex, "--video-id", "runtime-validation-$runId", "--insecure")
-        Write-Stack "running isolated validation against $validationIndex"
-        Invoke-StackCommand -FilePath $smoke.File -Arguments $smoke.Args
-        Write-Stack "PASS: ES runtime stack validation succeeded"
+        if ($KeepRunning) {
+            Write-Stack "READY: isolated validation runtime api=$apiUrl ui=$uiUrl es=$esEndpoint index=$validationIndex"
+            Wait-RuntimeProcesses -Processes @{ api = $apiProcess; worker = $workerProcess; ui = $uiProcess }
+        } else {
+            $smoke = PythonCommand -CondaEnv $CondaEnv -PythonArgs @("scripts\es_ingest_smoke.py", "--api-url", $apiUrl, "--es-endpoint", $esEndpoint, "--index", $validationSmokeIndex, "--video-id", "runtime-validation-$runId", "--insecure")
+            Write-Stack "running isolated validation against $validationIndex"
+            Invoke-StackCommand -FilePath $smoke.File -Arguments $smoke.Args
+            Write-Stack "PASS: ES runtime stack validation succeeded"
+        }
     } # validation
     else {
         Write-Stack "PASS: ES recorded-video runtime stack is ready"

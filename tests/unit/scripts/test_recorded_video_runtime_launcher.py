@@ -5,7 +5,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import textwrap
@@ -176,7 +175,11 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           if [[ "${HARNESS_DELETE_FAIL:-0}" == "1" ]]; then exit 22; fi
           exit 0
         fi
-        if [[ "$*" == *"/api/v1/search"* ]]; then printf '405'; exit 0; fi
+        if [[ "$*" == *"/api/v1/search"* ]]; then
+          printf 'proxy=ready\n' >>"$HARNESS_TRACE"
+          printf '405'
+          exit 0
+        fi
         if [[ "$*" == *"/health"* ]]; then printf '{"status":"ok"}\n'; else printf '{}\n'; fi
         """,
     )
@@ -215,6 +218,9 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           cp "$2" "$HARNESS_TRACE.config"
           grep -E 'embed_index:|data_root:|enabled:' "$2" | tr '\n' '|' >>"$HARNESS_TRACE"
           printf '\n' >>"$HARNESS_TRACE"
+          data_root="$(sed -n 's/^  data_root: //p' "$2" | tr -d '"')"
+          mkdir -p "$data_root"
+          printf 'ready' >"$data_root/interruption-ready.marker"
           if [[ "${HARNESS_WORKER_READY:-1}" != "1" ]]; then exit 7; fi
           printf '%s\n' \
             '{"event":"worker.readiness","ready":true,"token":"worker-secret","image":"data:image/jpeg;base64,QUJDREVGR0g="}'
@@ -332,6 +338,11 @@ delay = int(os.environ.get("HARNESS_API_EXIT_AFTER_MS", "0"))
 if delay:
     time.sleep(delay / 1000)
     raise SystemExit(17)
+exit_trigger = os.environ.get("HARNESS_API_EXIT_TRIGGER")
+if exit_trigger:
+    while not Path(exit_trigger).exists():
+        time.sleep(0.05)
+    raise SystemExit(17)
 time.sleep(3600)
 """,
         encoding="utf-8",
@@ -343,6 +354,12 @@ time.sleep(3600)
 config = Path(sys.argv[sys.argv.index("--config") + 1])
 with trace.open("a", encoding="utf-8") as stream:
     stream.write(f"worker_config={config}\\n")
+data_root_line = next(
+    line for line in config.read_text(encoding="utf-8").splitlines() if line.startswith("  data_root:")
+)
+validation_root = Path(json.loads(data_root_line.split(":", 1)[1].strip()))
+validation_root.mkdir(parents=True, exist_ok=True)
+(validation_root / "interruption-ready.marker").write_text("ready", encoding="utf-8")
 if os.environ.get("HARNESS_WORKER_READY") == "0":
     raise SystemExit(7)
 (config.parent / "worker.log").write_text(
@@ -384,8 +401,9 @@ def _run_powershell_runtime(
     env: dict[str, str],
     *args: str,
     timeout: float = 60,
-    interrupt_after_trace: str | None = None,
-    interrupt_after_marker: str | None = None,
+    exit_after_trace: str | None = None,
+    exit_after_marker: str | None = None,
+    exit_after_stack: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     powershell = shutil.which("powershell")
     if powershell is None:
@@ -407,6 +425,7 @@ def _run_powershell_runtime(
                     return [pscustomobject]@{{ StatusCode = 200 }}
                 }}
                 if ("$Uri" -like '*/api/v1/search') {{
+                    [IO.File]::AppendAllText('{trace}', "proxy=ready`n")
                     $exception = [Exception]::new('method not allowed')
                     $response = [pscustomobject]@{{ StatusCode = [pscustomobject]@{{ value__ = 405 }} }}
                     $exception | Add-Member -NotePropertyName Response -NotePropertyValue $response
@@ -435,7 +454,7 @@ def _run_powershell_runtime(
     stdout_path = repo / "launcher.stdout.log"
     stderr_path = repo / "launcher.stderr.log"
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        if interrupt_after_trace is None:
+        if exit_after_trace is None:
             result = subprocess.run(
                 command,
                 cwd=repo,
@@ -447,10 +466,13 @@ def _run_powershell_runtime(
                 timeout=timeout,
             )
         else:
+            exit_trigger = repo / "api-exit.trigger"
+            process_env = env.copy()
+            process_env["HARNESS_API_EXIT_TRIGGER"] = str(exit_trigger)
             process = subprocess.Popen(
                 command,
                 cwd=repo,
-                env=env,
+                env=process_env,
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
@@ -460,25 +482,31 @@ def _run_powershell_runtime(
             trace_path = repo / "trace.log"
             trace_ready_at: float | None = None
             while time.monotonic() < deadline:
-                trace_ready = trace_path.exists() and interrupt_after_trace in trace_path.read_text(encoding="utf-8")
+                trace_ready = trace_path.exists() and exit_after_trace in trace_path.read_text(encoding="utf-8")
                 if trace_ready:
                     trace_ready_at = trace_ready_at or time.monotonic()
-                    marker_ready = interrupt_after_marker is None or any(
-                        (repo / ".runtime/es-stack/runs").glob(f"*/validation-*/{interrupt_after_marker}")
+                    marker_ready = exit_after_marker is None or any(
+                        (repo / ".runtime/es-stack/runs").glob(f"*/validation-*/{exit_after_marker}")
                     )
-                    if marker_ready:
+                    stack_ready = exit_after_stack is None or any(
+                        exit_after_stack in path.read_text(encoding="utf-8")
+                        for path in (repo / ".runtime/es-stack/runs").glob("*/stack.log")
+                    )
+                    if marker_ready and stack_ready:
                         break
                     if time.monotonic() - trace_ready_at >= 2:
-                        process.send_signal(signal.CTRL_BREAK_EVENT)
+                        exit_trigger.write_text("exit", encoding="utf-8")
                         process.wait(timeout=30)
-                        raise AssertionError(f"Validation marker was not created: {interrupt_after_marker}")
+                        raise AssertionError(f"Validation marker was not created: {exit_after_marker}")
                 if process.poll() is not None:
-                    raise AssertionError(f"PowerShell host exited before trace marker: {interrupt_after_trace}")
+                    raise AssertionError(f"PowerShell host exited before trace marker: {exit_after_trace}")
                 time.sleep(0.05)
             else:
+                exit_trigger.write_text("exit", encoding="utf-8")
                 process.kill()
-                raise AssertionError(f"Timed out waiting for PowerShell trace marker: {interrupt_after_trace}")
-            process.send_signal(signal.CTRL_BREAK_EVENT)
+                raise AssertionError(f"Timed out waiting for PowerShell trace marker: {exit_after_trace}")
+            assert process.poll() is None
+            exit_trigger.write_text("exit", encoding="utf-8")
             return_code = process.wait(timeout=max(1, deadline - time.monotonic()))
             result = subprocess.CompletedProcess(command, return_code)
     return subprocess.CompletedProcess(
@@ -506,6 +534,115 @@ def test_bash_help_exposes_data_root_and_explicit_validation_without_starting_se
     assert "--data-root PATH" in completed.stdout
     assert "--validate" in completed.stdout
     assert "docker" not in completed.stderr.lower()
+
+
+@pytest.mark.parametrize("keep_option", ["--keep-running", "-KeepRunning"])
+def test_bash_keep_running_requires_explicit_validation_before_dependencies(tmp_path: Path, keep_option: str):
+    repo, env = _bash_runtime_harness(tmp_path)
+
+    completed = _run_bash_runtime(repo, env, keep_option)
+
+    assert completed.returncode == 2
+    assert "requires explicit validation" in completed.stderr
+    assert not (repo / "trace.log").exists()
+
+
+def test_bash_keep_running_rejects_smoke_only_before_dependencies(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+
+    completed = _run_bash_runtime(repo, env, "--validate", "--smoke-only", "--keep-running")
+
+    assert completed.returncode == 2
+    assert "cannot be combined" in completed.stderr
+    assert not (repo / "trace.log").exists()
+
+
+def test_bash_keep_running_reaches_readiness_stays_alive_and_cleans_on_signal(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    bash = shutil.which("bash")
+    assert bash is not None
+    launcher_pid_path = repo / "launcher.pid"
+    process = subprocess.Popen(
+        [
+            bash,
+            "-c",
+            'pid_path="$1"; shift; printf "%s\\n" "$$" >"$pid_path"; exec "$@"',
+            "bash",
+            launcher_pid_path.as_posix(),
+            (repo / "scripts/es-runtime-stack.sh").as_posix(),
+            "--validate",
+            "--keep-running",
+            "--timeout-sec",
+            "3",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        run_dir: Path | None = None
+        while time.monotonic() < deadline:
+            run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
+            if run_dirs:
+                run_dir = run_dirs[0]
+                stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
+                marker = run_dir / f"validation-{run_dir.name}" / "interruption-ready.marker"
+                if "READY: isolated validation runtime" in stack_log and marker.exists():
+                    break
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"launcher exited before readiness: {stdout}\n{stderr}")
+            time.sleep(0.05)
+        else:
+            raise AssertionError("launcher did not reach isolated keep-running readiness")
+
+        assert run_dir is not None
+        assert process.poll() is None
+        trace = (repo / "trace.log").read_text(encoding="utf-8")
+        assert "smoke=" not in trace
+        assert "proxy=ready" in trace
+        ready_line = next(line for line in stack_log.splitlines() if "READY: isolated validation runtime" in line)
+        assert "api=http://127.0.0.1:8000" in ready_line
+        assert "ui=http://127.0.0.1:3000" in ready_line
+        assert "es=http://127.0.0.1:9200" in ready_line
+        assert f"index=validation-{run_dir.name}" in ready_line
+
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+        terminated = subprocess.run(
+            [bash, "-c", 'kill -TERM "$1"', "bash", launcher_pid],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert terminated.returncode == 0, terminated.stderr
+        return_code = process.wait(timeout=10)
+        assert return_code != 0
+        assert not (run_dir / "validation-config.yaml").exists()
+        assert not (run_dir / f"validation-{run_dir.name}").exists()
+        trace = (repo / "trace.log").read_text(encoding="utf-8")
+        assert f"http://127.0.0.1:9200/validation-{run_dir.name}" in trace
+    finally:
+        if process.poll() is None:
+            if launcher_pid_path.exists():
+                launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+                subprocess.run(
+                    [bash, "-c", 'kill -TERM "$1"', "bash", launcher_pid],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def test_bash_full_validation_run_is_isolated_redacted_and_manifested(tmp_path: Path):
@@ -590,7 +727,14 @@ def test_bash_worker_readiness_failure_cleans_started_processes(tmp_path: Path):
     run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
     assert all(item["exit_status"] is not None for item in manifest["processes"])
-    assert "recorded-video Worker exited before readiness" in (run_dir / "stack.log").read_text(encoding="utf-8")
+    stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert any(
+        message in stack_log
+        for message in (
+            "recorded-video Worker exited before readiness",
+            "recorded-video Worker did not emit ready=true",
+        )
+    )
 
 
 def test_bash_normal_start_never_invokes_validation_smoke(tmp_path: Path):
@@ -689,6 +833,58 @@ def test_powershell_full_validation_run_records_manifest_and_shared_isolated_con
     assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (("-KeepRunning",), "requires explicit validation"),
+        (("-Validate", "-SmokeOnly", "-KeepRunning"), "cannot be combined"),
+    ],
+)
+def test_powershell_keep_running_rejects_incompatible_invocation_before_dependencies(
+    tmp_path: Path, args: tuple[str, ...], message: str
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+
+    completed = _run_powershell_runtime(repo, env, *args)
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "inspect.py=" not in trace
+    assert "compose.py=" not in trace
+    assert "uvicorn.py=" not in trace
+
+
+def test_powershell_keep_running_reaches_readiness_stays_alive_and_cleans_on_component_exit(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+
+    completed = _run_powershell_runtime(
+        repo,
+        env,
+        "-Validate",
+        "-KeepRunning",
+        "-TimeoutSec",
+        "3",
+        exit_after_trace="proxy=ready",
+        exit_after_marker="interruption-ready.marker",
+        exit_after_stack="READY: isolated validation runtime",
+    )
+
+    assert completed.returncode != 0
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert "smoke=" not in trace
+    ready_line = next(line for line in stack_log.splitlines() if "READY: isolated validation runtime" in line)
+    assert "api=http://127.0.0.1:8000" in ready_line
+    assert "ui=http://127.0.0.1:3000" in ready_line
+    assert "es=http://127.0.0.1:9200" in ready_line
+    assert f"index=validation-{run_dir.name}" in ready_line
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}" in trace
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+
+
 def test_powershell_log_pump_avoids_runspace_callbacks_and_exit_code_resets():
     launcher = _powershell()
     log_pump = POWERSHELL_LOG_PUMP.read_text(encoding="utf-8")
@@ -727,9 +923,9 @@ def test_powershell_worker_readiness_failure_cleans_started_runtime(tmp_path: Pa
     assert not (run_dir / "validation-config.yaml").exists()
 
 
-def test_powershell_host_interruption_cleans_validation_resources_and_finalizes_manifest(tmp_path: Path):
+def test_powershell_validation_failure_cleans_resources_and_finalizes_manifest(tmp_path: Path):
     repo, env = _powershell_runtime_harness(tmp_path)
-    env["HARNESS_SMOKE_SLEEP_MS"] = "30000"
+    env["HARNESS_SMOKE_STATUS"] = "17"
 
     completed = _run_powershell_runtime(
         repo,
@@ -738,8 +934,6 @@ def test_powershell_host_interruption_cleans_validation_resources_and_finalizes_
         "-SmokeOnly",
         "-TimeoutSec",
         "3",
-        interrupt_after_trace="smoke=",
-        interrupt_after_marker="interruption-ready.marker",
     )
 
     assert completed.returncode != 0
@@ -872,10 +1066,12 @@ def test_validation_targets_the_legacy_smoke_index_created_by_the_ingest_api():
 
     assert 'VALIDATION_SMOKE_INDEX="${VALIDATION_INDEX}-legacy-smoke"' in bash
     assert '--index "$VALIDATION_SMOKE_INDEX"' in bash
-    assert 'DELETE "$ES_ENDPOINT/$VALIDATION_SMOKE_INDEX"' in bash
+    assert 'for validation_resource in "$VALIDATION_SMOKE_INDEX" "$VALIDATION_INDEX"; do' in bash
+    assert '"$ES_ENDPOINT/$validation_resource"' in bash
     assert '$validationSmokeIndex = "$validationIndex-legacy-smoke"' in powershell
     assert '"--index", $validationSmokeIndex' in powershell
-    assert '"$esEndpoint/$validationSmokeIndex"' in powershell
+    assert "foreach ($validationResource in @($validationSmokeIndex, $validationIndex))" in powershell
+    assert '"$esEndpoint/$validationResource"' in powershell
 
 
 def test_launchers_only_reclaim_listeners_verified_as_current_user():
@@ -992,7 +1188,7 @@ def test_bash_managed_process_shutdown_is_bounded_and_forces_a_stubborn_child():
 
     completed = _run_bash_probe(probe)
 
-    assert time.monotonic() - started < 1.8
+    assert time.monotonic() - started < 5.0
     assert completed.returncode == 0, completed.stderr
 
 

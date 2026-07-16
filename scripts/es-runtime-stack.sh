@@ -11,6 +11,8 @@ TIMEOUT_SEC=90
 STOP_ELASTICSEARCH=0
 SMOKE_ONLY=0
 VALIDATE=0
+EXPLICIT_VALIDATE=0
+KEEP_RUNNING=0
 PORT_TERMINATION_GRACE_SEC=5
 PROCESS_SHUTDOWN_GRACE_TICKS=10
 
@@ -26,6 +28,7 @@ Options:
   --index NAME               Production Elasticsearch alias. Default: vsa-video-embeddings
   --data-root PATH           Recorded-video data directory. Default: .runtime/recorded-video
   --validate                 Run an isolated validation and exit.
+  --keep-running             Keep an explicit isolated validation runtime alive.
   --smoke-only               Compatibility alias for --validate without starting the UI.
   --conda-env NAME           Run Python through conda run -n NAME.
   --timeout-sec SECONDS      Startup timeout. Default: 90
@@ -36,6 +39,7 @@ Options:
   -Index NAME                PowerShell-style alias for --index.
   -DataRoot PATH             PowerShell-style alias for --data-root.
   -Validate                  PowerShell-style alias for --validate.
+  -KeepRunning               PowerShell-style alias for --keep-running.
   -SmokeOnly                 PowerShell-style alias for --smoke-only.
   -CondaEnv NAME             PowerShell-style alias for --conda-env.
   -TimeoutSec SECONDS        PowerShell-style alias for --timeout-sec.
@@ -50,7 +54,8 @@ while [[ $# -gt 0 ]]; do
     --ui-port|-UiPort) UI_PORT="$2"; shift 2 ;;
     --index|-Index) INDEX="$2"; shift 2 ;;
     --data-root|-DataRoot) DATA_ROOT="$2"; shift 2 ;;
-    --validate|-Validate) VALIDATE=1; shift ;;
+    --validate|-Validate) VALIDATE=1; EXPLICIT_VALIDATE=1; shift ;;
+    --keep-running|-KeepRunning) KEEP_RUNNING=1; shift ;;
     --smoke-only|-SmokeOnly) SMOKE_ONLY=1; VALIDATE=1; shift ;;
     --conda-env|-CondaEnv) CONDA_ENV="$2"; shift 2 ;;
     --timeout-sec|-TimeoutSec) TIMEOUT_SEC="$2"; shift 2 ;;
@@ -59,6 +64,15 @@ while [[ $# -gt 0 ]]; do
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$KEEP_RUNNING" == "1" && "$SMOKE_ONLY" == "1" ]]; then
+  echo "ERROR: --keep-running cannot be combined with --smoke-only" >&2
+  exit 2
+fi
+if [[ "$KEEP_RUNNING" == "1" && "$EXPLICIT_VALIDATE" != "1" ]]; then
+  echo "ERROR: --keep-running requires explicit validation via --validate" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -518,11 +532,13 @@ stop_managed_process() {
 
 delete_validation_resources() {
   [[ "$VALIDATE" != "1" ]] && return 0
-  local failed=0
-  if ! curl -fsS -X DELETE "$ES_ENDPOINT/$VALIDATION_SMOKE_INDEX" >/dev/null 2>&1; then
-    log_stack_error "failed to remove validation index $VALIDATION_SMOKE_INDEX"
-    failed=1
-  fi
+  local failed=0 validation_resource
+  for validation_resource in "$VALIDATION_SMOKE_INDEX" "$VALIDATION_INDEX"; do
+    if ! curl -fsS -X DELETE --get --data-urlencode "ignore_unavailable=true" "$ES_ENDPOINT/$validation_resource" >/dev/null 2>&1; then
+      log_stack_error "failed to remove validation index $validation_resource"
+      failed=1
+    fi
+  done
   rm -rf -- "$VALIDATION_DATA_ROOT" || failed=1
   rm -f -- "$VALIDATION_CONFIG_PATH" "$CONFIG_PATH" || failed=1
   if [[ "$failed" == "0" ]]; then
@@ -666,11 +682,16 @@ if [[ "$SMOKE_ONLY" == "0" ]]; then
 fi
 
 if [[ "$VALIDATE" == "1" ]]; then # validation
-  log_stack "running isolated validation against $VALIDATION_INDEX"
-  smoke_args=(scripts/es_ingest_smoke.py --api-url "$API_URL" --es-endpoint "$ES_ENDPOINT" --index "$VALIDATION_SMOKE_INDEX" --video-id "runtime-validation-$RUN_ID" --insecure)
-  run_stack_command python_cmd "${smoke_args[@]}"
-  log_stack "PASS: ES runtime stack validation succeeded"
-  exit 0
+  if [[ "$KEEP_RUNNING" == "1" ]]; then
+    log_stack "READY: isolated validation runtime api=$API_URL ui=$UI_URL es=$ES_ENDPOINT index=$VALIDATION_INDEX"
+    wait_runtime_processes
+  else
+    log_stack "running isolated validation against $VALIDATION_INDEX"
+    smoke_args=(scripts/es_ingest_smoke.py --api-url "$API_URL" --es-endpoint "$ES_ENDPOINT" --index "$VALIDATION_SMOKE_INDEX" --video-id "runtime-validation-$RUN_ID" --insecure)
+    run_stack_command python_cmd "${smoke_args[@]}"
+    log_stack "PASS: ES runtime stack validation succeeded"
+    exit 0
+  fi
 fi # validation
 
 log_stack "PASS: ES recorded-video runtime stack is ready"
