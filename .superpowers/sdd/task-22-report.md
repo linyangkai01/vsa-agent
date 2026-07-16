@@ -54,3 +54,53 @@ PASS
 - `.superpowers/sdd/task-22-report.md`
 
 `frontend/original-ui/apps/nv-metropolis-bp-vss-ui/test-results/` 是本次运行产物，已清理且不会提交；未修改或删除 `.runtime/`。
+
+## Playwright review repair round 1 (2026-07-16)
+
+### Repaired behavior
+
+- The success flow no longer selects the first search result. It locates the MP4 and MKV cards independently by their exact uploaded filenames.
+- Each named card now proves its own thumbnail loaded, extracts the card's asset identity from the thumbnail URL, and waits for the VST resolver request for that same asset.
+- Each card also proves the modal title retains the filename identity, the rendered source matches the real resolver response (including the media fragment), and its own `Range: bytes=0-9` request returns HTTP 206, a valid `Content-Range`, and 10 bytes.
+- The cancellation flow parses and validates the non-empty `job_id` and `status_url` from the real `/complete` 202 response. It then waits for the progress-dialog `Processing` state committed together with that job id, installs the response waiter before clicking, and asserts the exact `/jobs/{job_id}/cancel` request plus the successful response body.
+- No Playwright route or API mocks were added.
+
+### RED and GREEN evidence
+
+RED static review failed with five expected findings:
+
+```text
+search result still selects .first()
+MP4/MKV are not validated independently by identity
+complete response body is not parsed
+cancel is not bound to returned job_id
+cancel response body is not asserted
+```
+
+After the repair, the same static review contract passed.
+
+```text
+static review contract passed
+
+npm --prefix frontend/original-ui run test:e2e --workspace nv-metropolis-bp-vss-ui -- recorded-video.spec.ts --list
+Total: 3 tests in 1 file (PASS)
+
+npx --yes --package typescript@5.9.3 tsc ... playwright.config.ts e2e/fixtures.ts e2e/recorded-video.spec.ts
+PASS
+
+npm --prefix frontend/original-ui run test --workspace nv-metropolis-bp-vss-ui
+85 passed, 1 Playwright-only placeholder skipped (PASS)
+
+npx prettier --check apps/nv-metropolis-bp-vss-ui/e2e/recorded-video.spec.ts
+PASS
+
+git diff --check
+PASS
+```
+
+### Gates not executable
+
+- Full E2E was not run because all three local prerequisites are absent: `docker` is not on PATH, `ffmpeg` is not on PATH, and the configured Playwright Chromium executable does not exist.
+- The app TypeScript 4.9 `typecheck` remains blocked before reaching the E2E files by the existing `zod/v4` declaration syntax incompatibility. The targeted TypeScript 5.9 check passed.
+- The app lint gate remains blocked by the existing ESLint 9 setup because no `eslint.config.js`, `.mjs`, or `.cjs` exists.
+- `.runtime/` was not read, modified, deleted, staged, or committed.
