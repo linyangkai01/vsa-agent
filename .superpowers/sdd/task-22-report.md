@@ -154,3 +154,54 @@ PASS (Windows LF-to-CRLF working-copy warning only)
 
 - Full Playwright E2E was not run and is not reported as passing: `docker` and `ffmpeg` are absent from PATH, and the local Playwright browser cache is absent.
 - The existing launcher/backend/validator/OpenSpec/plan/runtime files were not modified as part of this repair.
+
+## Playwright review repair round 3 (2026-07-16)
+
+### Repaired behavior
+
+- The cancellation test now installs a real page response listener before starting the upload action, so the first job-status poll cannot race ahead of test observation.
+- The listener buffers each real job-status GET response as its URL, HTTP status, and parsed body without assuming the eventual completion identity.
+- After `/complete` supplies the exact `asset_id`, `job_id`, and `status_url`, the test consumes either an already-buffered response or a later response only when it is HTTP 200, belongs to that exact asset/job, and reports `queued`, `running`, or `retry_wait`.
+- Listener cleanup runs in `finally`, including assertion and cancellation failure paths. The exact cancel waiter, click, request/response identity assertions, and UI assertions remain unchanged in scope.
+- No Playwright route or API mocks were added.
+
+### RED and GREEN evidence
+
+The round-3 read-only static contract failed against the round-2 implementation with all four expected findings:
+
+```text
+MISSING: collector listener precedes cancellation upload
+MISSING: buffers URL, HTTP status, and parsed body
+MISSING: consumes buffered-or-future exact cancellable job response
+MISSING: listener removed in finally
+static RED: 4 required constraints missing
+Exit 1
+```
+
+After the minimal cancellation-spec repair, the same static contract passed:
+
+```text
+PASS: collector listener precedes cancellation upload
+PASS: buffers URL, HTTP status, and parsed body
+PASS: consumes buffered-or-future exact cancellable job response
+PASS: listener removed in finally
+static contract passed
+```
+
+The lightweight gates also passed:
+
+```text
+npm --prefix frontend/original-ui run test:e2e --workspace nv-metropolis-bp-vss-ui -- recorded-video.spec.ts --list
+Total: 3 tests in 1 file (PASS)
+
+npx --yes --package typescript@5.9.3 tsc --noEmit --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck --types node,jest --typeRoots "node_modules/@types,apps/nv-metropolis-bp-vss-ui/node_modules/@types" apps/nv-metropolis-bp-vss-ui/playwright.config.ts apps/nv-metropolis-bp-vss-ui/e2e/fixtures.ts apps/nv-metropolis-bp-vss-ui/e2e/recorded-video.spec.ts
+PASS
+
+npm --prefix frontend/original-ui run test --workspace nv-metropolis-bp-vss-ui
+85 passed, 1 Playwright-only placeholder skipped (PASS)
+
+npx prettier --check apps/nv-metropolis-bp-vss-ui/e2e/recorded-video.spec.ts
+PASS
+```
+
+Full Playwright E2E was not retried because the previously documented local Docker, ffmpeg, and Chromium dependencies remain absent; this repair does not wait on or alter that environment.

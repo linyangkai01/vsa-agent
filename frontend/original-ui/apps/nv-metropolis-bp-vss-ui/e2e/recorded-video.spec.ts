@@ -293,54 +293,115 @@ if (process.env.JEST_WORKER_ID) {
     const media = await createRecordedVideoFixtures(testInfo.outputDir);
 
     await page.goto(runtimeBaseUrl);
-    const [complete] = await captureCompletedUploads(page, 1, () =>
-      chooseRecordedVideos(page, [media.cancelMkv])
-    );
-    expect(complete.filename).toBe(path.basename(media.cancelMkv));
-
-    const polled = page.waitForResponse(
-      (response) =>
-        response.request().method() === "GET" &&
-        new URL(response.url()).pathname === complete.statusUrl &&
-        response.status() === 200
-    );
-    const polledResponse = await polled;
-    expect(polledResponse.request().method()).toBe("GET");
-    expect(new URL(polledResponse.request().url()).pathname).toBe(
-      complete.statusUrl
-    );
-    expect(polledResponse.status()).toBe(200);
-    const pollPayload = (await polledResponse.json()) as {
-      asset_id?: unknown;
-      job_id?: unknown;
-      status?: unknown;
+    type JobStatusResponseEvidence = {
+      url: string;
+      statusCode: number;
+      body: {
+        asset_id?: unknown;
+        job_id?: unknown;
+        status?: unknown;
+      };
     };
-    expect(pollPayload.asset_id).toBe(complete.assetId);
-    expect(pollPayload.job_id).toBe(complete.jobId);
-    expect(["queued", "running", "retry_wait"]).toContain(pollPayload.status);
+    const bufferedJobStatusResponses: JobStatusResponseEvidence[] = [];
+    const pendingJobStatusResponses = new Set<Promise<void>>();
+    const collectJobStatusResponse = (response: Response) => {
+      if (
+        response.request().method() !== "GET" ||
+        !/^\/api\/v1\/jobs\/[^/]+$/.test(new URL(response.url()).pathname)
+      ) {
+        return;
+      }
 
-    const cancelled = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === `${complete.statusUrl}/cancel`
-    );
-    await page.getByRole("button", { name: "Cancel All" }).click();
-    const cancelledResponse = await cancelled;
-    expect(cancelledResponse.request().method()).toBe("POST");
-    expect(new URL(cancelledResponse.request().url()).pathname).toBe(
-      `${complete.statusUrl}/cancel`
-    );
-    expect(cancelledResponse.request().postData()).toBeNull();
-    expect(cancelledResponse.status()).toBe(200);
-    const cancelPayload = (await cancelledResponse.json()) as {
-      asset_id?: unknown;
-      job_id?: unknown;
-      status?: unknown;
+      const pendingResponse = (async () => {
+        try {
+          bufferedJobStatusResponses.push({
+            url: response.url(),
+            statusCode: response.status(),
+            body: await response.json(),
+          });
+        } catch {
+          // A non-JSON response cannot provide matching job-status evidence.
+        }
+      })();
+      pendingJobStatusResponses.add(pendingResponse);
+      void pendingResponse.then(() =>
+        pendingJobStatusResponses.delete(pendingResponse)
+      );
     };
-    expect(cancelPayload.asset_id).toBe(complete.assetId);
-    expect(cancelPayload.job_id).toBe(complete.jobId);
-    expect(["running", "cancelled"]).toContain(cancelPayload.status);
-    await expect(page.getByText("Cancelled")).toBeVisible();
-    await expect(page.getByText("1 cancelled")).toBeVisible();
+
+    page.on("response", collectJobStatusResponse);
+    try {
+      const [complete] = await captureCompletedUploads(page, 1, () =>
+        chooseRecordedVideos(page, [media.cancelMkv])
+      );
+      expect(complete.filename).toBe(path.basename(media.cancelMkv));
+
+      let polledResponse: JobStatusResponseEvidence | undefined;
+      await expect
+        .poll(
+          async () => {
+            await Promise.all(Array.from(pendingJobStatusResponses));
+            const matchingIndex = bufferedJobStatusResponses.findIndex(
+              ({ url, statusCode, body }) =>
+                new URL(url).pathname === complete.statusUrl &&
+                statusCode === 200 &&
+                body.asset_id === complete.assetId &&
+                body.job_id === complete.jobId &&
+                ["queued", "running", "retry_wait"].includes(
+                  body.status as string
+                )
+            );
+            if (matchingIndex >= 0) {
+              [polledResponse] = bufferedJobStatusResponses.splice(
+                matchingIndex,
+                1
+              );
+            }
+            return polledResponse !== undefined;
+          },
+          { timeout: 120_000 }
+        )
+        .toBe(true);
+      if (!polledResponse) {
+        throw new Error("Matching cancellable job status was not captured");
+      }
+
+      expect(new URL(polledResponse.url).pathname).toBe(complete.statusUrl);
+      expect(polledResponse.statusCode).toBe(200);
+      const pollPayload = polledResponse.body as {
+        asset_id?: unknown;
+        job_id?: unknown;
+        status?: unknown;
+      };
+      expect(pollPayload.asset_id).toBe(complete.assetId);
+      expect(pollPayload.job_id).toBe(complete.jobId);
+      expect(["queued", "running", "retry_wait"]).toContain(pollPayload.status);
+
+      const cancelled = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === `${complete.statusUrl}/cancel`
+      );
+      await page.getByRole("button", { name: "Cancel All" }).click();
+      const cancelledResponse = await cancelled;
+      expect(cancelledResponse.request().method()).toBe("POST");
+      expect(new URL(cancelledResponse.request().url()).pathname).toBe(
+        `${complete.statusUrl}/cancel`
+      );
+      expect(cancelledResponse.request().postData()).toBeNull();
+      expect(cancelledResponse.status()).toBe(200);
+      const cancelPayload = (await cancelledResponse.json()) as {
+        asset_id?: unknown;
+        job_id?: unknown;
+        status?: unknown;
+      };
+      expect(cancelPayload.asset_id).toBe(complete.assetId);
+      expect(cancelPayload.job_id).toBe(complete.jobId);
+      expect(["running", "cancelled"]).toContain(cancelPayload.status);
+      await expect(page.getByText("Cancelled")).toBeVisible();
+      await expect(page.getByText("1 cancelled")).toBeVisible();
+    } finally {
+      page.off("response", collectJobStatusResponse);
+    }
   });
 }
