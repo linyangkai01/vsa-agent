@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sqlite3
 import sys
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +20,7 @@ from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+import yaml
 
 REPORT_FIELDS = ("runtime", "job_stages", "provider", "es", "search", "media", "delete")
 REQUIRED_STAGES = (
@@ -44,12 +48,13 @@ class ValidationOptions:
     api_url: str
     ui_url: str
     report: Path
+    config: Path
     data_root: Path
     video: Path
     query: str
     timeout_seconds: float = 600.0
     poll_interval_seconds: float = 1.0
-    minimum_similarity: float = 0.0
+    minimum_similarity: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -70,11 +75,44 @@ class StageEvidence:
 
 @dataclass(frozen=True)
 class SearchEvidence:
+    segment_id: str
     description: str
     start_time: str
     end_time: str
     screenshot_url: str
     similarity: float
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    active_profile: str
+    vision_model: str
+    vision_host: str
+    embedding_model: str
+    embedding_host: str
+    es_endpoint: str
+    index: str
+    allow_mock_fallback: bool
+    force_mock_embedding: bool
+
+
+@dataclass(frozen=True)
+class SegmentIdentity:
+    segment_id: str
+    asset_id: str
+    job_id: str
+    sensor_id: str
+    video_name: str
+    start_time: str
+    end_time: str
+
+
+@dataclass(frozen=True)
+class ESEvidence:
+    endpoint: str
+    index: str
+    document_count: int
+    segments: tuple[SegmentIdentity, ...]
 
 
 class ValidationError(RuntimeError):
@@ -88,15 +126,97 @@ def _fail(field: str, message: str) -> None:
     raise ValidationError(field, message)
 
 
+def _mapping(value: object, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        _fail("runtime", f"active config 缺少 {label} 对象")
+    return value
+
+
+def _required_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        _fail("runtime", f"active config 缺少 {label}")
+    return value.strip()
+
+
+def _provider_identity(
+    role_name: str,
+    role: object,
+    backends: dict[str, Any],
+) -> tuple[str, str]:
+    role_config = _mapping(role, f"profile.{role_name}")
+    backend_name = _required_text(role_config.get("backend"), f"profile.{role_name}.backend")
+    model = _required_text(role_config.get("model"), f"profile.{role_name}.model")
+    backend = _mapping(backends.get(backend_name), f"backends.{backend_name}")
+    base_url = _required_text(backend.get("base_url"), f"backends.{backend_name}.base_url")
+    try:
+        parsed = urlsplit(base_url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        _fail("runtime", f"{role_name} provider base_url 无效")
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        _fail("runtime", f"{role_name} provider base_url 无效")
+    return model, host if port is None else f"{host}:{port}"
+
+
+def _load_runtime_config(path: Path) -> RuntimeConfig:
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        _fail("runtime", "active config 不可读取或 YAML 无效")
+    root = _mapping(document, "root")
+    active_profile = _required_text(root.get("active_profile"), "active_profile")
+    profiles = _mapping(root.get("profiles"), "profiles")
+    profile = _mapping(profiles.get(active_profile), f"profiles.{active_profile}")
+    backends = _mapping(root.get("backends"), "backends")
+    vision_model, vision_host = _provider_identity("vlm", profile.get("vlm"), backends)
+    embedding_model, embedding_host = _provider_identity("embedding", profile.get("embedding"), backends)
+    search = _mapping(root.get("search"), "search")
+    if search.get("enabled") is not True:
+        _fail("runtime", "production search 必须启用")
+    allow_mock_fallback = search.get("allow_mock_fallback") is True
+    force_mock_embedding = search.get("force_mock_embedding") is True
+    if allow_mock_fallback or force_mock_embedding:
+        _fail("runtime", "production validation requires mock fallback and mock embedding to be disabled")
+    es_endpoint = _normalize_base_url(
+        _required_text(search.get("es_endpoint"), "search.es_endpoint"),
+        "search.es_endpoint",
+    )
+    index = _required_text(search.get("embed_index"), "search.embed_index")
+    if not re.fullmatch(r"[a-z0-9._-]+", index):
+        _fail("runtime", "search.embed_index 格式无效")
+    return RuntimeConfig(
+        active_profile=active_profile,
+        vision_model=vision_model,
+        vision_host=vision_host,
+        embedding_model=embedding_model,
+        embedding_host=embedding_host,
+        es_endpoint=es_endpoint,
+        index=index,
+        allow_mock_fallback=allow_mock_fallback,
+        force_mock_embedding=force_mock_embedding,
+    )
+
+
+def _runtime_config_summary(config: RuntimeConfig) -> str:
+    return (
+        f"profile={config.active_profile}; vision={config.vision_model}@{config.vision_host}; "
+        f"embedding={config.embedding_model}@{config.embedding_host}; "
+        f"es={config.es_endpoint}/{config.index}; mock_fallback=false; mock_embedding=false"
+    )
+
+
 def _normalize_base_url(value: str, label: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         _fail("runtime", f"{label} 必须是不含凭据的绝对 HTTP(S) URL")
     if parsed.query or parsed.fragment:
         _fail("runtime", f"{label} 不得包含查询参数或片段")
-    netloc = parsed.hostname
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError:
+        _fail("runtime", f"{label} 端口无效")
+    netloc = parsed.hostname if port is None else f"{parsed.hostname}:{port}"
     return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
@@ -135,7 +255,7 @@ def _json_object(field: str, operation: str, response: httpx.Response) -> dict[s
     return payload
 
 
-def _check_runtime(options: ValidationOptions, client: HttpClient) -> tuple[str, str]:
+def _check_runtime(options: ValidationOptions, client: HttpClient) -> tuple[str, str, RuntimeConfig]:
     api_url = _normalize_base_url(options.api_url, "api-url")
     ui_url = _normalize_base_url(options.ui_url, "ui-url")
     if not options.video.is_file() or options.video.stat().st_size <= 0:
@@ -145,6 +265,7 @@ def _check_runtime(options: ValidationOptions, client: HttpClient) -> tuple[str,
     database_path = options.data_root / "recorded-video.sqlite3"
     if not options.data_root.is_dir() or not database_path.is_file():
         _fail("runtime", "验证数据根目录或 SQLite 状态库不可用")
+    runtime_config = _load_runtime_config(options.config)
 
     health = _request("runtime", "API readiness", client.get, f"{api_url}/health")
     _require_status("runtime", "API readiness", health, {200})
@@ -161,7 +282,7 @@ def _check_runtime(options: ValidationOptions, client: HttpClient) -> tuple[str,
         f"{ui_url}/api/v1/vst/v1/replay/streams",
     )
     _require_status("runtime", "UI same-origin proxy readiness", proxy, {200})
-    return api_url, ui_url
+    return api_url, ui_url, runtime_config
 
 
 def _upload_and_complete(
@@ -253,7 +374,7 @@ def _upload_and_complete(
 def _read_stage_evidence(data_root: Path, job_id: str) -> list[StageEvidence]:
     database_path = data_root / "recorded-video.sqlite3"
     try:
-        with sqlite3.connect(database_path) as connection:
+        with _readonly_database(database_path) as connection:
             rows = connection.execute(
                 """
                 SELECT stage, status, output_manifest, output_checksum, model, elapsed_ms
@@ -267,6 +388,17 @@ def _read_stage_evidence(data_root: Path, job_id: str) -> list[StageEvidence]:
     evidence = [StageEvidence(*row) for row in rows]
     evidence.sort(key=lambda item: order.get(item.stage, len(order)))
     return evidence
+
+
+@contextmanager
+def _readonly_database(path: Path) -> Iterator[sqlite3.Connection]:
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        yield connection
+    finally:
+        connection.close()
 
 
 def _check_job_stages(data_root: Path, job_id: str, observed: list[str]) -> list[StageEvidence]:
@@ -295,12 +427,83 @@ def _check_provider(evidence: list[StageEvidence]) -> str:
     return f"vision={vision_model}; embedding={embedding_model}"
 
 
-def _check_es(evidence: list[StageEvidence]) -> None:
+def _check_es_checkpoints(evidence: list[StageEvidence]) -> None:
     by_stage = {item.stage: item for item in evidence}
     for stage in ("indexing", "publish"):
         checkpoint = by_stage[stage]
         if checkpoint.status != "completed" or not checkpoint.output_checksum:
             _fail("es", f"Elasticsearch {stage} checkpoint 未完成")
+
+
+def _check_es(
+    config: RuntimeConfig,
+    client: HttpClient,
+    asset_id: str,
+    job_id: str,
+) -> ESEvidence:
+    index_url = f"{config.es_endpoint}/{config.index}"
+    refreshed = _request("es", "Elasticsearch refresh", client.post, f"{index_url}/_refresh")
+    _require_status("es", "Elasticsearch refresh", refreshed, {200})
+    refresh_payload = _json_object("es", "Elasticsearch refresh", refreshed)
+    shards = refresh_payload.get("_shards")
+    if not isinstance(shards, dict) or shards.get("failed") != 0:
+        _fail("es", "Elasticsearch refresh shard outcome 不完整或失败")
+
+    response = _request(
+        "es",
+        "Elasticsearch identity query",
+        client.post,
+        f"{index_url}/_search",
+        json={
+            "size": 1000,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"asset_id": asset_id}},
+                        {"term": {"job_id": job_id}},
+                    ]
+                }
+            },
+        },
+    )
+    _require_status("es", "Elasticsearch identity query", response, {200})
+    payload = _json_object("es", "Elasticsearch identity query", response)
+    hits_container = payload.get("hits")
+    if not isinstance(hits_container, dict) or not isinstance(hits_container.get("hits"), list):
+        _fail("es", "Elasticsearch identity query response 无效")
+    raw_hits = hits_container["hits"]
+    if not raw_hits:
+        _fail("es", "Elasticsearch identity query 未命中验证资产")
+    segments: list[SegmentIdentity] = []
+    for hit in raw_hits:
+        if not isinstance(hit, dict) or not isinstance(hit.get("_source"), dict):
+            _fail("es", "Elasticsearch segment hit 结构无效")
+        source = hit["_source"]
+        segment_id = source.get("segment_id")
+        identity_values = {
+            "segment_id": segment_id,
+            "asset_id": source.get("asset_id"),
+            "job_id": source.get("job_id"),
+            "sensor_id": source.get("sensor_id"),
+            "video_name": source.get("video_name"),
+            "start_time": source.get("start_time"),
+            "end_time": source.get("end_time"),
+        }
+        if any(not isinstance(value, str) or not value for value in identity_values.values()):
+            _fail("es", "Elasticsearch segment identity 字段不完整")
+        if hit.get("_id") != segment_id:
+            _fail("es", "Elasticsearch _id 与 segment_id 不一致")
+        if source.get("asset_id") != asset_id or source.get("job_id") != job_id:
+            _fail("es", "Elasticsearch asset/job identity 不一致")
+        if source.get("sensor_id") != asset_id:
+            _fail("es", "Elasticsearch sensor/asset identity 不一致")
+        segments.append(SegmentIdentity(**identity_values))
+    return ESEvidence(
+        endpoint=config.es_endpoint,
+        index=config.index,
+        document_count=len(segments),
+        segments=tuple(segments),
+    )
 
 
 def _search(client: HttpClient, api_url: str, query: str, field: str) -> list[dict[str, Any]]:
@@ -330,6 +533,7 @@ def _check_search(
     client: HttpClient,
     api_url: str,
     asset_id: str,
+    es_evidence: ESEvidence,
 ) -> SearchEvidence:
     matches = [item for item in _search(client, api_url, options.query, "search") if item.get("sensor_id") == asset_id]
     if not matches:
@@ -339,15 +543,52 @@ def _check_search(
     start_time = match.get("start_time")
     end_time = match.get("end_time")
     screenshot_url = match.get("screenshot_url")
+    video_name = match.get("video_name")
     try:
         similarity = float(match.get("similarity"))
     except (TypeError, ValueError):
         _fail("search", "搜索结果缺少有效相似度")
+    if not math.isfinite(similarity) or not 0.0 <= similarity <= 1.0:
+        _fail("search", "搜索结果相似度超出有效范围")
     if similarity < options.minimum_similarity:
         _fail("search", f"搜索质量低于阈值 {options.minimum_similarity:.3f}")
+    if video_name != options.video.name:
+        _fail("search", "搜索结果 video_name 与验证视频不一致")
     if not all(isinstance(value, str) and value for value in (description, start_time, end_time, screenshot_url)):
         _fail("search", "搜索结果缺少 segment 描述、时间或缩略图 identity")
-    return SearchEvidence(description, start_time, end_time, screenshot_url, similarity)
+    start = _parse_search_time(start_time, "start_time")
+    end = _parse_search_time(end_time, "end_time")
+    if start >= end:
+        _fail("search", "搜索结果时间范围必须满足 start_time < end_time")
+    matching_segments = [
+        segment
+        for segment in es_evidence.segments
+        if segment.asset_id == asset_id
+        and segment.sensor_id == asset_id
+        and segment.video_name == video_name
+        and segment.start_time == start_time
+        and segment.end_time == end_time
+    ]
+    if len(matching_segments) != 1:
+        _fail("search", "搜索 asset/sensor/time identity 无法对应唯一 Elasticsearch segment_id")
+    return SearchEvidence(
+        matching_segments[0].segment_id,
+        description,
+        start_time,
+        end_time,
+        screenshot_url,
+        similarity,
+    )
+
+
+def _parse_search_time(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        _fail("search", f"搜索结果 {label} 不是合法 ISO 时间")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        _fail("search", f"搜索结果 {label} 缺少时区")
+    return parsed
 
 
 def _check_media(client: HttpClient, api_url: str, asset_id: str, search: SearchEvidence) -> None:
@@ -373,30 +614,60 @@ def _check_media(client: HttpClient, api_url: str, asset_id: str, search: Search
         _fail("media", "HTTP 206 未返回一个字节")
 
 
-def _database_cleanup_complete(data_root: Path, asset_id: str) -> bool:
+def _database_cleanup_complete(data_root: Path, asset_id: str, job_id: str | None) -> bool:
     database_path = data_root / "recorded-video.sqlite3"
     try:
-        with sqlite3.connect(database_path) as connection:
+        with _readonly_database(database_path) as connection:
             asset = connection.execute(
                 "SELECT status, deleted_at FROM assets WHERE asset_id = ?",
                 (asset_id,),
             ).fetchone()
             jobs = connection.execute("SELECT COUNT(*) FROM jobs WHERE asset_id = ?", (asset_id,)).fetchone()[0]
             segments = connection.execute("SELECT COUNT(*) FROM segments WHERE asset_id = ?", (asset_id,)).fetchone()[0]
-            steps = connection.execute(
-                "SELECT COUNT(*) FROM job_steps WHERE job_id IN (SELECT job_id FROM jobs WHERE asset_id = ?)",
-                (asset_id,),
-            ).fetchone()[0]
+            steps = (
+                connection.execute(
+                    "SELECT COUNT(*) FROM job_steps WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()[0]
+                if job_id is not None
+                else 0
+            )
     except sqlite3.Error:
         return False
     return asset is not None and asset[0] == "deleted" and asset[1] is not None and jobs == segments == steps == 0
+
+
+def _check_es_asset_deleted(config: RuntimeConfig, client: HttpClient, asset_id: str) -> None:
+    index_url = f"{config.es_endpoint}/{config.index}"
+    refreshed = _request("delete", "Elasticsearch delete refresh", client.post, f"{index_url}/_refresh")
+    _require_status("delete", "Elasticsearch delete refresh", refreshed, {200})
+    refresh_payload = _json_object("delete", "Elasticsearch delete refresh", refreshed)
+    shards = refresh_payload.get("_shards")
+    if not isinstance(shards, dict) or shards.get("failed") != 0:
+        _fail("delete", "Elasticsearch delete refresh shard outcome 不完整或失败")
+    response = _request(
+        "delete",
+        "Elasticsearch delete identity query",
+        client.post,
+        f"{index_url}/_search",
+        json={"size": 1, "query": {"term": {"asset_id": asset_id}}},
+    )
+    _require_status("delete", "Elasticsearch delete identity query", response, {200})
+    payload = _json_object("delete", "Elasticsearch delete identity query", response)
+    hits = payload.get("hits")
+    if not isinstance(hits, dict) or not isinstance(hits.get("hits"), list):
+        _fail("delete", "Elasticsearch delete identity query response 无效")
+    if hits["hits"]:
+        _fail("delete", "删除后 Elasticsearch 仍保留验证资产 identity")
 
 
 def _delete_and_confirm(
     options: ValidationOptions,
     client: HttpClient,
     api_url: str,
+    config: RuntimeConfig,
     asset_id: str,
+    job_id: str | None,
 ) -> None:
     deadline = time.monotonic() + options.timeout_seconds
     delete_url = f"{api_url}/api/v1/videos/{asset_id}"
@@ -410,11 +681,7 @@ def _delete_and_confirm(
             _fail("delete", "删除验证资产在超时前未完成")
         time.sleep(options.poll_interval_seconds)
 
-    remaining = [
-        item for item in _search(client, api_url, options.query, "delete") if item.get("sensor_id") == asset_id
-    ]
-    if remaining:
-        _fail("delete", "删除后 Elasticsearch 搜索仍返回验证资产")
+    _check_es_asset_deleted(config, client, asset_id)
     media = _request(
         "delete",
         "删除后媒体确认",
@@ -424,7 +691,7 @@ def _delete_and_confirm(
     )
     if media.status_code not in {404, 410}:
         _fail("delete", f"删除后媒体仍可访问（HTTP {media.status_code}）")
-    if not _database_cleanup_complete(options.data_root, asset_id):
+    if not _database_cleanup_complete(options.data_root, asset_id, job_id):
         _fail("delete", "删除后 SQLite job/segment/tombstone 清理不完整")
 
 
@@ -454,7 +721,11 @@ def _report_url(value: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return "invalid"
-    netloc = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError:
+        return "invalid"
+    netloc = parsed.hostname if port is None else f"{parsed.hostname}:{port}"
     return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
@@ -462,16 +733,19 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
     results = {field: StepResult("FAIL", "未执行：前置验证尚未完成。") for field in REPORT_FIELDS}
     current_field = "runtime"
     asset_id: str | None = None
+    job_id: str | None = None
+    runtime_config: RuntimeConfig | None = None
     created_assets: list[str] = []
     owned_client = client is None
     http_client: HttpClient = client or httpx.Client(timeout=options.timeout_seconds, follow_redirects=False)
     api_url = _report_url(options.api_url)
     failure: ValidationError | None = None
     try:
-        api_url, _ = _check_runtime(options, http_client)
+        api_url, _, runtime_config = _check_runtime(options, http_client)
         results["runtime"] = StepResult(
             "PASS",
-            "API、原版 UI 与 UI 同源代理 readiness 通过；本地 SQLite 与验证视频可读。",
+            "API、原版 UI 与 UI 同源代理 readiness 通过；本地 SQLite 与验证视频可读；"
+            f"{_runtime_config_summary(runtime_config)}。",
         )
 
         current_field = "job_stages"
@@ -488,12 +762,21 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
         results["provider"] = StepResult("PASS", f"真实 provider checkpoints 完成：{provider_detail}。")
 
         current_field = "es"
-        _check_es(stages)
-        results["es"] = StepResult("PASS", "indexing 与 publish checkpoints 均完成并包含 checksum。")
+        _check_es_checkpoints(stages)
+        es_evidence = _check_es(runtime_config, http_client, asset_id, job_id)
+        results["es"] = StepResult(
+            "FAIL",
+            "真实 Elasticsearch identity query 已命中，但原版业务搜索 identity 尚未确认。",
+        )
 
         current_field = "search"
-        search = _check_search(options, http_client, api_url, asset_id)
-        segment_identity = f"{asset_id}|{search.start_time}|{search.end_time}"
+        search = _check_search(options, http_client, api_url, asset_id, es_evidence)
+        results["es"] = StepResult(
+            "PASS",
+            "indexing/publish checkpoints、真实 Elasticsearch 调用与业务搜索 identity 均通过；"
+            f"endpoint={es_evidence.endpoint}; index={es_evidence.index}; documents={es_evidence.document_count}。",
+        )
+        segment_identity = f"{asset_id}|{search.segment_id}|{search.start_time}|{search.end_time}"
         results["search"] = StepResult(
             "PASS",
             f"语义查询命中验证资产；segment identity={segment_identity}；similarity={search.similarity:.3f}。",
@@ -514,9 +797,9 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
             results[field] = StepResult("FAIL", f"未执行：受 {current_field} 失败阻断。")
     finally:
         cleanup_asset_id = asset_id or (created_assets[-1] if created_assets else None)
-        if cleanup_asset_id is not None:
+        if cleanup_asset_id is not None and runtime_config is not None:
             try:
-                _delete_and_confirm(options, http_client, api_url, cleanup_asset_id)
+                _delete_and_confirm(options, http_client, api_url, runtime_config, cleanup_asset_id, job_id)
                 results["delete"] = StepResult("PASS", "ES、媒体和 SQLite 生命周期数据均已清理，资产仅保留 tombstone。")
             except ValidationError as exc:
                 results["delete"] = StepResult("FAIL", exc.message)
@@ -527,7 +810,12 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
         if owned_client:
             close = getattr(http_client, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except Exception as exc:
+                    close_failure = ValidationError("runtime", f"HTTP client 关闭失败（{type(exc).__name__}）")
+                    results["runtime"] = StepResult("FAIL", close_failure.message)
+                    failure = failure or close_failure
         try:
             _write_report(options, results)
         except OSError as exc:
@@ -542,12 +830,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-url", required=True, help="Loopback FastAPI base URL")
     parser.add_argument("--ui-url", required=True, help="Loopback original UI base URL")
     parser.add_argument("--report", required=True, type=Path, help="Markdown evidence report path")
+    parser.add_argument("--config", default=os.getenv("VSA_CONFIG", "config.yaml"), type=Path)
     parser.add_argument("--data-root", default=os.getenv("VSA_RECORDED_VIDEO_DATA_ROOT", ""), type=Path)
     parser.add_argument("--video", default=os.getenv("VSA_VALIDATION_VIDEO", ""), type=Path)
     parser.add_argument("--query", default=os.getenv("VSA_VALIDATION_QUERY", ""))
     parser.add_argument("--timeout", dest="timeout_seconds", type=float, default=600.0)
     parser.add_argument("--poll-interval", dest="poll_interval_seconds", type=float, default=1.0)
-    parser.add_argument("--minimum-similarity", type=float, default=0.0)
+    parser.add_argument("--minimum-similarity", type=float, default=0.2)
     return parser
 
 
@@ -563,6 +852,7 @@ def main(argv: list[str] | None = None) -> int:
         api_url=args.api_url,
         ui_url=args.ui_url,
         report=args.report,
+        config=args.config,
         data_root=args.data_root,
         video=args.video,
         query=args.query,

@@ -10,6 +10,7 @@ from types import ModuleType
 from typing import Any
 
 import httpx
+import pytest
 
 SCRIPT_PATH = Path(__file__).parents[3] / "scripts" / "recorded-video-validate.py"
 
@@ -27,10 +28,24 @@ validator = _load_script()
 
 
 class FakeClient:
-    def __init__(self, data_root: Path, *, media_status: int = 206, upload_status: int = 200) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        media_status: int = 206,
+        upload_status: int = 200,
+        es_status: int = 200,
+        leave_orphan_steps: bool = False,
+        retain_es_document: bool = False,
+        search_overrides: dict[str, Any] | None = None,
+    ) -> None:
         self.data_root = data_root
         self.media_status = media_status
         self.upload_status = upload_status
+        self.es_status = es_status
+        self.leave_orphan_steps = leave_orphan_steps
+        self.retain_es_document = retain_es_document
+        self.search_overrides = search_overrides or {}
         self.requests: list[tuple[str, str]] = []
         self.deleted = False
 
@@ -70,6 +85,28 @@ class FakeClient:
 
     def post(self, url: str, **_kwargs: Any) -> httpx.Response:
         self.requests.append(("POST", url))
+        if url == "http://es.test/validation-index/_refresh":
+            return _response(self.es_status, {"_shards": {"failed": 0}})
+        if url == "http://es.test/validation-index/_search":
+            if self.es_status != 200:
+                return _response(self.es_status, {"error": "unavailable"})
+            hits = []
+            if not self.deleted or self.retain_es_document:
+                hits = [
+                    {
+                        "_id": "segment-1",
+                        "_source": {
+                            "asset_id": "asset-1",
+                            "job_id": "job-1",
+                            "segment_id": "segment-1",
+                            "sensor_id": "asset-1",
+                            "video_name": "validation.mp4",
+                            "start_time": "2026-07-15T00:00:00Z",
+                            "end_time": "2026-07-15T00:00:01Z",
+                        },
+                    }
+                ]
+            return _response(200, {"hits": {"total": {"value": len(hits)}, "hits": hits}})
         if url == "http://api.test/api/v1/videos":
             return _response(
                 200,
@@ -97,21 +134,19 @@ class FakeClient:
         if url == "http://api.test/api/v1/search":
             if self.deleted:
                 return _response(200, {"data": []})
+            result = {
+                "video_name": "validation.mp4",
+                "description": "forklift near worker",
+                "start_time": "2026-07-15T00:00:00Z",
+                "end_time": "2026-07-15T00:00:01Z",
+                "sensor_id": "asset-1",
+                "screenshot_url": "/thumb.jpg",
+                "similarity": 0.91,
+            }
+            result.update(self.search_overrides)
             return _response(
                 200,
-                {
-                    "data": [
-                        {
-                            "video_name": "validation.mp4",
-                            "description": "forklift near worker",
-                            "start_time": "2026-07-15T00:00:00Z",
-                            "end_time": "2026-07-15T00:00:01Z",
-                            "sensor_id": "asset-1",
-                            "screenshot_url": "/thumb.jpg",
-                            "similarity": 0.91,
-                        }
-                    ]
-                },
+                {"data": [result]},
             )
         raise AssertionError(f"unexpected POST {url}")
 
@@ -120,7 +155,8 @@ class FakeClient:
         assert url == "http://api.test/api/v1/videos/asset-1"
         self.deleted = True
         with sqlite3.connect(self.data_root / "recorded-video.sqlite3") as connection:
-            connection.execute("DELETE FROM job_steps WHERE job_id = 'job-1'")
+            if not self.leave_orphan_steps:
+                connection.execute("DELETE FROM job_steps WHERE job_id = 'job-1'")
             connection.execute("DELETE FROM segments WHERE asset_id = 'asset-1'")
             connection.execute("DELETE FROM jobs WHERE job_id = 'job-1'")
             connection.execute("UPDATE assets SET status = 'deleted', deleted_at = 'now' WHERE asset_id = 'asset-1'")
@@ -177,11 +213,187 @@ def _runtime(tmp_path: Path, *, media_status: int = 206):
 NULL = None
 
 
+def _write_config(tmp_path: Path, *, allow_mock_fallback: bool = False) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        f"""
+active_profile: production
+backends:
+  vision:
+    provider: openai_compatible
+    base_url: https://vision.example.test/v1
+    api_key_env: VISION_API_KEY
+    api_key: do-not-record-this
+  embedding:
+    provider: openai_compatible
+    base_url: https://embedding.example.test/v1
+    api_key_env: EMBEDDING_API_KEY
+profiles:
+  production:
+    vlm:
+      backend: vision
+      model: vision-model
+    embedding:
+      backend: embedding
+      model: embedding-model
+search:
+  enabled: true
+  es_endpoint: http://es.test
+  embed_index: validation-index
+  allow_mock_fallback: {str(allow_mock_fallback).lower()}
+  force_mock_embedding: false
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_runtime_config_summary_is_production_only_and_never_records_keys(tmp_path: Path) -> None:
+    config = validator._load_runtime_config(_write_config(tmp_path))
+
+    summary = validator._runtime_config_summary(config)
+
+    assert config.es_endpoint == "http://es.test"
+    assert config.index == "validation-index"
+    assert "profile=production" in summary
+    assert "vision=vision-model@vision.example.test" in summary
+    assert "embedding=embedding-model@embedding.example.test" in summary
+    assert "mock_fallback=false" in summary
+    assert "API_KEY" not in summary
+    assert "do-not-record-this" not in summary
+
+    with pytest.raises(validator.ValidationError, match="mock fallback"):
+        validator._load_runtime_config(_write_config(tmp_path / "mock", allow_mock_fallback=True))
+
+
+def test_es_evidence_refreshes_and_queries_actual_index_identity(tmp_path: Path) -> None:
+    data_root, _, _, client = _runtime(tmp_path)
+    config = validator._load_runtime_config(_write_config(tmp_path))
+
+    evidence = validator._check_es(config, client, "asset-1", "job-1")
+
+    assert evidence.document_count == 1
+    assert evidence.segments[0].segment_id == "segment-1"
+    assert ("POST", "http://es.test/validation-index/_refresh") in client.requests
+    assert ("POST", "http://es.test/validation-index/_search") in client.requests
+
+
+def test_es_dependency_failure_is_not_reported_as_pass(tmp_path: Path) -> None:
+    data_root, _, _, _ = _runtime(tmp_path)
+    config = validator._load_runtime_config(_write_config(tmp_path))
+    client = FakeClient(data_root, es_status=503)
+
+    with pytest.raises(validator.ValidationError, match="Elasticsearch refresh") as error:
+        validator._check_es(config, client, "asset-1", "job-1")
+
+    assert error.value.field == "es"
+
+
+def test_sqlite_evidence_connections_are_read_only_and_query_only(tmp_path: Path) -> None:
+    data_root, _, _, _ = _runtime(tmp_path)
+
+    with validator._readonly_database(data_root / "recorded-video.sqlite3") as connection:
+        assert connection.execute("PRAGMA query_only").fetchone() == (1,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("CREATE TABLE forbidden (value TEXT)")
+
+
+def test_delete_fails_when_job_steps_remain_orphaned(tmp_path: Path) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+    client = FakeClient(data_root, leave_orphan_steps=True)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## delete\n\nFAIL" in report
+    assert "SQLite" in report
+
+
+def test_delete_fails_when_es_asset_identity_remains_after_refresh(tmp_path: Path) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+    client = FakeClient(data_root, retain_es_document=True)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## delete\n\nFAIL" in report
+    assert "Elasticsearch" in report
+    assert client.requests.count(("POST", "http://es.test/validation-index/_refresh")) == 2
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"video_name": "other.mp4"},
+        {"start_time": "not-iso"},
+        {"start_time": "2026-07-15T00:00:02Z", "end_time": "2026-07-15T00:00:01Z"},
+        {"sensor_id": "other-asset"},
+        {"end_time": "2026-07-15T00:00:02Z"},
+    ],
+)
+def test_malformed_search_identity_fails_search_and_es_evidence(tmp_path: Path, overrides: dict[str, Any]) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+    client = FakeClient(data_root, search_overrides=overrides)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## search\n\nFAIL" in report
+    assert "## es\n\nFAIL" in report
+
+
+def test_cli_uses_nonzero_default_semantic_quality_threshold(tmp_path: Path) -> None:
+    args = validator._parser().parse_args(
+        ["--api-url", "http://api.test", "--ui-url", "http://ui.test", "--report", str(tmp_path / "report.md")]
+    )
+
+    assert args.minimum_similarity == 0.2
+
+
+def test_malformed_url_still_writes_all_report_fields(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+    options = _options(data_root, video_path, report_path)
+    options = validator.ValidationOptions(**{**options.__dict__, "api_url": "http://api.test:invalid"})
+
+    exit_code = validator.run_validation(options, client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
+
+
+def test_client_close_failure_does_not_mask_primary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+
+    class CloseFailureClient(FakeClient):
+        def close(self) -> None:
+            raise RuntimeError("Authorization: Bearer close-secret")
+
+    client = CloseFailureClient(data_root, media_status=200)
+    monkeypatch.setattr(validator.httpx, "Client", lambda **_kwargs: client)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path))
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "HTTP Range 请求未返回 206" in report
+    assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
+    assert "close-secret" not in report
+
+
 def _options(data_root: Path, video_path: Path, report_path: Path):
     return validator.ValidationOptions(
         api_url="http://api.test",
         ui_url="http://ui.test",
         report=report_path,
+        config=_write_config(report_path.parent),
         data_root=data_root,
         video=video_path,
         query="forklift near worker",
@@ -199,6 +411,8 @@ def test_validator_checks_full_business_flow_in_order(tmp_path: Path) -> None:
     assert exit_code == 0
     report = report_path.read_text(encoding="utf-8")
     assert all(f"## {field}\n\nPASS" in report for field in validator.REPORT_FIELDS)
+    assert "es=http://es.test/validation-index" in report
+    assert ("POST", "http://es.test/validation-index/_search") in client.requests
     media_index = client.requests.index(("GET", "http://api.test/api/v1/vst/v1/storage/file/asset-1"))
     delete_index = client.requests.index(("DELETE", "http://api.test/api/v1/videos/asset-1"))
     assert media_index < delete_index

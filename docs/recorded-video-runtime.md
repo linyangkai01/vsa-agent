@@ -103,6 +103,7 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@10.157.68.44
 conda run --no-capture-output -n vsa-agent python scripts/recorded-video-validate.py \
   --api-url http://127.0.0.1:8000 \
   --ui-url http://127.0.0.1:3000 \
+  --config .runtime/es-stack/latest/config.yaml \
   --data-root /data/project/lyk/vsa-data \
   --video /data/project/lyk/validation/forklift-worker.mp4 \
   --query 'forklift near worker' \
@@ -112,11 +113,11 @@ conda run --no-capture-output -n vsa-agent python scripts/recorded-video-validat
 
 验证器真实按 `runtime → job_stages → provider → es → search → media → delete` 执行：
 
-1. 检查 API、UI、同源代理和不含密钥的配置摘要。
+1. 检查 API、UI、同源代理，并从本次 run 的 active config 读取 profile、provider model/base host、ES endpoint/index 和 mock 开关；报告不读取或记录 key 值，且生产验收要求 mock 关闭。
 2. 上传样例并等待任务完成，从同一数据根目录的 SQLite 读取完整阶段 checkpoint。
-3. 验证 VLM/embedding 模型标识以及 indexing/publish checksum。
-4. 要求语义搜索命中同一 asset 与时间段，缩略图非空，单字节 Range 返回 HTTP 206。
-5. 删除验证资产，并确认 Elasticsearch、媒体和 SQLite 生命周期数据均已清理。
+3. 验证 VLM/embedding 模型标识以及 indexing/publish checksum，并对 active ES endpoint/index 执行 refresh 与 asset/job identity 查询。
+4. 要求语义搜索命中相同 video/asset/sensor/segment identity，时间为带时区 ISO 且 `start < end`，缩略图非空，单字节 Range 返回 HTTP 206。
+5. 删除验证资产；refresh 后按 `asset_id` 直接确认 ES 无残留，按保存的 `job_id` 确认 SQLite 无 orphan steps，并确认媒体不可访问。
 
 任何依赖或质量断言失败都会写出 `FAIL` 报告并返回 `1`；后续被阻断字段也明确记为失败，不会静默跳过。已创建资产无论主流程成功或失败都会进入清理尝试。`--video`、`--query`、`--data-root` 也可分别由 `VSA_VALIDATION_VIDEO`、`VSA_VALIDATION_QUERY`、`VSA_RECORDED_VIDEO_DATA_ROOT` 提供。
 
