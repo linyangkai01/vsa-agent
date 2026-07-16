@@ -358,6 +358,11 @@ time.sleep(3600)
         + """
 with trace.open("a", encoding="utf-8") as stream:
     stream.write(f"smoke={' '.join(sys.argv[1:])}\\n")
+smoke_index = sys.argv[sys.argv.index("--index") + 1]
+validation_index = smoke_index.removesuffix("-legacy-smoke")
+validation_root = Path(os.environ["VSA_CONFIG"]).parent / validation_index
+validation_root.mkdir(parents=True, exist_ok=True)
+(validation_root / "interruption-ready.marker").write_text("ready", encoding="utf-8")
 time.sleep(int(os.environ.get("HARNESS_SMOKE_SLEEP_MS", "0")) / 1000)
 raise SystemExit(int(os.environ.get("HARNESS_SMOKE_STATUS", "0")))
 """,
@@ -380,6 +385,7 @@ def _run_powershell_runtime(
     *args: str,
     timeout: float = 60,
     interrupt_after_trace: str | None = None,
+    interrupt_after_marker: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     powershell = shutil.which("powershell")
     if powershell is None:
@@ -452,9 +458,20 @@ def _run_powershell_runtime(
             )
             deadline = time.monotonic() + timeout
             trace_path = repo / "trace.log"
+            trace_ready_at: float | None = None
             while time.monotonic() < deadline:
-                if trace_path.exists() and interrupt_after_trace in trace_path.read_text(encoding="utf-8"):
-                    break
+                trace_ready = trace_path.exists() and interrupt_after_trace in trace_path.read_text(encoding="utf-8")
+                if trace_ready:
+                    trace_ready_at = trace_ready_at or time.monotonic()
+                    marker_ready = interrupt_after_marker is None or any(
+                        (repo / ".runtime/es-stack/runs").glob(f"*/validation-*/{interrupt_after_marker}")
+                    )
+                    if marker_ready:
+                        break
+                    if time.monotonic() - trace_ready_at >= 2:
+                        process.send_signal(signal.CTRL_BREAK_EVENT)
+                        process.wait(timeout=30)
+                        raise AssertionError(f"Validation marker was not created: {interrupt_after_marker}")
                 if process.poll() is not None:
                     raise AssertionError(f"PowerShell host exited before trace marker: {interrupt_after_trace}")
                 time.sleep(0.05)
@@ -722,14 +739,18 @@ def test_powershell_host_interruption_cleans_validation_resources_and_finalizes_
         "-TimeoutSec",
         "3",
         interrupt_after_trace="smoke=",
+        interrupt_after_marker="interruption-ready.marker",
     )
 
     assert completed.returncode != 0
     run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
     trace = (repo / "trace.log").read_text(encoding="utf-8")
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    validation_root = run_dir / f"validation-{run_dir.name}"
+    validation_marker = validation_root / "interruption-ready.marker"
     assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}-legacy-smoke" in trace
-    assert not (run_dir / f"validation-{run_dir.name}").exists()
+    assert not validation_root.exists()
+    assert not validation_marker.exists()
     assert not (run_dir / "validation-config.yaml").exists()
     assert not (run_dir / "config.yaml").exists()
     assert manifest["processes"]
