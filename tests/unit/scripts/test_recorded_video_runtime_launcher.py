@@ -396,6 +396,98 @@ raise SystemExit(int(os.environ.get("HARNESS_SMOKE_STATUS", "0")))
     return repo, env
 
 
+def _powershell_process_snapshot() -> list[dict[str, object]]:
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    probe = """
+    @(Get-CimInstance Win32_Process | ForEach-Object {
+        [pscustomobject]@{
+            pid = [int]$_.ProcessId
+            parent_pid = [int]$_.ParentProcessId
+            creation = $_.CreationDate.ToUniversalTime().ToString('o')
+            command_line = [string]$_.CommandLine
+        }
+    }) | ConvertTo-Json -Compress
+    """
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    snapshot = json.loads(completed.stdout)
+    return snapshot if isinstance(snapshot, list) else [snapshot]
+
+
+def _powershell_repo_processes(repo: Path) -> list[dict[str, object]]:
+    snapshot = _powershell_process_snapshot()
+    needle = str(repo.resolve()).casefold()
+    owned_pids = {int(item["pid"]) for item in snapshot if needle in str(item["command_line"] or "").casefold()}
+    while True:
+        descendants = {int(item["pid"]) for item in snapshot if int(item["parent_pid"]) in owned_pids}
+        expanded = owned_pids | descendants
+        if expanded == owned_pids:
+            break
+        owned_pids = expanded
+    return [item for item in snapshot if int(item["pid"]) in owned_pids]
+
+
+def _terminate_exact_powershell_processes(processes: list[dict[str, object]]) -> None:
+    if not processes:
+        return
+    powershell = shutil.which("powershell")
+    assert powershell is not None
+    by_pid = {int(item["pid"]): item for item in processes}
+
+    def lineage_depth(item: dict[str, object]) -> int:
+        depth = 0
+        parent_pid = int(item["parent_pid"])
+        seen: set[int] = set()
+        while parent_pid in by_pid and parent_pid not in seen:
+            seen.add(parent_pid)
+            depth += 1
+            parent_pid = int(by_pid[parent_pid]["parent_pid"])
+        return depth
+
+    deepest_first = sorted(processes, key=lineage_depth, reverse=True)
+    probe = """
+    $records = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    foreach ($record in @($records)) {
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($record.pid)" -ErrorAction SilentlyContinue
+        if ($null -eq $current) { continue }
+        $creation = $current.CreationDate.ToUniversalTime().ToString('o')
+        if ($creation -ne $record.creation) { continue }
+        Stop-Process -Id $record.pid -Force -ErrorAction SilentlyContinue
+    }
+    """
+    subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", probe],
+        input=json.dumps(deepest_first),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+def _powershell_runtime_diagnostics(repo: Path) -> str:
+    sections: list[str] = []
+    for path in (
+        repo / "trace.log",
+        repo / "launcher.stdout.log",
+        repo / "launcher.stderr.log",
+    ):
+        if path.exists():
+            sections.append(f"--- {path.name} ---\n{path.read_text(encoding='utf-8', errors='replace')}")
+    for stack_log in (repo / ".runtime/es-stack/runs").glob("*/stack.log"):
+        contents = stack_log.read_text(encoding="utf-8", errors="replace")
+        sections.append(f"--- {stack_log.relative_to(repo)} ---\n{contents}")
+    return "\n".join(sections) or "no launcher diagnostics were created"
+
+
 def _run_powershell_runtime(
     repo: Path,
     env: dict[str, str],
@@ -404,6 +496,7 @@ def _run_powershell_runtime(
     exit_after_trace: str | None = None,
     exit_after_marker: str | None = None,
     exit_after_stack: str | None = None,
+    stop_pipeline_after_trace: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     powershell = shutil.which("powershell")
     if powershell is None:
@@ -411,8 +504,8 @@ def _run_powershell_runtime(
     launcher_args = " ".join(args)
     launcher = (repo / "scripts/es-runtime-stack.ps1").resolve()
     trace = (repo / "trace.log").resolve()
-    probe = repo / "run-launcher.ps1"
-    probe.write_text(
+    launcher_body = repo / "launcher-body.ps1"
+    launcher_body.write_text(
         textwrap.dedent(
             f"""
             $ErrorActionPreference = 'Stop'
@@ -433,82 +526,160 @@ def _run_powershell_runtime(
                 }}
                 return [pscustomobject]@{{ StatusCode = 200 }}
             }}
-            try {{
-                & '{launcher}' {launcher_args}
-                [IO.File]::AppendAllText(
-                    '{trace}',
-                    "wrapper=returned;last=$LASTEXITCODE;env=$([Environment]::ExitCode);errors=$($Error.Count);ok=$?`n"
-                )
-                exit 0
-            }} catch {{
-                [Console]::Error.WriteLine($_.Exception.Message)
-                [IO.File]::AppendAllText('{trace}', "wrapper=failed`n")
-                exit 1
-            }}
+            & '{launcher}' {launcher_args}
+            [IO.File]::AppendAllText(
+                '{trace}',
+                "wrapper=returned;last=$LASTEXITCODE;env=$([Environment]::ExitCode);errors=$($Error.Count);ok=$?`n"
+            )
             """
         ).strip()
         + "\n",
         encoding="utf-8",
     )
+    probe = repo / "run-launcher.ps1"
+    start_trigger = repo / "harness-start.trigger"
+    pipeline_stop_trigger = repo / "pipeline-stop.trigger"
+    if stop_pipeline_after_trace:
+        probe.write_text(
+            textwrap.dedent(
+                f"""
+                $ErrorActionPreference = 'Stop'
+                while (-not (Test-Path -LiteralPath '{start_trigger}')) {{ Start-Sleep -Milliseconds 10 }}
+                $pipeline = [PowerShell]::Create()
+                $null = $pipeline.AddScript([IO.File]::ReadAllText('{launcher_body}'))
+                $async = $pipeline.BeginInvoke()
+                try {{
+                    while (-not $async.IsCompleted -and -not (Test-Path -LiteralPath '{pipeline_stop_trigger}')) {{
+                        Start-Sleep -Milliseconds 25
+                    }}
+                    if (Test-Path -LiteralPath '{pipeline_stop_trigger}') {{
+                        $pipeline.Stop()
+                        try {{ $null = $pipeline.EndInvoke($async) }} catch {{
+                            if ($_.Exception.Message -notmatch 'pipeline has been stopped') {{ throw }}
+                        }}
+                        [IO.File]::AppendAllText('{trace}', "wrapper=pipeline-stopped`n")
+                        exit 130
+                    }}
+                    $output = $pipeline.EndInvoke($async)
+                    $output | ForEach-Object {{ [Console]::Out.WriteLine("$_") }}
+                    [IO.File]::AppendAllText('{trace}', "wrapper=returned`n")
+                    exit 0
+                }} catch {{
+                    [Console]::Error.WriteLine($_.Exception.Message)
+                    [IO.File]::AppendAllText('{trace}', "wrapper=failed`n")
+                    exit 1
+                }} finally {{
+                    $pipeline.Dispose()
+                }}
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        probe.write_text(
+            textwrap.dedent(
+                f"""
+                $ErrorActionPreference = 'Stop'
+                while (-not (Test-Path -LiteralPath '{start_trigger}')) {{ Start-Sleep -Milliseconds 10 }}
+                try {{
+                    & '{launcher_body}'
+                    exit 0
+                }} catch {{
+                    [Console]::Error.WriteLine($_.Exception.Message)
+                    [IO.File]::AppendAllText('{trace}', "wrapper=failed`n")
+                    exit 1
+                }}
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
     command = [powershell, "-NoProfile", "-NonInteractive", "-File", str(probe)]
     stdout_path = repo / "launcher.stdout.log"
     stderr_path = repo / "launcher.stderr.log"
+    exit_trigger = repo / "api-exit.trigger"
+    process_env = env.copy()
+    process_env["HARNESS_API_EXIT_TRIGGER"] = str(exit_trigger)
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        if exit_after_trace is None:
-            result = subprocess.run(
-                command,
-                cwd=repo,
-                env=env,
-                check=False,
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-                timeout=timeout,
-            )
-        else:
-            exit_trigger = repo / "api-exit.trigger"
-            process_env = env.copy()
-            process_env["HARNESS_API_EXIT_TRIGGER"] = str(exit_trigger)
-            process = subprocess.Popen(
-                command,
-                cwd=repo,
-                env=process_env,
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
+        process = subprocess.Popen(
+            command,
+            cwd=repo,
+            env=process_env,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        root_identity = next(
+            (item for item in _powershell_process_snapshot() if int(item["pid"]) == process.pid),
+            None,
+        )
+        if root_identity is None:
+            process.kill()
+            process.wait(timeout=5)
+            raise AssertionError(f"Could not capture PowerShell host identity for PID {process.pid}")
+        start_trigger.write_text("start", encoding="utf-8")
+        try:
             deadline = time.monotonic() + timeout
-            trace_path = repo / "trace.log"
-            trace_ready_at: float | None = None
-            while time.monotonic() < deadline:
-                trace_ready = trace_path.exists() and exit_after_trace in trace_path.read_text(encoding="utf-8")
-                if trace_ready:
-                    trace_ready_at = trace_ready_at or time.monotonic()
-                    marker_ready = exit_after_marker is None or any(
-                        (repo / ".runtime/es-stack/runs").glob(f"*/validation-*/{exit_after_marker}")
-                    )
-                    stack_ready = exit_after_stack is None or any(
-                        exit_after_stack in path.read_text(encoding="utf-8")
-                        for path in (repo / ".runtime/es-stack/runs").glob("*/stack.log")
-                    )
-                    if marker_ready and stack_ready:
-                        break
-                    if time.monotonic() - trace_ready_at >= 2:
-                        exit_trigger.write_text("exit", encoding="utf-8")
-                        process.wait(timeout=30)
-                        raise AssertionError(f"Validation marker was not created: {exit_after_marker}")
-                if process.poll() is not None:
-                    raise AssertionError(f"PowerShell host exited before trace marker: {exit_after_trace}")
-                time.sleep(0.05)
+            if exit_after_trace is None:
+                process.wait(timeout=timeout)
             else:
+                trace_path = repo / "trace.log"
+                trace_ready_at: float | None = None
+                while time.monotonic() < deadline:
+                    trace_ready = trace_path.exists() and exit_after_trace in trace_path.read_text(encoding="utf-8")
+                    if trace_ready:
+                        trace_ready_at = trace_ready_at or time.monotonic()
+                        marker_ready = exit_after_marker is None or any(
+                            (repo / ".runtime/es-stack/runs").glob(f"*/validation-*/{exit_after_marker}")
+                        )
+                        stack_ready = exit_after_stack is None or any(
+                            exit_after_stack in path.read_text(encoding="utf-8")
+                            for path in (repo / ".runtime/es-stack/runs").glob("*/stack.log")
+                        )
+                        if marker_ready and stack_ready:
+                            break
+                        if time.monotonic() - trace_ready_at >= 2:
+                            raise AssertionError(f"Validation marker was not created: {exit_after_marker}")
+                    if process.poll() is not None:
+                        raise AssertionError(f"PowerShell host exited before trace marker: {exit_after_trace}")
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError(f"Timed out waiting for PowerShell trace marker: {exit_after_trace}")
+                assert process.poll() is None
+                trigger = pipeline_stop_trigger if stop_pipeline_after_trace else exit_trigger
+                trigger.write_text("stop", encoding="utf-8")
+                process.wait(timeout=max(1, deadline - time.monotonic()))
+        except BaseException as exc:
+            exc.add_note(_powershell_runtime_diagnostics(repo))
+            raise
+        finally:
+            captured_owned = {int(item["pid"]): item for item in _powershell_repo_processes(repo)}
+            captured_owned[int(root_identity["pid"])] = root_identity
+            if process.poll() is None:
                 exit_trigger.write_text("exit", encoding="utf-8")
-                process.kill()
-                raise AssertionError(f"Timed out waiting for PowerShell trace marker: {exit_after_trace}")
-            assert process.poll() is None
-            exit_trigger.write_text("exit", encoding="utf-8")
-            return_code = process.wait(timeout=max(1, deadline - time.monotonic()))
-            result = subprocess.CompletedProcess(command, return_code)
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
+            survivors = _powershell_repo_processes(repo)
+            if process.poll() is None or survivors:
+                for item in survivors:
+                    captured_owned[int(item["pid"])] = item
+                with (repo / "trace.log").open("a", encoding="utf-8") as stream:
+                    stream.write("harness=forced-cleanup\n")
+                _terminate_exact_powershell_processes(list(captured_owned.values()))
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            remaining = _powershell_repo_processes(repo)
+            if remaining:
+                raise AssertionError(
+                    f"PowerShell harness left owned processes: {remaining}\n{_powershell_runtime_diagnostics(repo)}"
+                )
+        result = subprocess.CompletedProcess(command, process.returncode)
     return subprocess.CompletedProcess(
         command,
         result.returncode,
@@ -677,6 +848,23 @@ def test_bash_full_validation_run_is_isolated_redacted_and_manifested(tmp_path: 
         assert secret not in combined_logs
 
 
+def test_bash_plain_validate_starts_ui_runs_smoke_passes_and_cleans_isolation(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+
+    completed = _run_bash_runtime(repo, env, "--validate", "--timeout-sec", "3")
+
+    assert completed.returncode == 0, completed.stderr
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker", "ui"}
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "smoke=" in trace
+    assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+
+
 def test_bash_validation_cleanup_failure_returns_nonzero_without_claiming_success(tmp_path: Path):
     repo, env = _bash_runtime_harness(tmp_path)
     env["HARNESS_DELETE_FAIL"] = "1"
@@ -833,6 +1021,23 @@ def test_powershell_full_validation_run_records_manifest_and_shared_isolated_con
     assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
 
 
+def test_powershell_plain_validate_starts_ui_runs_smoke_passes_and_cleans_isolation(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+
+    completed = _run_powershell_runtime(repo, env, "-Validate", "-TimeoutSec", "3")
+
+    assert completed.returncode == 0, completed.stderr
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker", "ui"}
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "smoke=" in trace
+    assert "PASS: ES runtime stack validation succeeded" in (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+
+
 @pytest.mark.parametrize(
     "args, message",
     [
@@ -883,6 +1088,65 @@ def test_powershell_keep_running_reaches_readiness_stays_alive_and_cleans_on_com
     assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}" in trace
     assert not (run_dir / "validation-config.yaml").exists()
     assert not (run_dir / f"validation-{run_dir.name}").exists()
+
+
+def test_powershell_helper_abandoned_wait_reclaims_only_its_owned_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+
+    class HarnessWaitAbandonedError(RuntimeError):
+        pass
+
+    def abandon_wait(_: float) -> None:
+        raise HarnessWaitAbandonedError("intentional wait abandonment")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(time, "sleep", abandon_wait)
+            with pytest.raises(HarnessWaitAbandonedError, match="intentional wait abandonment"):
+                _run_powershell_runtime(
+                    repo,
+                    env,
+                    "-Validate",
+                    "-KeepRunning",
+                    "-TimeoutSec",
+                    "3",
+                    exit_after_trace="marker-that-never-arrives",
+                )
+        owned_after_abandonment = _powershell_repo_processes(repo)
+        assert owned_after_abandonment == []
+    finally:
+        _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
+
+
+def test_powershell_external_pipeline_stop_runs_launcher_finally_and_cleans_owned_runtime(tmp_path: Path):
+    repo, env = _powershell_runtime_harness(tmp_path)
+
+    completed = _run_powershell_runtime(
+        repo,
+        env,
+        "-Validate",
+        "-KeepRunning",
+        "-TimeoutSec",
+        "3",
+        exit_after_trace="proxy=ready",
+        exit_after_marker="interruption-ready.marker",
+        exit_after_stack="READY: isolated validation runtime",
+        stop_pipeline_after_trace=True,
+    )
+
+    assert completed.returncode != 0
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8-sig"))
+    assert "wrapper=pipeline-stopped" in trace
+    assert "harness=forced-cleanup" not in trace
+    assert f"delete=http://127.0.0.1:9200/validation-{run_dir.name}" in trace
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+    assert _powershell_repo_processes(repo) == []
 
 
 def test_powershell_log_pump_avoids_runspace_callbacks_and_exit_code_resets():
