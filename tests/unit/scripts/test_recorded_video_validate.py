@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -179,10 +180,19 @@ def _response(
     return httpx.Response(status_code, content=content or b"", headers=headers, request=request)
 
 
-def _runtime(tmp_path: Path, *, media_status: int = 206):
+def _runtime(
+    tmp_path: Path,
+    *,
+    media_status: int = 206,
+    vision_checkpoint_provider: str = "vsa_agent.recorded_video.providers.OpenAIVisionProvider",
+    vision_checkpoint_model: str = "vision-model",
+    embedding_checkpoint_provider: str = "vsa_agent.recorded_video.providers.OpenAIEmbeddingProvider",
+    embedding_checkpoint_model: str = "embedding-model",
+):
     data_root = tmp_path / "data"
     data_root.mkdir()
     database_path = data_root / "recorded-video.sqlite3"
+    manifest_relative = "derived/pipeline-v1/attempts/1/manifest.json"
     with sqlite3.connect(database_path) as connection:
         connection.executescript(
             """
@@ -201,9 +211,28 @@ def _runtime(tmp_path: Path, *, media_status: int = 206):
         for stage in validator.REQUIRED_STAGES:
             model = "vision-model" if stage == "analyzing" else "embedding-model" if stage == "embedding" else NULL
             connection.execute(
-                "INSERT INTO job_steps VALUES (?, ?, 'completed', 'manifest.json', 'sha256', ?, 1)",
-                ("job-1", stage, model),
+                "INSERT INTO job_steps VALUES (?, ?, 'completed', ?, 'sha256', ?, 1)",
+                ("job-1", stage, manifest_relative, model),
             )
+    manifest_path = data_root / "assets" / "asset-1" / manifest_relative
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "checkpoint_identity": {
+                    "vision": {
+                        "provider": vision_checkpoint_provider,
+                        "model": vision_checkpoint_model,
+                    },
+                    "embedding": {
+                        "provider": embedding_checkpoint_provider,
+                        "model": embedding_checkpoint_model,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     video_path = tmp_path / "validation.mp4"
     video_path.write_bytes(b"video")
     report_path = tmp_path / "report.md"
@@ -213,7 +242,13 @@ def _runtime(tmp_path: Path, *, media_status: int = 206):
 NULL = None
 
 
-def _write_config(tmp_path: Path, *, allow_mock_fallback: bool = False) -> Path:
+def _write_config(
+    tmp_path: Path,
+    *,
+    allow_mock_fallback: bool = False,
+    vision_provider: str = "openai_compatible",
+    embedding_provider: str = "openai_compatible",
+) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
@@ -221,12 +256,12 @@ def _write_config(tmp_path: Path, *, allow_mock_fallback: bool = False) -> Path:
 active_profile: production
 backends:
   vision:
-    provider: openai_compatible
+    provider: {vision_provider}
     base_url: https://vision.example.test/v1
     api_key_env: VISION_API_KEY
     api_key: do-not-record-this
   embedding:
-    provider: openai_compatible
+    provider: {embedding_provider}
     base_url: https://embedding.example.test/v1
     api_key_env: EMBEDDING_API_KEY
 profiles:
@@ -265,6 +300,59 @@ def test_runtime_config_summary_is_production_only_and_never_records_keys(tmp_pa
 
     with pytest.raises(validator.ValidationError, match="mock fallback"):
         validator._load_runtime_config(_write_config(tmp_path / "mock", allow_mock_fallback=True))
+
+
+@pytest.mark.parametrize("mock_role", ["vision", "embedding"])
+def test_mock_active_provider_fails_with_complete_report(tmp_path: Path, mock_role: str) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+    config = _write_config(
+        tmp_path,
+        vision_provider="mock" if mock_role == "vision" else "openai_compatible",
+        embedding_provider="mock" if mock_role == "embedding" else "openai_compatible",
+    )
+
+    exit_code = validator.run_validation(
+        _options(data_root, video_path, report_path, config=config),
+        client=client,
+    )
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## runtime\n\nFAIL" in report
+    assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
+    assert "mock" in report.lower()
+
+
+def test_checkpoint_provider_mismatch_fails_with_complete_report(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(
+        tmp_path,
+        vision_checkpoint_provider="fake.provider.Vision",
+    )
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## provider\n\nFAIL" in report
+    assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
+    assert "provider" in report.lower()
+    assert "不匹配" in report
+
+
+def test_checkpoint_model_mismatch_fails_with_complete_report(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(
+        tmp_path,
+        embedding_checkpoint_model="different-embedding-model",
+    )
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## provider\n\nFAIL" in report
+    assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
+    assert "model" in report.lower()
+    assert "不匹配" in report
 
 
 def test_es_evidence_refreshes_and_queries_actual_index_identity(tmp_path: Path) -> None:
@@ -354,6 +442,30 @@ def test_cli_uses_nonzero_default_semantic_quality_threshold(tmp_path: Path) -> 
     assert args.minimum_similarity == 0.2
 
 
+def test_cli_invalid_minimum_similarity_writes_complete_failure_report(tmp_path: Path) -> None:
+    report_path = tmp_path / "invalid-quality.md"
+
+    exit_code = validator.main(
+        [
+            "--api-url",
+            "http://api.test",
+            "--ui-url",
+            "http://ui.test",
+            "--report",
+            str(report_path),
+            "--minimum-similarity",
+            "-1",
+        ]
+    )
+
+    assert exit_code == 1
+    assert report_path.is_file()
+    report = report_path.read_text(encoding="utf-8")
+    assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
+    assert "## runtime\n\nFAIL" in report
+    assert "minimum similarity" in report
+
+
 def test_malformed_url_still_writes_all_report_fields(tmp_path: Path) -> None:
     data_root, video_path, report_path, client = _runtime(tmp_path)
     options = _options(data_root, video_path, report_path)
@@ -388,12 +500,12 @@ def test_client_close_failure_does_not_mask_primary_failure(
     assert "close-secret" not in report
 
 
-def _options(data_root: Path, video_path: Path, report_path: Path):
+def _options(data_root: Path, video_path: Path, report_path: Path, *, config: Path | None = None):
     return validator.ValidationOptions(
         api_url="http://api.test",
         ui_url="http://ui.test",
         report=report_path,
-        config=_write_config(report_path.parent),
+        config=config or _write_config(report_path.parent),
         data_root=data_root,
         video=video_path,
         query="forklift near worker",

@@ -1,6 +1,11 @@
 param(
     [string]$TargetRoot = "Z:\vsa-agent",
-    [string[]]$IncludePaths = @(
+    [string[]]$IncludePaths,
+    [switch]$DryRun,
+    [switch]$PreflightOnly
+)
+
+$ApprovedPaths = @(
         "config.yaml",
         "docker-compose.es.yml",
         "pyproject.toml",
@@ -117,16 +122,9 @@ param(
         "openspec\changes\production-recorded-video-ingest\design.md",
         "openspec\changes\production-recorded-video-ingest\tasks.md",
         "openspec\changes\production-recorded-video-ingest\specs\recorded-video-business-flow\spec.md"
-    ),
-    [switch]$DryRun,
-    [switch]$PreflightOnly
 )
 
 $ErrorActionPreference = "Stop"
-
-$repoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
-$targetRootCandidate = Join-Path $TargetRoot "."
-$targetRootPath = (Resolve-Path -LiteralPath $targetRootCandidate).Path
 
 function Resolve-PathWithinRoot {
     param(
@@ -169,8 +167,43 @@ function Test-TargetWritable {
     }
 }
 
+function Test-ForbiddenSyncPath {
+    param([string]$RelativePath)
+
+    $portablePath = $RelativePath.Trim().Replace("\", "/")
+    return (
+        $portablePath -match '(^|/)\.runtime(/|$)' -or
+        $portablePath -match '(^|/)\.env([./]|$)' -or
+        $portablePath -match '(^|/)(secrets?|credentials?)([./_-]|$)'
+    )
+}
+
+$approvedPathSet = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach ($approvedPath in $ApprovedPaths) {
+    $approvedPathSet.Add($approvedPath) | Out-Null
+}
+
+$SelectedPaths = New-Object System.Collections.Generic.List[string]
+$requestedPaths = if ($PSBoundParameters.ContainsKey("IncludePaths")) { @($IncludePaths) } else { @($ApprovedPaths) }
+foreach ($relativePath in $requestedPaths) {
+    if (Test-ForbiddenSyncPath -RelativePath $relativePath) {
+        throw "Path '$relativePath' is forbidden for server sync. Runtime and secret paths are never approved."
+    }
+    $normalizedPath = $relativePath.Trim().Replace("/", "\")
+    if (-not $approvedPathSet.Contains($normalizedPath)) {
+        throw "Path '$relativePath' is not approved for server sync. IncludePaths may only select ApprovedPaths entries."
+    }
+    $SelectedPaths.Add($normalizedPath) | Out-Null
+}
+
+$repoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
+$targetRootCandidate = Join-Path $TargetRoot "."
+$targetRootPath = (Resolve-Path -LiteralPath $targetRootCandidate).Path
+
 $missingSources = New-Object System.Collections.Generic.List[string]
-foreach ($relativePath in $IncludePaths) {
+foreach ($relativePath in $SelectedPaths) {
     $sourcePath = Resolve-PathWithinRoot -Root $repoRoot -RelativePath $relativePath -Label "repository"
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
         $missingSources.Add($relativePath) | Out-Null
@@ -190,13 +223,13 @@ if ($DryRun) {
 if ($PreflightOnly) {
     Write-Host "PASS: mapped target preflight completed"
     Write-Host "  target: $targetRootPath"
-    Write-Host "  files:  $($IncludePaths.Count)"
+    Write-Host "  files:  $($SelectedPaths.Count)"
     exit 0
 }
 
 $copied = New-Object System.Collections.Generic.List[string]
 
-foreach ($relativePath in $IncludePaths) {
+foreach ($relativePath in $SelectedPaths) {
     $sourcePath = Resolve-PathWithinRoot -Root $repoRoot -RelativePath $relativePath -Label "repository"
     $resolvedSource = (Resolve-Path -LiteralPath $sourcePath).Path
     $destinationPath = Resolve-PathWithinRoot -Root $targetRootPath -RelativePath $relativePath -Label "target"

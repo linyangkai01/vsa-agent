@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import re
@@ -33,6 +34,15 @@ REQUIRED_STAGES = (
     "publish",
 )
 _TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_PRODUCTION_PROVIDERS = frozenset({"openai_compatible", "vllm"})
+_CHECKPOINT_PROVIDER_BY_ROLE = {
+    "vision": {
+        provider: "vsa_agent.recorded_video.providers.OpenAIVisionProvider" for provider in _PRODUCTION_PROVIDERS
+    },
+    "embedding": {
+        provider: "vsa_agent.recorded_video.providers.OpenAIEmbeddingProvider" for provider in _PRODUCTION_PROVIDERS
+    },
+}
 
 
 class HttpClient(Protocol):
@@ -86,8 +96,10 @@ class SearchEvidence:
 @dataclass(frozen=True)
 class RuntimeConfig:
     active_profile: str
+    vision_provider: str
     vision_model: str
     vision_host: str
+    embedding_provider: str
     embedding_model: str
     embedding_host: str
     es_endpoint: str
@@ -142,11 +154,16 @@ def _provider_identity(
     role_name: str,
     role: object,
     backends: dict[str, Any],
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     role_config = _mapping(role, f"profile.{role_name}")
     backend_name = _required_text(role_config.get("backend"), f"profile.{role_name}.backend")
     model = _required_text(role_config.get("model"), f"profile.{role_name}.model")
     backend = _mapping(backends.get(backend_name), f"backends.{backend_name}")
+    provider = _required_text(backend.get("provider"), f"backends.{backend_name}.provider").lower()
+    if re.search(r"(^|[._-])(mock|fake|test)([._-]|$)", provider):
+        _fail("runtime", f"{role_name} production provider 禁止使用 mock/fake/test provider")
+    if provider not in _PRODUCTION_PROVIDERS:
+        _fail("runtime", f"{role_name} production provider 不受支持")
     base_url = _required_text(backend.get("base_url"), f"backends.{backend_name}.base_url")
     try:
         parsed = urlsplit(base_url)
@@ -156,7 +173,7 @@ def _provider_identity(
         _fail("runtime", f"{role_name} provider base_url 无效")
     if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
         _fail("runtime", f"{role_name} provider base_url 无效")
-    return model, host if port is None else f"{host}:{port}"
+    return provider, model, host if port is None else f"{host}:{port}"
 
 
 def _load_runtime_config(path: Path) -> RuntimeConfig:
@@ -169,8 +186,10 @@ def _load_runtime_config(path: Path) -> RuntimeConfig:
     profiles = _mapping(root.get("profiles"), "profiles")
     profile = _mapping(profiles.get(active_profile), f"profiles.{active_profile}")
     backends = _mapping(root.get("backends"), "backends")
-    vision_model, vision_host = _provider_identity("vlm", profile.get("vlm"), backends)
-    embedding_model, embedding_host = _provider_identity("embedding", profile.get("embedding"), backends)
+    vision_provider, vision_model, vision_host = _provider_identity("vlm", profile.get("vlm"), backends)
+    embedding_provider, embedding_model, embedding_host = _provider_identity(
+        "embedding", profile.get("embedding"), backends
+    )
     search = _mapping(root.get("search"), "search")
     if search.get("enabled") is not True:
         _fail("runtime", "production search 必须启用")
@@ -187,8 +206,10 @@ def _load_runtime_config(path: Path) -> RuntimeConfig:
         _fail("runtime", "search.embed_index 格式无效")
     return RuntimeConfig(
         active_profile=active_profile,
+        vision_provider=vision_provider,
         vision_model=vision_model,
         vision_host=vision_host,
+        embedding_provider=embedding_provider,
         embedding_model=embedding_model,
         embedding_host=embedding_host,
         es_endpoint=es_endpoint,
@@ -201,7 +222,9 @@ def _load_runtime_config(path: Path) -> RuntimeConfig:
 def _runtime_config_summary(config: RuntimeConfig) -> str:
     return (
         f"profile={config.active_profile}; vision={config.vision_model}@{config.vision_host}; "
+        f"vision_provider={config.vision_provider}; "
         f"embedding={config.embedding_model}@{config.embedding_host}; "
+        f"embedding_provider={config.embedding_provider}; "
         f"es={config.es_endpoint}/{config.index}; mock_fallback=false; mock_embedding=false"
     )
 
@@ -418,13 +441,58 @@ def _check_job_stages(data_root: Path, job_id: str, observed: list[str]) -> list
     return evidence
 
 
-def _check_provider(evidence: list[StageEvidence]) -> str:
+def _load_checkpoint_identity(
+    data_root: Path,
+    asset_id: str,
+    evidence: list[StageEvidence],
+) -> dict[str, Any]:
     by_stage = {item.stage: item for item in evidence}
-    vision_model = by_stage["analyzing"].model
-    embedding_model = by_stage["embedding"].model
-    if not vision_model or not embedding_model:
+    manifests = {by_stage[stage].output_manifest for stage in ("analyzing", "embedding")}
+    if None in manifests or len(manifests) != 1:
+        _fail("provider", "provider checkpoints 未引用同一份 manifest")
+    relative_manifest = manifests.pop()
+    if not isinstance(relative_manifest, str):
+        _fail("provider", "provider checkpoint manifest 路径无效")
+    asset_root = (data_root / "assets" / asset_id).resolve()
+    manifest_path = (asset_root / relative_manifest).resolve()
+    if not manifest_path.is_relative_to(asset_root):
+        _fail("provider", "provider checkpoint manifest 路径越界")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _fail("provider", "provider checkpoint manifest 不可读取或 JSON 无效")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("checkpoint_identity"), dict):
+        _fail("provider", "provider checkpoint manifest 缺少 identity")
+    return manifest["checkpoint_identity"]
+
+
+def _check_provider(
+    config: RuntimeConfig,
+    data_root: Path,
+    asset_id: str,
+    evidence: list[StageEvidence],
+) -> str:
+    by_stage = {item.stage: item for item in evidence}
+    identity = _load_checkpoint_identity(data_root, asset_id, evidence)
+    expected = {
+        "vision": (config.vision_provider, config.vision_model, by_stage["analyzing"].model),
+        "embedding": (config.embedding_provider, config.embedding_model, by_stage["embedding"].model),
+    }
+    for role, (active_provider, active_model, stage_model) in expected.items():
+        checkpoint = identity.get(role)
+        if not isinstance(checkpoint, dict):
+            _fail("provider", f"{role} checkpoint 缺少 provider/model identity")
+        expected_checkpoint_provider = _CHECKPOINT_PROVIDER_BY_ROLE[role].get(active_provider)
+        if checkpoint.get("provider") != expected_checkpoint_provider:
+            _fail("provider", f"{role} checkpoint provider 与 active config provider 不匹配")
+        if checkpoint.get("model") != active_model or stage_model != active_model:
+            _fail("provider", f"{role} checkpoint model 与 active config model 不匹配")
+    if not by_stage["analyzing"].model or not by_stage["embedding"].model:
         _fail("provider", "provider checkpoint 缺少 vision/embedding 模型标识")
-    return f"vision={vision_model}; embedding={embedding_model}"
+    return (
+        f"vision={config.vision_provider}/{config.vision_model}; "
+        f"embedding={config.embedding_provider}/{config.embedding_model}"
+    )
 
 
 def _check_es_checkpoints(evidence: list[StageEvidence]) -> None:
@@ -729,6 +797,15 @@ def _report_url(value: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
 
 
+def _check_quality_options(options: ValidationOptions) -> None:
+    if not math.isfinite(options.timeout_seconds) or options.timeout_seconds <= 0:
+        _fail("runtime", "timeout must be a finite positive number")
+    if not math.isfinite(options.poll_interval_seconds) or options.poll_interval_seconds < 0:
+        _fail("runtime", "poll interval must be a finite non-negative number")
+    if not math.isfinite(options.minimum_similarity) or not 0.0 <= options.minimum_similarity <= 1.0:
+        _fail("runtime", "minimum similarity must be between 0 and 1")
+
+
 def run_validation(options: ValidationOptions, *, client: HttpClient | None = None) -> int:
     results = {field: StepResult("FAIL", "未执行：前置验证尚未完成。") for field in REPORT_FIELDS}
     current_field = "runtime"
@@ -736,11 +813,15 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
     job_id: str | None = None
     runtime_config: RuntimeConfig | None = None
     created_assets: list[str] = []
-    owned_client = client is None
-    http_client: HttpClient = client or httpx.Client(timeout=options.timeout_seconds, follow_redirects=False)
+    owned_client = False
+    http_client: HttpClient | None = client
     api_url = _report_url(options.api_url)
     failure: ValidationError | None = None
     try:
+        _check_quality_options(options)
+        if http_client is None:
+            http_client = httpx.Client(timeout=options.timeout_seconds, follow_redirects=False)
+            owned_client = True
         api_url, _, runtime_config = _check_runtime(options, http_client)
         results["runtime"] = StepResult(
             "PASS",
@@ -758,7 +839,7 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
         )
 
         current_field = "provider"
-        provider_detail = _check_provider(stages)
+        provider_detail = _check_provider(runtime_config, options.data_root, asset_id, stages)
         results["provider"] = StepResult("PASS", f"真实 provider checkpoints 完成：{provider_detail}。")
 
         current_field = "es"
@@ -797,7 +878,7 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
             results[field] = StepResult("FAIL", f"未执行：受 {current_field} 失败阻断。")
     finally:
         cleanup_asset_id = asset_id or (created_assets[-1] if created_assets else None)
-        if cleanup_asset_id is not None and runtime_config is not None:
+        if cleanup_asset_id is not None and runtime_config is not None and http_client is not None:
             try:
                 _delete_and_confirm(options, http_client, api_url, runtime_config, cleanup_asset_id, job_id)
                 results["delete"] = StepResult("PASS", "ES、媒体和 SQLite 生命周期数据均已清理，资产仅保留 tombstone。")
@@ -807,7 +888,7 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
             except Exception as exc:
                 results["delete"] = StepResult("FAIL", f"清理发生未预期错误（{type(exc).__name__}）")
                 failure = failure or ValidationError("delete", results["delete"].detail)
-        if owned_client:
+        if owned_client and http_client is not None:
             close = getattr(http_client, "close", None)
             if callable(close):
                 try:
@@ -842,12 +923,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.timeout_seconds <= 0 or args.poll_interval_seconds < 0:
-        print("timeout must be positive and poll interval must be non-negative", file=sys.stderr)
-        return 2
-    if not 0.0 <= args.minimum_similarity <= 1.0:
-        print("minimum similarity must be between 0 and 1", file=sys.stderr)
-        return 2
     options = ValidationOptions(
         api_url=args.api_url,
         ui_url=args.ui_url,

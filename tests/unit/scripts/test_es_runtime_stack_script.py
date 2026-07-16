@@ -1,4 +1,8 @@
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
@@ -389,3 +393,52 @@ def test_sync_server_files_script_rejects_paths_outside_the_repo_and_target_root
     assert "Path '$RelativePath' escapes $Label root" in text
     assert "-Root $repoRoot" in text
     assert "-Root $targetRootPath" in text
+
+
+def _run_sync_script(tmp_path: Path, *include_paths: str) -> subprocess.CompletedProcess[str]:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is required to execute the sync script contract")
+    target = tmp_path / "target"
+    target.mkdir()
+    command = [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(SYNC_SCRIPT.resolve()),
+        "-TargetRoot",
+        str(target),
+        "-DryRun",
+    ]
+    if include_paths:
+        command.extend(("-IncludePaths", *include_paths))
+    return subprocess.run(command, cwd=Path.cwd(), capture_output=True, text=True, timeout=30, check=False)
+
+
+@pytest.mark.parametrize(
+    ("include_path", "expected_error"),
+    [
+        (".gitignore", "not approved"),
+        (".env", "forbidden"),
+        (r".runtime\recorded-video\secret.json", "forbidden"),
+    ],
+)
+def test_sync_server_files_rejects_unapproved_runtime_and_secret_paths(
+    tmp_path: Path,
+    include_path: str,
+    expected_error: str,
+) -> None:
+    completed = _run_sync_script(tmp_path, include_path)
+
+    assert completed.returncode != 0
+    assert expected_error in (completed.stdout + completed.stderr).lower()
+
+
+def test_sync_server_files_default_dry_run_uses_approved_manifest(tmp_path: Path) -> None:
+    completed = _run_sync_script(tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "PASS: dry run completed for selected files" in completed.stdout
