@@ -6,11 +6,9 @@ import json
 import os
 import sys
 from typing import Any
-from urllib.request import Request
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from elasticsearch import AsyncElasticsearch
-
 
 VALIDATION_VIDEO_ID = "runtime-validation-video"
 STALE_VALIDATION_DOCUMENT_QUERY = {
@@ -22,6 +20,7 @@ STALE_VALIDATION_DOCUMENT_QUERY = {
         ]
     }
 }
+
 
 def mock_query_vector(query: str) -> list[float]:
     seed = sum(ord(char) for char in query) % 1000
@@ -69,7 +68,9 @@ def validate_indexed_document(document: dict[str, Any], expected_video_id: str) 
     }
     for key, value in checks.items():
         if document.get(key) != value:
-            raise RuntimeError(f"Indexed document field {key!r} mismatch: expected {value!r}, got {document.get(key)!r}")
+            raise RuntimeError(
+                f"Indexed document field {key!r} mismatch: expected {value!r}, got {document.get(key)!r}"
+            )
     metadata = document.get("metadata")
     if not isinstance(metadata, dict) or metadata.get("site") != "runtime-yard":
         raise RuntimeError(f"Indexed document metadata missing expected site: {metadata!r}")
@@ -92,7 +93,9 @@ def post_ingest(api_url: str, payload: dict[str, Any], timeout_sec: float) -> di
 def post_original_ui_search(api_url: str, query: str, top_k: int, timeout_sec: float) -> dict[str, Any]:
     request = Request(
         f"{api_url.rstrip('/')}/api/v1/search",
-        data=json.dumps({"query": query, "top_k": top_k, "source_type": "video_file", "agent_mode": False}).encode("utf-8"),
+        data=json.dumps({"query": query, "top_k": top_k, "source_type": "video_file", "agent_mode": False}).encode(
+            "utf-8"
+        ),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -162,10 +165,20 @@ async def search_indexed_document(
         body = {
             "query": {
                 "bool": {
-                    "must": [{"multi_match": {
-                        "query": query,
-                        "fields": ["description", "video_name", "sensor_id", "metadata.description", "metadata.site"],
-                    }}],
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": [
+                                    "description",
+                                    "video_name",
+                                    "sensor_id",
+                                    "metadata.description",
+                                    "metadata.site",
+                                ],
+                            }
+                        }
+                    ],
                     "filter": [{"term": {"video_id.keyword": video_id}}],
                 }
             },
