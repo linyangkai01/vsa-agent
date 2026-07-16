@@ -15,7 +15,7 @@ async def test_provider_failures_retry_without_duplicate_documents(recorded_vide
 
     retry_wait = await recorded_video_stack.worker.run_once()
 
-    assert retry_wait.status is JobStatus.RETRY_WAIT
+    assert retry_wait.status is JobStatus.RETRY_WAIT, retry_wait.last_error
     assert retry_wait.attempt == 1
     assert retry_wait.last_error == error_code
     assert await recorded_video_stack.es_ids() == set()
@@ -30,13 +30,14 @@ async def test_provider_failures_retry_without_duplicate_documents(recorded_vide
 
 async def test_partial_elasticsearch_bulk_failure_rolls_back_then_retries(recorded_video_stack):
     job = await recorded_video_stack.upload_and_complete("partial-es.mp4")
-    recorded_video_stack.projection.partial_failure_once = True
+    recorded_video_stack.inject_partial_bulk_failure()
 
     retry_wait = await recorded_video_stack.worker.run_once()
 
-    assert retry_wait.status is JobStatus.RETRY_WAIT
+    assert retry_wait.status is JobStatus.RETRY_WAIT, retry_wait.last_error
     assert retry_wait.attempt == 1
     assert retry_wait.last_error == "ES_5XX"
+    assert recorded_video_stack.partial_bulk_failures == 1
     assert await recorded_video_stack.es_ids() == set()
     assert recorded_video_stack.temporary_files() == set()
 
@@ -48,13 +49,15 @@ async def test_partial_elasticsearch_bulk_failure_rolls_back_then_retries(record
 async def test_worker_kill_reclaims_expired_lease_without_duplicate_segments(recorded_video_stack):
     job = await recorded_video_stack.upload_and_complete("worker-kill.mp4")
 
-    abandoned = await recorded_video_stack.kill_worker()
-    completed = (await recorded_video_stack.wait_completed([job]))[0]
+    crash = await recorded_video_stack.kill_worker(job)
 
-    assert abandoned.status is JobStatus.RUNNING
-    assert abandoned.attempt == 1
-    assert completed.status is JobStatus.COMPLETED
-    assert completed.attempt == 2
+    assert crash.heartbeat_seen is True
+    assert crash.abandoned.status is JobStatus.RUNNING
+    assert crash.abandoned.attempt == 1
+    assert crash.recovered.status is JobStatus.COMPLETED
+    assert crash.recovered.attempt == 2
+    assert await recorded_video_stack.projection_attempts() == {2}
+    assert recorded_video_stack.attempt_files(job.asset_id, 1) == set()
     assert await recorded_video_stack.es_ids() == await recorded_video_stack.expected_segment_ids([job])
     assert recorded_video_stack.temporary_files() == set()
 
@@ -68,6 +71,7 @@ async def test_disk_full_rejects_chunk_without_job_or_residual_file(recorded_vid
     assert response.status_code == 507
     assert response.json()["detail"]["error_code"] == "DISK_FULL"
     assert await recorded_video_stack.job_count(ticket.asset_id) == 0
+    assert await recorded_video_stack.reservation_count(ticket.session_id) == 0
     assert await recorded_video_stack.es_ids() == set()
     assert recorded_video_stack.files_for(ticket.asset_id) == set()
     assert recorded_video_stack.temporary_files() == set()
@@ -89,14 +93,14 @@ async def test_corrupt_media_is_terminal_and_preserves_source(recorded_video_sta
 
 async def test_cancelled_running_job_is_cleaned_after_lease_reclaim(recorded_video_stack):
     job = await recorded_video_stack.upload_and_complete("cancel.mp4")
-    claimed = await recorded_video_stack.kill_worker()
 
-    response = await recorded_video_stack.client.post(f"/api/v1/jobs/{job.job_id}/cancel")
-    cancelled = await recorded_video_stack.worker.run_once()
+    running, response, cancelled = await recorded_video_stack.cancel_running(job)
 
     assert response.status_code == 200
+    assert running.status is JobStatus.RUNNING
     assert cancelled.status is JobStatus.CANCELLED
-    assert cancelled.attempt == claimed.attempt == 1
+    assert cancelled.attempt == running.attempt == 1
+    assert await recorded_video_stack.projection_attempts() == set()
     assert await recorded_video_stack.es_ids() == set()
     assert recorded_video_stack.source_path(job).is_file()
     assert recorded_video_stack.temporary_files() == set()

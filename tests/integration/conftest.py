@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -20,6 +21,7 @@ from werkzeug import Request, Response
 
 from vsa_agent.api import recorded_video as recorded_video_api
 from vsa_agent.config import AppConfig, RecordedVideoConfig, SearchBackendConfig
+from vsa_agent.recorded_video import es_index as es_index_module
 from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.es_index import ElasticsearchProjectionStore, RecordedVideoIndex
@@ -104,7 +106,28 @@ class _ProviderController:
 
 
 class _ControlledMedia:
+    def __init__(self) -> None:
+        self._block_probe = False
+        self.probe_started = asyncio.Event()
+        self.probe_release = asyncio.Event()
+
+    def block_next_probe(self) -> None:
+        self._block_probe = True
+        self.probe_started = asyncio.Event()
+        self.probe_release = asyncio.Event()
+
+    def release_probe(self) -> None:
+        self.probe_release.set()
+
+    def reset_probe(self) -> None:
+        self._block_probe = False
+        self.probe_release.set()
+
     async def probe(self, path: str | Path) -> MediaProbe:
+        if self._block_probe:
+            self.probe_started.set()
+            await self.probe_release.wait()
+            self._block_probe = False
         source = Path(path)
         if source.read_bytes().startswith(b"CORRUPT"):
             raise RecordedVideoError(
@@ -174,6 +197,9 @@ class _MemoryProjection:
     async def ids(self) -> set[str]:
         return set(self.documents)
 
+    async def attempts(self) -> set[int]:
+        return {int(document["job_attempt"]) for document in self.documents.values()}
+
     async def close(self) -> None:
         return None
 
@@ -202,6 +228,16 @@ class _ElasticsearchProjection:
         response = await self.client.search(index=self.alias, query={"match_all": {}}, size=10_000, _source=False)
         return {str(hit["_id"]) for hit in response["hits"]["hits"]}
 
+    async def attempts(self) -> set[int]:
+        await self.client.indices.refresh(index=self.alias)
+        response = await self.client.search(
+            index=self.alias,
+            query={"match_all": {}},
+            size=10_000,
+            _source_includes=["job_attempt"],
+        )
+        return {int(hit["_source"]["job_attempt"]) for hit in response["hits"]["hits"]}
+
     async def close(self) -> None:
         try:
             aliases = await self.client.indices.get_alias(name=self.alias)
@@ -211,20 +247,106 @@ class _ElasticsearchProjection:
             await self.client.close()
 
 
+class _ControlledBulkIndex:
+    alias = "controlled-bulk-segments"
+
+    async def bootstrap(self, model: str, dims: int) -> str:
+        assert model == "embedding-it"
+        assert dims == _EMBEDDING_DIMS
+        return self.alias
+
+
+class _ControlledBulkClient:
+    def __init__(self) -> None:
+        self.documents: dict[str, dict[str, Any]] = {}
+        self.partial_failure_once = False
+        self.partial_failures = 0
+
+    def options(self, **_kwargs):
+        return self
+
+    async def delete_by_query(self, *, query, **_kwargs):
+        filters = query.get("bool", {}).get("filter", [])
+        terms = {}
+        for entry in filters:
+            terms.update(entry.get("term", {}))
+        terms.update(query.get("term", {}))
+        before = len(self.documents)
+        self.documents = {
+            key: document
+            for key, document in self.documents.items()
+            if not all(document.get(field) == value for field, value in terms.items())
+        }
+        return {"deleted": before - len(self.documents), "failures": [], "timed_out": False}
+
+    async def close(self) -> None:
+        return None
+
+
+async def _controlled_streaming_bulk(client, actions, **kwargs):
+    assert kwargs == {
+        "raise_on_error": False,
+        "raise_on_exception": False,
+        "refresh": "wait_for",
+    }
+    action_list = list(actions)
+    fail_index = len(action_list) - 1 if client.partial_failure_once else -1
+    client.partial_failure_once = False
+    for index, action in enumerate(action_list):
+        document_id = str(action["_id"])
+        if index == fail_index:
+            client.partial_failures += 1
+            yield False, {"update": {"_id": document_id, "status": 503, "error": {"reason": "injected"}}}
+            continue
+        document = dict(action["script"]["params"]["document"])
+        document["_id"] = document_id
+        current = client.documents.get(document_id)
+        if current is None or int(current["job_attempt"]) <= int(document["job_attempt"]):
+            client.documents[document_id] = document
+        yield True, {"update": {"_id": document_id, "status": 200, "result": "updated"}}
+
+
+class _ControlledBulkProjection:
+    def __init__(self) -> None:
+        self.client = _ControlledBulkClient()
+        self.store = ElasticsearchProjectionStore(self.client, index=_ControlledBulkIndex())
+
+    async def project(self, documents, *, job_id: str, attempt: int) -> ProjectionResult:
+        return await self.store.project(documents, job_id=job_id, attempt=attempt)
+
+    async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+        await self.store.delete_projection(asset_id, job_id, attempt)
+
+    async def delete_asset(self, asset_id: str) -> None:
+        await self.store.delete_asset(asset_id)
+
+    async def close(self) -> None:
+        await self.store.close()
+
+
 class _FaultInjectingProjection:
     def __init__(self, backend: _MemoryProjection | _ElasticsearchProjection) -> None:
         self.backend = backend
-        self.partial_failure_once = False
+        self.partial_backend = _ControlledBulkProjection()
+        self._partial_armed = False
+        self._partial_attempts: set[tuple[str, str, int]] = set()
         self.delete_failure_once = False
 
     async def project(self, documents, *, job_id: str, attempt: int) -> ProjectionResult:
-        result = await self.backend.project(documents, job_id=job_id, attempt=attempt)
-        if self.partial_failure_once and result.indexed_ids:
-            self.partial_failure_once = False
-            return ProjectionResult(indexed_ids=result.indexed_ids[:-1], failed_ids=result.indexed_ids[-1:])
-        return result
+        if self._partial_armed:
+            self._partial_armed = False
+            self.partial_backend.client.partial_failure_once = True
+            asset_id = str(documents[0]["asset_id"])
+            self._partial_attempts.add((asset_id, job_id, attempt))
+            return await self.partial_backend.project(documents, job_id=job_id, attempt=attempt)
+        return await self.backend.project(documents, job_id=job_id, attempt=attempt)
 
     async def delete_projection(self, asset_id: str, job_id: str, attempt: int) -> None:
+        key = (asset_id, job_id, attempt)
+        if key in self._partial_attempts:
+            await self.partial_backend.delete_projection(asset_id, job_id, attempt)
+            self._partial_attempts.remove(key)
+            return
         await self.backend.delete_projection(asset_id, job_id, attempt)
 
     async def delete_asset(self, asset_id: str) -> None:
@@ -232,12 +354,21 @@ class _FaultInjectingProjection:
             self.delete_failure_once = False
             raise RecordedVideoError(ErrorCode.ES_5XX, retryable=True, message="ES_5XX: injected delete interruption")
         await self.backend.delete_asset(asset_id)
+        await self.partial_backend.delete_asset(asset_id)
+
+    def inject_partial_bulk_failure(self) -> None:
+        self._partial_armed = True
+
+    @property
+    def partial_bulk_failures(self) -> int:
+        return self.partial_backend.client.partial_failures
 
     async def ids(self) -> set[str]:
         return await self.backend.ids()
 
     async def close(self) -> None:
         await self.backend.close()
+        await self.partial_backend.close()
 
 
 class _FaultyAssetStore(LocalAssetStore):
@@ -271,6 +402,13 @@ class UploadedJob:
     content: bytes
 
 
+@dataclass(frozen=True)
+class WorkerCrash:
+    abandoned: Job
+    recovered: Job
+    heartbeat_seen: bool
+
+
 class RecordedVideoStack:
     def __init__(
         self,
@@ -282,6 +420,8 @@ class RecordedVideoStack:
         projection: _FaultInjectingProjection,
         provider: _ProviderController,
         clock: _Clock,
+        media: _ControlledMedia,
+        pipeline: RecordedVideoPipeline,
     ) -> None:
         self.client = client
         self.repository = repository
@@ -290,6 +430,20 @@ class RecordedVideoStack:
         self.projection = projection
         self.provider = provider
         self.clock = clock
+        self.media = media
+        self.pipeline = pipeline
+
+    def _worker(self, *, output=lambda _line: None, worker_id: str | None = None) -> RecordedVideoWorker:
+        return RecordedVideoWorker(
+            repository=self.repository,
+            pipeline=self.pipeline,
+            worker_concurrency=3,
+            lease_sec=2,
+            max_attempts=3,
+            clock=self.clock,
+            output=output,
+            worker_id=worker_id,
+        )
 
     async def begin_upload(self, filename: str) -> UploadTicket:
         response = await self.client.post("/api/v1/videos", json={"filename": filename})
@@ -378,15 +532,68 @@ class RecordedVideoStack:
             ids.update(segment.segment_id for segment in await self.repository.list_segments(job.asset_id))
         return ids
 
-    async def kill_worker(self) -> Job:
-        claimed = await self.repository.claim_due_job("killed-worker", self.clock())
-        assert claimed is not None
+    async def kill_worker(self, job: UploadedJob) -> WorkerCrash:
+        self.media.block_next_probe()
+        heartbeat = asyncio.Event()
+
+        def capture_event(line: str) -> None:
+            if '"event":"job.heartbeat"' in line:
+                heartbeat.set()
+
+        crashed_worker = self._worker(output=capture_event, worker_id="crashed-worker")
+        task = asyncio.create_task(crashed_worker.run())
+        await asyncio.wait_for(self.media.probe_started.wait(), timeout=3)
+        await asyncio.wait_for(heartbeat.wait(), timeout=3)
+        abandoned = await self.repository.get_job(job.job_id)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.media.reset_probe()
         self.clock.advance(3)
-        return claimed
+        replacement = self._worker(worker_id="replacement-worker")
+        assert await replacement.run_once() is not None
+        recovered = await self.repository.get_job(job.job_id)
+        return WorkerCrash(abandoned=abandoned, recovered=recovered, heartbeat_seen=heartbeat.is_set())
+
+    async def cancel_running(self, job: UploadedJob) -> tuple[Job, httpx.Response, Job]:
+        self.media.block_next_probe()
+        task = asyncio.create_task(self.worker.run_once())
+        await asyncio.wait_for(self.media.probe_started.wait(), timeout=3)
+        running = await self.repository.get_job(job.job_id)
+        response = await self.client.post(f"/api/v1/jobs/{job.job_id}/cancel")
+        self.media.release_probe()
+        cancelled = await asyncio.wait_for(task, timeout=3)
+        self.media.reset_probe()
+        assert isinstance(cancelled, Job)
+        return running, response, cancelled
+
+    def inject_partial_bulk_failure(self) -> None:
+        self.projection.inject_partial_bulk_failure()
+
+    @property
+    def partial_bulk_failures(self) -> int:
+        return self.projection.partial_bulk_failures
+
+    async def projection_attempts(self) -> set[int]:
+        return await self.projection.backend.attempts()
+
+    def attempt_files(self, asset_id: str, attempt: int) -> set[str]:
+        root = self.store.root / "assets" / asset_id / "derived" / "v1" / "attempts" / str(attempt)
+        if not root.exists():
+            return set()
+        return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
 
     async def job_count(self, asset_id: str) -> int:
         with sqlite3.connect(self.repository.database_path) as connection:
             row = connection.execute("SELECT COUNT(*) FROM jobs WHERE asset_id = ?", (asset_id,)).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    async def reservation_count(self, session_id: str) -> int:
+        with sqlite3.connect(self.repository.database_path) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM upload_chunks WHERE session_id = ? AND status = 'reserved'",
+                (session_id,),
+            ).fetchone()
         assert row is not None
         return int(row[0])
 
@@ -420,6 +627,18 @@ async def recorded_video_stack(
             "recorded-video integration requires VSA_TEST_ES_URL for real Elasticsearch or "
             "VSA_RECORDED_VIDEO_TEST_FALLBACK=1 for the explicit local projection fallback"
         )
+
+    production_streaming_bulk = es_index_module.async_streaming_bulk
+
+    async def streaming_bulk_dispatch(client, actions, **kwargs):
+        if isinstance(client, _ControlledBulkClient):
+            async for result in _controlled_streaming_bulk(client, actions, **kwargs):
+                yield result
+            return
+        async for result in production_streaming_bulk(client, actions, **kwargs):
+            yield result
+
+    monkeypatch.setattr(es_index_module, "async_streaming_bulk", streaming_bulk_dispatch)
 
     provider = _ProviderController()
     httpserver.expect_request("/v1/chat/completions", method="POST").respond_with_handler(provider.vision)
@@ -487,10 +706,11 @@ async def recorded_video_stack(
         timeout_sec=5,
         concurrency=3,
     )
+    media = _ControlledMedia()
     pipeline = RecordedVideoPipeline(
         repository=repository,
         asset_store=store,
-        media=_ControlledMedia(),
+        media=media,
         segmenter=FixedDurationSegmenter(2),
         vision=vision,
         embedding=embedding,
@@ -525,6 +745,8 @@ async def recorded_video_stack(
         projection=projection,
         provider=provider,
         clock=clock,
+        media=media,
+        pipeline=pipeline,
     )
     try:
         yield stack

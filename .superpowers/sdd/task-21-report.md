@@ -59,3 +59,35 @@
 - fallback 不是全 mock：API、SQLite、文件系统、provider HTTP 协议、pipeline、Worker 与状态机均为生产实现；仅 ES 和媒体外部进程边界可控替换。
 - 每个故障测试同时检查 job 状态/attempt、投影文档和关键残留文件。
 - 已验证未配置依赖模式明确失败；真实 ES 模式仍需在具备 ES 的验证环境执行。
+
+## 审查修复（2026-07-16）
+
+### 新增 RED
+
+- crash window 定向 4 测：`3 failed, 1 passed`。确认 confirmed chunks + 空摘要仍可创建 job；文件已发布但 finalize 未提交时 `/complete` 不恢复；源文件摘要冲突仍返回 202。
+- 真实故障路径定向 5 测：`4 failed, 1 passed`。旧 fixture 直接 claim 数据库、无 reservation 计数、无真实 pipeline cancel、partial failure 在成功后篡改结果。
+- ES projection contract：pipeline 写入 `readiness.authority=sqlite`，但 `SegmentDocument` 在 bulk 前拒绝该字段。
+
+### 修复
+
+- `complete_upload` 在 existing-job 幂等返回前 fail closed 校验 source integrity 已 finalized。
+- `/complete` 每次从受控 asset path 读取 source、重算 size/SHA-256、用唯一 upload session 原子 finalize；覆盖发布后崩溃恢复、缺文件、摘要冲突和重复 complete。
+- Worker kill 现在启动真实 `RecordedVideoWorker.run()`，等待 pipeline claim 与 `job.heartbeat` 后取消 task；推进 lease 后由第二 Worker reclaim，并断言只发布 attempt 2。
+- cancel 在真实运行且阻塞于 probe 的 pipeline 上发出请求，释放 probe 后通过生产 cancel safe point 清理。
+- partial ES failure 通过真实 `ElasticsearchProjectionStore` 和受控 `async_streaming_bulk` fake client 返回一成功一 503；不再修改成功 ProjectionResult。
+- ES readiness schema/mapping 显式接受固定 `authority=sqlite` keyword；缺失或错误 authority mapping 的旧索引 readiness 校验失败。
+- 三并发明确断言 3 个 completed job、每 asset 2 segments、总计 6；disk-full 明确断言 reservation 已释放。
+
+### 新 GREEN
+
+- 相关 unit + integration fallback：`127 passed, 1 warning in 26.95s`。
+- Ruff：`All checks passed!`
+- 剩余环境风险不变：本机没有真实 ES 与 ffmpeg；真实 ES 服务验证留给 Task 24，不计入本次通过证据。
+
+### 最终摘要格式收紧（2026-07-16）
+
+- RED：`pytest tests/unit/recorded_video/test_repository.py::test_complete_upload_rejects_confirmed_chunks_when_source_integrity_is_not_finalized -q` 得到 `1 failed, 1 passed`；空摘要被拒绝，但 64 个非十六进制字符仍错误创建 job。
+- 修复：`complete_upload()` 仅接受数据库中已经持久化为 64 位小写十六进制的 source SHA-256；长度正确但字符非法的占位值继续 fail closed。
+- GREEN：相同定向命令得到 `2 passed in 0.18s`。
+- 最终 Task 21 回归：`128 passed, 1 warning in 26.52s`；warning 仍为既有 FastAPI/Starlette `TestClient` 弃用提示。
+- 最终 Ruff：`All checks passed!`；`git diff --check` 无输出并返回 0。

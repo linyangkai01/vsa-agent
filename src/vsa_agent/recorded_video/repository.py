@@ -779,9 +779,16 @@ class JobRepository:
         snapshot = dict(config_snapshot or {})
 
         async with self._write_transaction() as connection:
-            asset = await self._fetchone(connection, "SELECT status FROM assets WHERE asset_id = ?", (asset_id,))
+            asset = await self._fetchone(
+                connection,
+                "SELECT status, sha256 FROM assets WHERE asset_id = ?",
+                (asset_id,),
+            )
             if asset is None:
                 raise KeyError(f"unknown asset: {asset_id}")
+            source_sha256 = str(asset["sha256"])
+            if len(source_sha256) != 64 or any(character not in "0123456789abcdef" for character in source_sha256):
+                raise ValueError("source integrity is not finalized")
             deletion_request = await self._fetchone(
                 connection,
                 "SELECT 1 FROM asset_deletion_requests WHERE asset_id = ?",

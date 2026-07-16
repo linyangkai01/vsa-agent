@@ -6,7 +6,7 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from elasticsearch.helpers import async_streaming_bulk
@@ -37,6 +37,7 @@ class _ESProjectionReadiness(BaseModel):
     job_id: str
     pipeline_version: str
     attempt: int = Field(gt=0)
+    authority: Literal["sqlite"]
 
 
 class SegmentDocument(BaseModel):
@@ -134,6 +135,7 @@ def build_segment_mapping(*, model: str, version: str, dims: int) -> dict[str, A
                     "job_id": dict(keyword),
                     "pipeline_version": dict(keyword),
                     "attempt": dict(long),
+                    "authority": dict(keyword),
                 },
             },
             "pipeline_version": dict(keyword),

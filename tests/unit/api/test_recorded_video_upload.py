@@ -102,6 +102,67 @@ def test_final_chunk_persists_assembled_integrity_before_idempotent_complete(
     assert persisted == (len(content), hashlib.sha256(content).hexdigest())
 
 
+def test_complete_recovers_file_published_before_integrity_commit(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vsa_agent.api import recorded_video
+
+    created = _create_upload(client, "yard.mp4")
+    original_finalize = recorded_video.JobRepository.finalize_assembled_source
+
+    async def crash_before_integrity_commit(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated process crash")
+
+    monkeypatch.setattr(recorded_video.JobRepository, "finalize_assembled_source", crash_before_integrity_commit)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        _upload_chunk(client, created["url"], b"video", filename="yard.mp4")
+    monkeypatch.setattr(recorded_video.JobRepository, "finalize_assembled_source", original_finalize)
+
+    completion = client.post(f"/api/v1/videos/{created['asset_id']}/complete", json={})
+
+    assert completion.status_code == 202
+    database_path = tmp_path / "recorded-video" / "recorded-video.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        asset = connection.execute(
+            "SELECT size_bytes, sha256 FROM assets WHERE asset_id = ?",
+            (created["asset_id"],),
+        ).fetchone()
+        jobs = connection.execute("SELECT COUNT(*) FROM jobs WHERE asset_id = ?", (created["asset_id"],)).fetchone()
+    assert asset == (5, hashlib.sha256(b"video").hexdigest())
+    assert jobs == (1,)
+
+
+def test_complete_fails_closed_for_missing_or_conflicting_assembled_source(
+    client: TestClient,
+) -> None:
+    missing = _create_upload(client, "missing.mp4")
+    missing_response = client.post(f"/api/v1/videos/{missing['asset_id']}/complete", json={})
+    assert missing_response.status_code == 409
+
+    created = _create_upload(client, "yard.mp4")
+    uploaded = _upload_chunk(client, created["url"], b"video", filename="yard.mp4")
+    assert uploaded.status_code == 200
+    Path(uploaded.json()["filePath"]).write_bytes(b"other")
+
+    conflicting = client.post(f"/api/v1/videos/{created['asset_id']}/complete", json={})
+
+    assert conflicting.status_code == 409
+    assert "different integrity" in conflicting.json()["detail"]
+
+
+def test_repeated_complete_is_idempotent_after_integrity_revalidation(client: TestClient) -> None:
+    created = _create_upload(client, "yard.mp4")
+    assert _upload_chunk(client, created["url"], b"video", filename="yard.mp4").status_code == 200
+
+    first = client.post(f"/api/v1/videos/{created['asset_id']}/complete", json={})
+    second = client.post(f"/api/v1/videos/{created['asset_id']}/complete", json={})
+
+    assert first.status_code == second.status_code == 202
+    assert first.json() == second.json()
+
+
 def test_chunk_cumulative_size_limit_rejects_before_assembly(client: TestClient, tmp_path: Path) -> None:
     created = _create_upload(client)
 

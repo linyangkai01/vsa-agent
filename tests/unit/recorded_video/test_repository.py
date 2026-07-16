@@ -576,6 +576,23 @@ async def test_finalize_assembled_source_is_atomic_and_integrity_idempotent(repo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unfinalized_sha256", ["", "x" * 64])
+async def test_complete_upload_rejects_confirmed_chunks_when_source_integrity_is_not_finalized(
+    repo: JobRepository,
+    unfinalized_sha256: str,
+) -> None:
+    asset = _asset().model_copy(update={"size_bytes": 0, "sha256": unfinalized_sha256})
+    session = _session().model_copy(update={"total_chunks": 1})
+    await repo.create_upload_session(asset, session)
+    await repo.record_chunk(session.session_id, 1, "chunk", size_bytes=5, path="000001.part")
+
+    with pytest.raises(ValueError, match="source integrity is not finalized"):
+        await repo.complete_upload(asset.asset_id, "v1", now=NOW)
+
+    assert _fetch_one(repo.database_path, "SELECT COUNT(*) AS value FROM jobs")["value"] == 0
+
+
+@pytest.mark.asyncio
 async def test_record_chunk_rejects_unknown_sessions_and_numbers_outside_the_session(repo: JobRepository):
     with pytest.raises(KeyError, match="unknown upload session"):
         await repo.record_chunk("missing-session", 1, "chunk")

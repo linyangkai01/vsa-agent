@@ -28,6 +28,7 @@ def _document(*, ordinal: int = 0, attempt: int = 2) -> dict[str, object]:
             "job_id": JOB_ID,
             "pipeline_version": "v1",
             "attempt": attempt,
+            "authority": "sqlite",
         },
         "pipeline_version": "v1",
         "embedding_model": "embed-model",
@@ -107,6 +108,24 @@ async def test_projection_bulk_is_attempt_conditional_and_reports_each_failure(m
     assert action["script"]["params"]["attempt"] == 2
     assert "job_attempt" in action["script"]["source"]
     assert "ctx.op = 'none'" in action["script"]["source"]
+
+
+@pytest.mark.asyncio
+async def test_projection_accepts_pipeline_sqlite_readiness_authority(monkeypatch) -> None:
+    captured_actions: list[dict[str, object]] = []
+
+    async def fake_streaming_bulk(_client, actions, **_kwargs):
+        captured_actions.extend(deepcopy(list(actions)))
+        yield True, {"update": {"_id": captured_actions[0]["_id"], "status": 200}}
+
+    monkeypatch.setattr(es_index, "async_streaming_bulk", fake_streaming_bulk)
+    document = _document()
+    store = es_index.ElasticsearchProjectionStore(FakeClient(), index=FakeRecordedVideoIndex())
+
+    result = await store.project([document], job_id=JOB_ID, attempt=2)
+
+    assert result.indexed_ids == [document["_id"]]
+    assert captured_actions[0]["upsert"]["readiness"]["authority"] == "sqlite"
 
 
 @pytest.mark.asyncio

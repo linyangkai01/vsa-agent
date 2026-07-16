@@ -137,6 +137,7 @@ def _segment_payload() -> dict[str, object]:
             "job_id": "job-1",
             "pipeline_version": pipeline_version,
             "attempt": 1,
+            "authority": "sqlite",
         },
         "pipeline_version": pipeline_version,
         "embedding_model": "embed-model",
@@ -184,6 +185,7 @@ async def test_bootstrap_creates_explicit_versioned_mapping_then_atomically_upda
             "job_id": {"type": "keyword"},
             "pipeline_version": {"type": "keyword"},
             "attempt": {"type": "long"},
+            "authority": {"type": "keyword"},
         },
     }
     assert mapping["properties"]["vector"] == {
@@ -269,6 +271,8 @@ async def test_existing_alias_with_wrong_vector_dimension_blocks_readiness(
         lambda mapping: mapping["_meta"].__setitem__("index_version", "v2"),
         lambda mapping: mapping["_meta"].__setitem__("unexpected", "value"),
         lambda mapping: mapping["properties"].__setitem__("unexpected", {"type": "keyword"}),
+        lambda mapping: mapping["properties"]["readiness"]["properties"].pop("authority"),
+        lambda mapping: mapping["properties"]["readiness"]["properties"].__setitem__("authority", {"type": "long"}),
         lambda mapping: mapping["properties"]["vector"].__setitem__("similarity", "dot_product"),
         lambda mapping: mapping.__setitem__("dynamic", True),
     ],
@@ -420,11 +424,11 @@ def test_segment_document_accepts_task12_projection_contract_and_rejects_unknown
         SegmentDocument.model_validate({**document.model_dump(by_alias=True), "unexpected": True})
     with pytest.raises(ValueError, match="finite floats"):
         SegmentDocument.model_validate({**payload, "vector": [1, 2, 3]})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="authority"):
         SegmentDocument.model_validate(
             {
                 **payload,
-                "readiness": {**payload["readiness"], "authority": "sqlite"},
+                "readiness": {**payload["readiness"], "authority": "elasticsearch"},
             }
         )
 

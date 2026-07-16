@@ -186,16 +186,6 @@ def build_recorded_video_projection_store(config: AppConfig) -> ElasticsearchPro
     )
 
 
-def _assembled_source_exists(store: LocalAssetStore, asset_id: str) -> bool:
-    try:
-        if str(uuid.UUID(asset_id)) != asset_id:
-            return False
-    except ValueError:
-        return False
-    source_root = store.root / "assets" / asset_id / "source"
-    return any((source_root / f"original.{extension}").is_file() for extension in _ALLOWED_EXTENSIONS)
-
-
 def _source_integrity(path: str | Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     size_bytes = 0
@@ -409,12 +399,24 @@ async def complete_recorded_video(
     repository, store, _ = _repository_and_store()
     await repository.initialize()
     try:
-        await repository.get_asset(asset_id)
+        asset = await repository.get_asset(asset_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="asset not found") from exc
-    if not _assembled_source_exists(store, asset_id):
-        raise HTTPException(status_code=409, detail="upload is not assembled")
     try:
+        source_path = await store.resolve_source_path(asset)
+        size_bytes, sha256 = _source_integrity(source_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=409, detail="upload is not assembled")
+    session_ids = await repository.list_asset_upload_session_ids(asset_id)
+    if len(session_ids) != 1:
+        raise HTTPException(status_code=409, detail="upload session is unavailable")
+    try:
+        await repository.finalize_assembled_source(
+            session_ids[0],
+            asset_id,
+            size_bytes=size_bytes,
+            sha256=sha256,
+        )
         job = await repository.complete_upload(asset_id, _PIPELINE_VERSION)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="asset not found") from exc
