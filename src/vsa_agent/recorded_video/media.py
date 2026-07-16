@@ -324,9 +324,9 @@ class MediaProcessor:
         cleanup_errors: list[BaseException] = []
 
         async def bounded_wait(deadline: float) -> None:
-            timeout = max(0.0, deadline - loop.time())
             try:
-                await asyncio.wait_for(process.wait(), timeout=timeout)
+                async with asyncio.timeout_at(deadline):
+                    await process.wait()
             except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
 

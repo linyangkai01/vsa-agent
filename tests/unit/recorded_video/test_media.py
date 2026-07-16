@@ -433,6 +433,32 @@ async def test_terminate_process_bounds_kill_failure_and_pending_final_wait(
     assert process.wait_calls == 2
 
 
+async def test_terminate_process_attempts_final_wait_when_cleanup_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeAsyncProcess(
+        block=True,
+        kill_error=RuntimeError("private kill failure"),
+        wait_effects=[TimeoutError()],
+        wait_block=True,
+    )
+    clock_values = iter([0.0, 0.0, 0.04])
+
+    class CleanupClock:
+        @staticmethod
+        def time() -> float:
+            return next(clock_values)
+
+    monkeypatch.setattr("vsa_agent.recorded_video.media._PROCESS_TERMINATION_TIMEOUT_SEC", 0.04)
+    monkeypatch.setattr("vsa_agent.recorded_video.media.asyncio.get_running_loop", CleanupClock)
+
+    await MediaProcessor._terminate_process(process)
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.wait_calls == 2
+
+
 async def test_terminate_process_kills_after_non_timeout_wait_error() -> None:
     process = FakeAsyncProcess(
         block=True,
