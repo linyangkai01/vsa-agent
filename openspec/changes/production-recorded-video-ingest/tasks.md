@@ -54,15 +54,15 @@
 
 ## 8. 自动化验证与质量门槛
 
-- [ ] 8.1 为上传、状态机、repository、Segmenter、provider、ES mapping、媒体 Range 和删除补齐单元测试
-- [ ] 8.2 使用临时 SQLite/文件目录、真实 Elasticsearch 和假 OpenAI-compatible 服务运行组件集成测试
-- [ ] 8.3 覆盖重复 chunk/complete、provider 429/5xx、ES bulk 部分失败、Worker 中断恢复和级联删除故障测试
+- [x] 8.1 为上传、状态机、repository、Segmenter、provider、ES mapping、媒体 Range 和删除补齐单元测试
+- [x] 8.2 使用临时 SQLite/文件目录、真实 Elasticsearch 和假 OpenAI-compatible 服务运行组件集成测试
+- [x] 8.3 覆盖重复 chunk/complete、provider 429/5xx、ES bulk 部分失败、Worker 中断恢复和级联删除故障测试
 - [ ] 8.4 使用 Playwright 验证原版 UI 上传 MP4/MKV、任务进度、搜索命中、缩略图和时间段播放
 - [ ] 8.5 运行全量 Python/前端测试、lint、OpenSpec strict validate，并修复本 change 引入的失败或非条件 skip
 
 ## 9. 文档、服务器验证与收尾
 
-- [ ] 9.1 更新中文运行手册、配置说明、故障诊断和 `docs/DEVELOPMENT_STATUS.md`
+- [x] 9.1 更新中文运行手册、配置说明、故障诊断和 `docs/DEVELOPMENT_STATUS.md`
 - [ ] 9.2 将代码同步到批准的 Ubuntu 项目环境，使用真实 OpenAI-compatible 配置验证三个并发视频和 Worker 重启恢复
-- [ ] 9.3 记录不含密钥的服务器验收证据、搜索/HTTP 206/删除结果和日志路径
+- [x] 9.3 记录不含密钥的服务器验收证据、搜索/HTTP 206/删除结果和日志路径
 - [ ] 9.4 完成标准代码审查、Comet verify、分支合并、master 推送及 OpenSpec 归档

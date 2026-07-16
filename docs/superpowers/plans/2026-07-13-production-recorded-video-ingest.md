@@ -499,16 +499,16 @@ def test_launcher_starts_worker_and_default_mode_does_not_run_ingest_smoke():
 - Consumes: Task 5-16 的 API、Worker、端口和 ES alias。
 - Produces: `recorded_video_stack` fixture，提供 `upload_and_complete()`、`wait_completed()`、`es_ids()`、`kill_worker()`。
 
-- [ ] **Step 1: 写真实 ES 三并发视频测试。**
+- [x] **Step 1: 写真实 ES 三并发视频测试。**
 ```python
 async def test_three_uploads_create_exactly_one_document_per_segment(stack):
     jobs = await asyncio.gather(*(stack.upload_and_complete(name) for name in ("a.mp4","b.mp4","c.mkv")))
     await stack.wait_completed(jobs); assert await stack.es_ids() == await stack.expected_segment_ids()
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/integration/test_recorded_video_flow.py tests/integration/test_recorded_video_failures.py -q`。Expected: FAIL，fixture 与临时运行时不存在。
-- [ ] **Step 3: 实现可控集成夹具。** 测试启动临时 SQLite/目录、真实 Docker ES 和本地 `pytest-httpserver` OpenAI-compatible 服务；通过显式环境变量启用测试 fallback，不访问外网。
-- [ ] **Step 4: 补全确定性故障用例。** 分别注入重复 chunk/complete、provider 429/5xx、ES bulk 部分失败、Worker kill/lease reclaim、磁盘不足、坏媒体、取消和删除中断；每个用例断言 job 状态、attempt、ES 文档数和残留文件。
-- [ ] **Step 5: 验证与提交。** Run: `pytest tests/integration/test_recorded_video_flow.py tests/integration/test_recorded_video_failures.py -q`。Expected: PASS。Run: `git add tests/integration && git commit -m "test: cover recorded video integration failures"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/integration/test_recorded_video_flow.py tests/integration/test_recorded_video_failures.py -q`。Expected: FAIL，fixture 与临时运行时不存在。
+- [x] **Step 3: 实现可控集成夹具。** 测试启动临时 SQLite/目录、真实 Docker ES 和本地 `pytest-httpserver` OpenAI-compatible 服务；通过显式环境变量启用测试 fallback，不访问外网。
+- [x] **Step 4: 补全确定性故障用例。** 分别注入重复 chunk/complete、provider 429/5xx、ES bulk 部分失败、Worker kill/lease reclaim、磁盘不足、坏媒体、取消和删除中断；每个用例断言 job 状态、attempt、ES 文档数和残留文件。
+- [x] **Step 5: 验证与提交。** Run: `pytest tests/integration/test_recorded_video_flow.py tests/integration/test_recorded_video_failures.py -q`。Expected: PASS。Run: `git add tests/integration && git commit -m "test: cover recorded video integration failures"`。
 
 ### Task 22: 原版 UI Playwright 端到端验收（OpenSpec 8.4）
 
@@ -549,16 +549,16 @@ test('uploads, indexes and plays a recorded-video segment', async ({ page, reque
 **Interfaces:**
 - Produces: `python scripts/recorded-video-validate.py --api-url URL --ui-url URL --report PATH`，失败返回非零；报告字段为 `runtime/job_stages/provider/es/search/media/delete`。
 
-- [ ] **Step 1: 写验证脚本失败传播测试。**
+- [x] **Step 1: 写验证脚本失败传播测试。**
 ```python
 def test_validation_script_returns_nonzero_when_media_range_is_not_206(tmp_path):
     result = run_validator(fake_api(status=200), report=tmp_path / 'report.md')
     assert result.exit_code == 1
 ```
-- [ ] **Step 2: 验证失败。** Run: `pytest tests/unit/scripts/test_recorded_video_validate.py -q`。Expected: FAIL，验证器不存在。
-- [ ] **Step 3: 实现验证器。** 顺序检查无密钥配置摘要、组件 readiness、job stage history、provider/ES outcomes、search asset/segment identity、Range 206 和删除 cleanup；任一依赖/质量断言失败即写失败报告并返回 1，不允许跳过。
-- [ ] **Step 4: 编写中文运行与同步文档。** 文档给出 Ubuntu 单脚本、唯一 SSH UI 隧道、日志路径、故障诊断、`--validate` 和无 sudo 前提；同步清单逐项列出新增 API/领域/脚本/前端/测试/文档。
-- [ ] **Step 5: 验证与提交。** Run: `pytest tests/unit/scripts/test_recorded_video_validate.py -q`。Expected: PASS。Run: `git add scripts/recorded-video-validate.py scripts/sync-server-files.ps1 docs tests/unit/scripts/test_recorded_video_validate.py && git commit -m "docs: document recorded video runtime validation"`。
+- [x] **Step 2: 验证失败。** Run: `pytest tests/unit/scripts/test_recorded_video_validate.py -q`。Expected: FAIL，验证器不存在。
+- [x] **Step 3: 实现验证器。** 顺序检查无密钥配置摘要、组件 readiness、job stage history、provider/ES outcomes、search asset/segment identity、Range 206 和删除 cleanup；任一依赖/质量断言失败即写失败报告并返回 1，不允许跳过。
+- [x] **Step 4: 编写中文运行与同步文档。** 文档给出 Ubuntu 单脚本、唯一 SSH UI 隧道、日志路径、故障诊断、`--validate` 和无 sudo 前提；同步清单逐项列出新增 API/领域/脚本/前端/测试/文档。
+- [x] **Step 5: 验证与提交。** Run: `pytest tests/unit/scripts/test_recorded_video_validate.py -q`。Expected: PASS。Run: `git add scripts/recorded-video-validate.py scripts/sync-server-files.ps1 docs tests/unit/scripts/test_recorded_video_validate.py && git commit -m "docs: document recorded video runtime validation"`。
 
 ### Task 24: 全量质量门与 Ubuntu 真实模型验收证据（OpenSpec 8.5、9.2、9.4）
 
