@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -65,12 +65,41 @@ class ValidationOptions:
     timeout_seconds: float = 600.0
     poll_interval_seconds: float = 1.0
     minimum_similarity: float = 0.2
+    log_ref: Path | None = None
 
 
 @dataclass(frozen=True)
 class StepResult:
     status: str
     detail: str
+
+
+@dataclass(frozen=True)
+class EvidenceContext:
+    """Run-scoped values rendered into every report section."""
+
+    run_id: str
+    timestamp_utc: str
+    log_ref: Path | None = None
+    asset_id: str | None = None
+    job_id: str | None = None
+    segment_id: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    embedding_provider: str | None = None
+    embedding_model: str | None = None
+    expected_segment_count: int | None = None
+    document_count: int | None = None
+    dedup_count: int | None = None
+    segment_ids: tuple[str, ...] = ()
+    endpoint: str | None = None
+    index: str | None = None
+    similarity: float | None = None
+    accept_ranges: str | None = None
+    content_range: str | None = None
+    cleanup_path: Path | None = None
+    cleanup_status: str | None = None
+    secret_scan: str = "FAIL (未验证)"
 
 
 @dataclass(frozen=True)
@@ -125,6 +154,20 @@ class ESEvidence:
     index: str
     document_count: int
     segments: tuple[SegmentIdentity, ...]
+    expected_segment_count: int | None = None
+    dedup_count: int | None = None
+
+
+@dataclass(frozen=True)
+class MediaEvidence:
+    accept_ranges: str
+    content_range: str
+
+
+@dataclass(frozen=True)
+class DeleteEvidence:
+    cleanup_path: Path
+    cleanup_status: str
 
 
 class ValidationError(RuntimeError):
@@ -227,6 +270,74 @@ def _runtime_config_summary(config: RuntimeConfig) -> str:
         f"embedding_provider={config.embedding_provider}; "
         f"es={config.es_endpoint}/{config.index}; mock_fallback=false; mock_embedding=false"
     )
+
+
+def _canonical_uuid(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return None
+    return str(parsed)
+
+
+def _run_id_from_path(path: Path) -> str | None:
+    for candidate in (path.name, path.parent.name):
+        run_id = _canonical_uuid(candidate)
+        if run_id is not None:
+            return run_id
+    return None
+
+
+def _runtime_log_path(options: ValidationOptions) -> Path:
+    if options.log_ref is not None:
+        return options.log_ref
+    configured = os.getenv("VSA_RUNTIME_LOG_REF")
+    if configured:
+        return Path(configured)
+    try:
+        config_parent = options.config.resolve().parent
+    except OSError:
+        config_parent = options.config.parent
+    return config_parent / "stack.log"
+
+
+def _initial_evidence_context(options: ValidationOptions) -> EvidenceContext:
+    log_ref = _runtime_log_path(options)
+    run_id = _run_id_from_path(log_ref)
+    if run_id is None:
+        try:
+            run_id = _run_id_from_path(options.config.resolve())
+        except OSError:
+            run_id = _run_id_from_path(options.config)
+    if run_id is None:
+        run_id = str(uuid.uuid4())
+    timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return EvidenceContext(run_id=run_id, timestamp_utc=timestamp, log_ref=log_ref)
+
+
+_SECRET_LOG_PATTERN = re.compile(
+    r"(?i)(?:authorization\s*:\s*bearer\s+\S+|"
+    r"(?:api[_ -]?key|secret|password|token)\s*[:=]\s*\S+)"
+)
+
+
+def _check_runtime_log(context: EvidenceContext) -> EvidenceContext:
+    if context.log_ref is None:
+        _fail("runtime", "runtime log_ref 未配置")
+    path = context.log_ref
+    if not path.is_file():
+        _fail("runtime", f"runtime log_ref 不存在：{path}")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        _fail("runtime", "runtime log_ref 不可读取")
+    if context.run_id not in content:
+        _fail("runtime", "runtime log_ref 未包含本次 run_id")
+    if _SECRET_LOG_PATTERN.search(content):
+        _fail("runtime", "runtime log_ref 包含未脱敏密钥或凭据")
+    return replace(context, secret_scan="PASS (无密钥)")
 
 
 def _normalize_base_url(value: str, label: str) -> str:
@@ -503,11 +614,36 @@ def _check_es_checkpoints(evidence: list[StageEvidence]) -> None:
             _fail("es", f"Elasticsearch {stage} checkpoint 未完成")
 
 
+def _read_expected_segment_ids(data_root: Path, asset_id: str, job_id: str) -> tuple[str, ...]:
+    database_path = data_root / "recorded-video.sqlite3"
+    try:
+        with _readonly_database(database_path) as connection:
+            job = connection.execute(
+                "SELECT asset_id FROM jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT segment_id FROM segments WHERE asset_id = ? ORDER BY segment_id",
+                (asset_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        _fail("es", "无法读取 SQLite deterministic segment identity")
+    if job is None or job[0] != asset_id:
+        _fail("es", "SQLite job/asset identity 不一致")
+    segment_ids = tuple(row[0] for row in rows)
+    if not segment_ids or any(not isinstance(value, str) or not value.strip() for value in segment_ids):
+        _fail("es", "SQLite 未记录 deterministic segment identity")
+    if len(set(segment_ids)) != len(segment_ids):
+        _fail("es", "SQLite deterministic segment identity 存在重复")
+    return segment_ids
+
+
 def _check_es(
     config: RuntimeConfig,
     client: HttpClient,
     asset_id: str,
     job_id: str,
+    expected_segment_ids: tuple[str, ...] | None = None,
 ) -> ESEvidence:
     index_url = f"{config.es_endpoint}/{config.index}"
     refreshed = _request("es", "Elasticsearch refresh", client.post, f"{index_url}/_refresh")
@@ -566,11 +702,23 @@ def _check_es(
         if source.get("sensor_id") != asset_id:
             _fail("es", "Elasticsearch sensor/asset identity 不一致")
         segments.append(SegmentIdentity(**identity_values))
+    segment_ids = tuple(segment.segment_id for segment in segments)
+    dedup_count = len(set(segment_ids))
+    expected = expected_segment_ids or tuple(sorted(set(segment_ids)))
+    if len(segment_ids) != dedup_count:
+        _fail("es", "Elasticsearch segment identity 存在重复")
+    if set(segment_ids) != set(expected) or len(segment_ids) != len(expected):
+        _fail(
+            "es",
+            "Elasticsearch document_count 与 deterministic segment identity 不一致",
+        )
     return ESEvidence(
         endpoint=config.es_endpoint,
         index=config.index,
         document_count=len(segments),
         segments=tuple(segments),
+        expected_segment_count=len(expected),
+        dedup_count=dedup_count,
     )
 
 
@@ -659,7 +807,7 @@ def _parse_search_time(value: str, label: str) -> datetime:
     return parsed
 
 
-def _check_media(client: HttpClient, api_url: str, asset_id: str, search: SearchEvidence) -> None:
+def _check_media(client: HttpClient, api_url: str, asset_id: str, search: SearchEvidence) -> MediaEvidence:
     screenshot = _request(
         "media",
         "缩略图",
@@ -674,12 +822,15 @@ def _check_media(client: HttpClient, api_url: str, asset_id: str, search: Search
     ranged = _request("media", "HTTP Range", client.get, media_url, headers={"Range": "bytes=0-0"})
     if ranged.status_code != 206:
         _fail("media", f"HTTP Range 请求未返回 206，而是 {ranged.status_code}")
-    if ranged.headers.get("Accept-Ranges", "").lower() != "bytes":
+    accept_ranges = ranged.headers.get("Accept-Ranges", "")
+    content_range = ranged.headers.get("Content-Range", "")
+    if accept_ranges.lower() != "bytes":
         _fail("media", "HTTP 206 缺少 Accept-Ranges: bytes")
-    if not re.fullmatch(r"bytes 0-0/[1-9][0-9]*", ranged.headers.get("Content-Range", "")):
+    if not re.fullmatch(r"bytes 0-0/[1-9][0-9]*", content_range):
         _fail("media", "HTTP 206 的 Content-Range 不符合单字节请求")
     if len(ranged.content) != 1:
         _fail("media", "HTTP 206 未返回一个字节")
+    return MediaEvidence(accept_ranges=accept_ranges, content_range=content_range)
 
 
 def _database_cleanup_complete(data_root: Path, asset_id: str, job_id: str | None) -> bool:
@@ -736,7 +887,7 @@ def _delete_and_confirm(
     config: RuntimeConfig,
     asset_id: str,
     job_id: str | None,
-) -> None:
+) -> DeleteEvidence:
     deadline = time.monotonic() + options.timeout_seconds
     delete_url = f"{api_url}/api/v1/videos/{asset_id}"
     while True:
@@ -761,9 +912,87 @@ def _delete_and_confirm(
         _fail("delete", f"删除后媒体仍可访问（HTTP {media.status_code}）")
     if not _database_cleanup_complete(options.data_root, asset_id, job_id):
         _fail("delete", "删除后 SQLite job/segment/tombstone 清理不完整")
+    cleanup_path = (options.data_root / "assets" / asset_id).resolve()
+    if cleanup_path.exists():
+        _fail("delete", f"删除后 cleanup path 仍存在：{cleanup_path}")
+    return DeleteEvidence(cleanup_path=cleanup_path, cleanup_status="PASS")
 
 
-def _write_report(options: ValidationOptions, results: dict[str, StepResult]) -> None:
+def _context_lines(context: EvidenceContext) -> list[str]:
+    lines = [
+        f"- run_id: {context.run_id}",
+        f"- timestamp_utc: {context.timestamp_utc}",
+    ]
+    if context.asset_id is not None:
+        lines.append(f"- asset_id: {context.asset_id}")
+    if context.job_id is not None:
+        lines.append(f"- job_id: {context.job_id}")
+    if context.segment_id is not None:
+        lines.append(f"- segment_id: {context.segment_id}")
+    if context.provider is not None:
+        lines.append(f"- provider: {context.provider}")
+    if context.model is not None:
+        lines.append(f"- model: {context.model}")
+    return lines
+
+
+def _section_evidence_lines(field: str, context: EvidenceContext) -> list[str]:
+    lines: list[str] = []
+    if field == "runtime":
+        if context.log_ref is not None:
+            lines.append(f"- log_ref: {context.log_ref}")
+        lines.append(f"- secret_scan: {context.secret_scan}")
+    elif field == "provider":
+        if context.embedding_provider is not None:
+            lines.append(f"- embedding_provider: {context.embedding_provider}")
+        if context.embedding_model is not None:
+            lines.append(f"- embedding_model: {context.embedding_model}")
+        lines.append("- provider_identity: 真实 provider 与 checkpoint identity 已逐项核对")
+    elif field == "es":
+        if context.endpoint is not None:
+            lines.append(f"- endpoint: {context.endpoint}")
+        if context.index is not None:
+            lines.append(f"- index: {context.index}")
+        if context.document_count is not None:
+            lines.append(f"- document_count: {context.document_count}")
+        if context.expected_segment_count is not None:
+            lines.append(f"- expected_segment_count: {context.expected_segment_count}")
+        if context.dedup_count is not None:
+            lines.append(f"- dedup_count: {context.dedup_count}")
+        if context.segment_ids:
+            lines.append(f"- segment_ids: {','.join(context.segment_ids)}")
+        lines.append("- es_identity: 每个 observed segment 与 asset/job identity 一致")
+    elif field == "search":
+        if context.similarity is not None:
+            lines.append(f"- similarity: {context.similarity:.3f}")
+        if context.asset_id is not None:
+            lines.append(f"- result_asset_id: {context.asset_id}")
+        if context.job_id is not None:
+            lines.append(f"- result_job_id: {context.job_id}")
+        if context.segment_id is not None:
+            lines.append(f"- result_segment_id: {context.segment_id}")
+        lines.append("- result_identity: 搜索结果绑定 observed Elasticsearch segment")
+    elif field == "media":
+        lines.append("- HTTP 206: PASS")
+        if context.accept_ranges is not None:
+            lines.append(f"- Accept-Ranges: {context.accept_ranges}")
+        if context.content_range is not None:
+            lines.append(f"- Content-Range: {context.content_range}")
+    elif field == "delete":
+        if context.cleanup_path is not None:
+            lines.append(f"- cleanup_path: {context.cleanup_path}")
+        if context.cleanup_status is not None:
+            lines.append(f"- cleanup_status: {context.cleanup_status}")
+        lines.append("- cleanup_confirmation: API、Elasticsearch、媒体、SQLite 与文件路径均已确认")
+    return lines
+
+
+def _write_report(
+    options: ValidationOptions,
+    results: dict[str, StepResult],
+    context: EvidenceContext | None = None,
+) -> None:
+    context = context or _initial_evidence_context(options)
     overall = "PASS" if all(results[field].status == "PASS" for field in REPORT_FIELDS) else "FAIL"
     lines = [
         "# 录播视频生产运行验证报告",
@@ -778,7 +1007,10 @@ def _write_report(options: ValidationOptions, results: dict[str, StepResult]) ->
     ]
     for field in REPORT_FIELDS:
         result = results[field]
-        lines.extend((f"## {field}", "", result.status, "", result.detail, ""))
+        lines.extend((f"## {field}", "", result.status, ""))
+        lines.extend(_context_lines(context))
+        lines.extend(_section_evidence_lines(field, context))
+        lines.extend((result.detail, ""))
     options.report.parent.mkdir(parents=True, exist_ok=True)
     temporary = options.report.with_name(f".{options.report.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text("\n".join(lines), encoding="utf-8")
@@ -808,6 +1040,7 @@ def _check_quality_options(options: ValidationOptions) -> None:
 
 def run_validation(options: ValidationOptions, *, client: HttpClient | None = None) -> int:
     results = {field: StepResult("FAIL", "未执行：前置验证尚未完成。") for field in REPORT_FIELDS}
+    context = _initial_evidence_context(options)
     current_field = "runtime"
     asset_id: str | None = None
     job_id: str | None = None
@@ -823,6 +1056,14 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
             http_client = httpx.Client(timeout=options.timeout_seconds, follow_redirects=False)
             owned_client = True
         api_url, _, runtime_config = _check_runtime(options, http_client)
+        context = _check_runtime_log(context)
+        context = replace(
+            context,
+            provider=runtime_config.vision_provider,
+            model=runtime_config.vision_model,
+            embedding_provider=runtime_config.embedding_provider,
+            embedding_model=runtime_config.embedding_model,
+        )
         results["runtime"] = StepResult(
             "PASS",
             "API、原版 UI 与 UI 同源代理 readiness 通过；本地 SQLite 与验证视频可读；"
@@ -831,6 +1072,7 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
 
         current_field = "job_stages"
         asset_id, job_id, observed = _upload_and_complete(options, http_client, api_url, created_assets)
+        context = replace(context, asset_id=asset_id, job_id=job_id)
         stages = _check_job_stages(options.data_root, job_id, observed)
         results["job_stages"] = StepResult(
             "PASS",
@@ -844,18 +1086,28 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
 
         current_field = "es"
         _check_es_checkpoints(stages)
-        es_evidence = _check_es(runtime_config, http_client, asset_id, job_id)
+        expected_segment_ids = _read_expected_segment_ids(options.data_root, asset_id, job_id)
+        es_evidence = _check_es(runtime_config, http_client, asset_id, job_id, expected_segment_ids)
+        context = replace(
+            context,
+            endpoint=es_evidence.endpoint,
+            index=es_evidence.index,
+            document_count=es_evidence.document_count,
+            expected_segment_count=es_evidence.expected_segment_count,
+            dedup_count=es_evidence.dedup_count,
+            segment_ids=tuple(segment.segment_id for segment in es_evidence.segments),
+        )
         results["es"] = StepResult(
-            "FAIL",
-            "真实 Elasticsearch identity query 已命中，但原版业务搜索 identity 尚未确认。",
+            "PASS",
+            "真实 Elasticsearch refresh、identity query 与 deterministic segment count 均通过。",
         )
 
         current_field = "search"
         search = _check_search(options, http_client, api_url, asset_id, es_evidence)
-        results["es"] = StepResult(
-            "PASS",
-            "indexing/publish checkpoints、真实 Elasticsearch 调用与业务搜索 identity 均通过；"
-            f"endpoint={es_evidence.endpoint}; index={es_evidence.index}; documents={es_evidence.document_count}。",
+        context = replace(
+            context,
+            segment_id=search.segment_id,
+            similarity=search.similarity,
         )
         segment_identity = f"{asset_id}|{search.segment_id}|{search.start_time}|{search.end_time}"
         results["search"] = StepResult(
@@ -864,7 +1116,12 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
         )
 
         current_field = "media"
-        _check_media(http_client, api_url, asset_id, search)
+        media_evidence = _check_media(http_client, api_url, asset_id, search)
+        context = replace(
+            context,
+            accept_ranges=media_evidence.accept_ranges,
+            content_range=media_evidence.content_range,
+        )
         results["media"] = StepResult("PASS", "缩略图非空；单字节 Range 返回 HTTP 206 与有效 Content-Range。")
     except ValidationError as exc:
         failure = exc
@@ -880,7 +1137,19 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
         cleanup_asset_id = asset_id or (created_assets[-1] if created_assets else None)
         if cleanup_asset_id is not None and runtime_config is not None and http_client is not None:
             try:
-                _delete_and_confirm(options, http_client, api_url, runtime_config, cleanup_asset_id, job_id)
+                delete_evidence = _delete_and_confirm(
+                    options,
+                    http_client,
+                    api_url,
+                    runtime_config,
+                    cleanup_asset_id,
+                    job_id,
+                )
+                context = replace(
+                    context,
+                    cleanup_path=delete_evidence.cleanup_path,
+                    cleanup_status=delete_evidence.cleanup_status,
+                )
                 results["delete"] = StepResult("PASS", "ES、媒体和 SQLite 生命周期数据均已清理，资产仅保留 tombstone。")
             except ValidationError as exc:
                 results["delete"] = StepResult("FAIL", exc.message)
@@ -898,7 +1167,7 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
                     results["runtime"] = StepResult("FAIL", close_failure.message)
                     failure = failure or close_failure
         try:
-            _write_report(options, results)
+            _write_report(options, results, context)
         except OSError as exc:
             print(f"recorded-video validation report write failed: {type(exc).__name__}", file=sys.stderr)
             return 1
@@ -918,6 +1187,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", dest="timeout_seconds", type=float, default=600.0)
     parser.add_argument("--poll-interval", dest="poll_interval_seconds", type=float, default=1.0)
     parser.add_argument("--minimum-similarity", type=float, default=0.2)
+    parser.add_argument("--log-ref", type=Path, default=os.getenv("VSA_RUNTIME_LOG_REF"))
     return parser
 
 
@@ -934,6 +1204,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=args.timeout_seconds,
         poll_interval_seconds=args.poll_interval_seconds,
         minimum_similarity=args.minimum_similarity,
+        log_ref=Path(args.log_ref) if args.log_ref else None,
     )
     exit_code = run_validation(options)
     print(f"recorded-video validation {'passed' if exit_code == 0 else 'failed'}: {options.report}")

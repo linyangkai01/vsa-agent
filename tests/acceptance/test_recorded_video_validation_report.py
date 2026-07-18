@@ -8,7 +8,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "docs/superpowers/reports/2026-07-13-production-recorded-video-validation.md"
 REPORT_FIELDS = ("runtime", "job_stages", "provider", "es", "search", "media", "delete")
-COMMON_EVIDENCE_FIELDS = ("run_id", "timestamp_utc", "asset_id", "job_id", "provider", "model")
+COMMON_EVIDENCE_FIELDS = ("run_id", "timestamp_utc", "asset_id", "job_id", "segment_id", "provider", "model")
 PRODUCTION_PROVIDERS = {"openai_compatible", "vllm"}
 INCOMPLETE_MARKERS = (
     "待采集",
@@ -40,7 +40,7 @@ def _field(section: str, name: str) -> str:
     return value
 
 
-def _assert_common_evidence_fields(sections: dict[str, str]) -> None:
+def _assert_common_evidence_fields(sections: dict[str, str]) -> dict[str, str]:
     stable_values: dict[str, str] = {}
     for section_name, section in sections.items():
         fields = {field_name: _field(section, field_name) for field_name in COMMON_EVIDENCE_FIELDS}
@@ -58,7 +58,7 @@ def _assert_common_evidence_fields(sections: dict[str, str]) -> None:
             raise AssertionError(f"{section_name} timestamp_utc is not ISO-8601") from None
         assert parsed.utcoffset() == timedelta(0)
 
-        for field_name in ("asset_id", "job_id"):
+        for field_name in ("asset_id", "job_id", "segment_id"):
             value = fields[field_name]
             assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,}", value)
         provider = fields["provider"]
@@ -66,10 +66,11 @@ def _assert_common_evidence_fields(sections: dict[str, str]) -> None:
         model = fields["model"]
         assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,}", model)
 
-        for field_name in ("run_id", "asset_id", "job_id"):
+        for field_name in ("run_id", "asset_id", "job_id", "segment_id"):
             value = fields[field_name]
             previous = stable_values.setdefault(field_name, value)
             assert value == previous, f"{field_name} differs between evidence sections"
+    return stable_values
 
 
 def _assert_complete_server_evidence(report: str) -> None:
@@ -79,29 +80,52 @@ def _assert_complete_server_evidence(report: str) -> None:
 
     sections = {name: _section(report, name) for name in REPORT_FIELDS}
     assert all(section.startswith("PASS\n") for section in sections.values())
-    _assert_common_evidence_fields(sections)
+    common = _assert_common_evidence_fields(sections)
     assert "无密钥" in sections["runtime"]
     log_ref = _field(sections["runtime"], "log_ref")
+    log_path = Path(log_ref)
     assert log_ref.endswith(".log") and _field(sections["runtime"], "run_id") in log_ref
+    assert log_path.is_file()
+    log_contents = log_path.read_text(encoding="utf-8")
+    assert common["run_id"] in log_contents
+    assert not re.search(r"(?i)(authorization\s*:\s*bearer|api[_ -]?key\s*[:=]\s*\S+)", log_contents)
     assert _field(sections["runtime"], "secret_scan") == "PASS (无密钥)"
     assert "三并发" in sections["job_stages"]
     assert "Worker 重启" in sections["job_stages"]
     assert "真实 provider" in sections["provider"]
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,}", _field(sections["es"], "index"))
-    assert int(_field(sections["es"], "document_count")) > 0
+    segment_ids = _field(sections["es"], "segment_ids").split(",")
+    assert len(segment_ids) == len(set(segment_ids)) > 0
+    expected_count = int(_field(sections["es"], "expected_segment_count"))
+    document_count = int(_field(sections["es"], "document_count"))
+    dedup_count = int(_field(sections["es"], "dedup_count"))
+    assert document_count == expected_count == dedup_count == len(segment_ids)
+    assert _field(sections["search"], "result_asset_id") == common["asset_id"]
+    assert _field(sections["search"], "result_job_id") == common["job_id"]
+    assert _field(sections["search"], "result_segment_id") in segment_ids
+    similarity = float(_field(sections["search"], "similarity"))
+    assert 0.0 <= similarity <= 1.0
     assert _field(sections["media"], "HTTP 206") == "PASS"
     assert _field(sections["media"], "Accept-Ranges").lower() == "bytes"
     assert re.fullmatch(r"bytes 0-0/[1-9][0-9]*", _field(sections["media"], "Content-Range"))
-    assert re.fullmatch(r"/[^\s]+", _field(sections["delete"], "cleanup_path"))
+    cleanup_path = _field(sections["delete"], "cleanup_path")
+    assert re.fullmatch(r"/[^\s]+", cleanup_path)
+    assert not Path(cleanup_path).exists()
     assert _field(sections["delete"], "cleanup_status") == "PASS"
     assert "删除清理" in sections["delete"]
 
 
-def _complete_contract_report() -> str:
+def _complete_contract_report(tmp_path: Path) -> str:
+    run_id = "123e4567-e89b-12d3-a456-426614174000"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    log_path = run_dir / "stack.log"
+    log_path.write_text(f"run_id={run_id}\nredaction=clean\n", encoding="utf-8")
     common = """- run_id: 123e4567-e89b-12d3-a456-426614174000
 - timestamp_utc: 2026-07-18T12:34:56Z
 - asset_id: asset-20260718-0001
 - job_id: job-20260718-0001
+- segment_id: segment-20260718-0001
 - provider: openai_compatible
 - model: qwen-vl-plus
 """
@@ -112,7 +136,7 @@ def _complete_contract_report() -> str:
 ## runtime
 
 PASS
-{common}- log_ref: .runtime/es-stack/runs/123e4567-e89b-12d3-a456-426614174000/stack.log
+{common}- log_ref: {log_path}
 - secret_scan: PASS (无密钥)
 无密钥配置摘要与运行日志路径已记录。
 
@@ -131,13 +155,20 @@ PASS
 
 PASS
 {common}- index: vsa-video-embeddings
-- document_count: 3
+- document_count: 1
+- expected_segment_count: 1
+- dedup_count: 1
+- segment_ids: segment-20260718-0001
 Elasticsearch identity 与索引结果已记录。
 
 ## search
 
 PASS
-{common}- segment_id: segment-20260718-0001
+{common}
+- similarity: 0.910
+- result_asset_id: asset-20260718-0001
+- result_job_id: job-20260718-0001
+- result_segment_id: segment-20260718-0001
 搜索 asset/segment identity 与 similarity 已记录。
 
 ## media
@@ -208,21 +239,21 @@ def test_validation_report_rejects_clean_keyword_only_report() -> None:
         _assert_complete_server_evidence(_keyword_only_report())
 
 
-def test_validation_report_accepts_explicit_evidence_fields() -> None:
-    _assert_complete_server_evidence(_complete_contract_report())
+def test_validation_report_accepts_explicit_evidence_fields(tmp_path: Path) -> None:
+    _assert_complete_server_evidence(_complete_contract_report(tmp_path))
 
 
 @pytest.mark.parametrize("label", ("三并发", "Worker 重启", "HTTP 206", "删除清理", "无密钥"))
-def test_validation_report_rejects_missing_required_server_evidence(label: str) -> None:
-    report = _complete_contract_report().replace(label, "证据缺失", 1)
+def test_validation_report_rejects_missing_required_server_evidence(label: str, tmp_path: Path) -> None:
+    report = _complete_contract_report(tmp_path).replace(label, "证据缺失", 1)
 
     with pytest.raises(AssertionError):
         _assert_complete_server_evidence(report)
 
 
 @pytest.mark.parametrize("marker", ("占位", "伪造"))
-def test_validation_report_rejects_explicitly_untrusted_evidence(marker: str) -> None:
-    report = _complete_contract_report().replace("运行日志路径已记录", f"{marker}运行日志路径", 1)
+def test_validation_report_rejects_explicitly_untrusted_evidence(marker: str, tmp_path: Path) -> None:
+    report = _complete_contract_report(tmp_path).replace("运行日志路径已记录", f"{marker}运行日志路径", 1)
 
     with pytest.raises(AssertionError):
         _assert_complete_server_evidence(report)

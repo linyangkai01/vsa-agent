@@ -38,6 +38,8 @@ class FakeClient:
         es_status: int = 200,
         leave_orphan_steps: bool = False,
         retain_es_document: bool = False,
+        duplicate_es_hit: bool = False,
+        retain_asset_directory: bool = False,
         search_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.data_root = data_root
@@ -46,6 +48,8 @@ class FakeClient:
         self.es_status = es_status
         self.leave_orphan_steps = leave_orphan_steps
         self.retain_es_document = retain_es_document
+        self.duplicate_es_hit = duplicate_es_hit
+        self.retain_asset_directory = retain_asset_directory
         self.search_overrides = search_overrides or {}
         self.requests: list[tuple[str, str]] = []
         self.deleted = False
@@ -107,6 +111,8 @@ class FakeClient:
                         },
                     }
                 ]
+                if self.duplicate_es_hit:
+                    hits.append(dict(hits[0]))
             return _response(200, {"hits": {"total": {"value": len(hits)}, "hits": hits}})
         if url == "http://api.test/api/v1/videos":
             return _response(
@@ -161,6 +167,10 @@ class FakeClient:
             connection.execute("DELETE FROM segments WHERE asset_id = 'asset-1'")
             connection.execute("DELETE FROM jobs WHERE job_id = 'job-1'")
             connection.execute("UPDATE assets SET status = 'deleted', deleted_at = 'now' WHERE asset_id = 'asset-1'")
+        if not self.retain_asset_directory:
+            import shutil
+
+            shutil.rmtree(self.data_root / "assets" / "asset-1", ignore_errors=True)
         return _response(204)
 
 
@@ -188,9 +198,11 @@ def _runtime(
     vision_checkpoint_model: str = "vision-model",
     embedding_checkpoint_provider: str = "vsa_agent.recorded_video.providers.OpenAIEmbeddingProvider",
     embedding_checkpoint_model: str = "embedding-model",
+    log_contents: str | None = None,
 ):
-    data_root = tmp_path / "data"
-    data_root.mkdir()
+    run_dir = tmp_path / "123e4567-e89b-12d3-a456-426614174000"
+    data_root = run_dir / "data"
+    data_root.mkdir(parents=True)
     database_path = data_root / "recorded-video.sqlite3"
     manifest_relative = "derived/pipeline-v1/attempts/1/manifest.json"
     with sqlite3.connect(database_path) as connection:
@@ -233,9 +245,13 @@ def _runtime(
         ),
         encoding="utf-8",
     )
-    video_path = tmp_path / "validation.mp4"
+    video_path = run_dir / "validation.mp4"
     video_path.write_bytes(b"video")
-    report_path = tmp_path / "report.md"
+    report_path = run_dir / "report.md"
+    (run_dir / "stack.log").write_text(
+        log_contents if log_contents is not None else "run_id=123e4567-e89b-12d3-a456-426614174000\n",
+        encoding="utf-8",
+    )
     return data_root, video_path, report_path, FakeClient(data_root, media_status=media_status)
 
 
@@ -431,7 +447,7 @@ def test_malformed_search_identity_fails_search_and_es_evidence(tmp_path: Path, 
     assert exit_code == 1
     report = report_path.read_text(encoding="utf-8")
     assert "## search\n\nFAIL" in report
-    assert "## es\n\nFAIL" in report
+    assert "## es\n\nPASS" in report
 
 
 def test_cli_uses_nonzero_default_semantic_quality_threshold(tmp_path: Path) -> None:
@@ -530,6 +546,85 @@ def test_validator_checks_full_business_flow_in_order(tmp_path: Path) -> None:
     assert media_index < delete_index
 
 
+def test_success_report_publishes_structured_evidence_bound_to_run_artifact(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 0
+    report = report_path.read_text(encoding="utf-8")
+    run_id = report.split("- run_id: ", 1)[1].splitlines()[0]
+    assert run_id in report
+    assert report.count(f"- run_id: {run_id}") == len(validator.REPORT_FIELDS)
+    assert report.count("- timestamp_utc:") == len(validator.REPORT_FIELDS)
+    assert report.count("- asset_id: asset-1") == len(validator.REPORT_FIELDS)
+    assert report.count("- job_id: job-1") == len(validator.REPORT_FIELDS)
+    assert report.count("- segment_id: segment-1") == len(validator.REPORT_FIELDS)
+    assert "- endpoint: http://es.test" in report
+    assert "- index: validation-index" in report
+    assert "- document_count: 1" in report
+    assert "- expected_segment_count: 1" in report
+    assert "- dedup_count: 1" in report
+    assert "- similarity: 0.910" in report
+    assert "- HTTP 206: PASS" in report
+    assert "- Accept-Ranges: bytes" in report
+    assert "- Content-Range: bytes 0-0/5" in report
+    assert "- cleanup_path:" in report
+    assert "- cleanup_status: PASS" in report
+    assert "- secret_scan: PASS (无密钥)" in report
+    log_ref = next(line.split(": ", 1)[1] for line in report.splitlines() if line.startswith("- log_ref:"))
+    assert Path(log_ref).is_file()
+    assert run_id in Path(log_ref).read_text(encoding="utf-8")
+
+
+def test_success_report_does_not_mark_search_as_es_evidence(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+
+    assert validator.run_validation(_options(data_root, video_path, report_path), client=client) == 0
+
+    sections = report_path.read_text(encoding="utf-8").split("\n## ")
+    es_section = next(section for section in sections if section.startswith("es\n"))
+    search_section = next(section for section in sections if section.startswith("search\n"))
+    assert "业务搜索" not in es_section
+    assert "similarity" not in es_section
+    assert "similarity: 0.910" in search_section
+
+
+def test_report_rejects_log_artifact_without_same_run_id(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path, log_contents="different-run\n")
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## runtime\n\nFAIL" in report
+    assert "log" in report.lower()
+
+
+def test_es_rejects_duplicate_or_unexpected_segments(tmp_path: Path) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+    client = FakeClient(data_root, duplicate_es_hit=True)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## es\n\nFAIL" in report
+    assert "duplicate" in report.lower() or "segment" in report.lower()
+
+
+def test_delete_rejects_cleanup_path_that_still_exists(tmp_path: Path) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+    client = FakeClient(data_root, retain_asset_directory=True)
+
+    exit_code = validator.run_validation(_options(data_root, video_path, report_path), client=client)
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## delete\n\nFAIL" in report
+    assert "cleanup" in report.lower()
+
+
 def test_validation_script_returns_nonzero_when_media_range_is_not_206(tmp_path: Path) -> None:
     data_root, video_path, report_path, client = _runtime(tmp_path, media_status=200)
 
@@ -553,7 +648,7 @@ def test_dependency_failure_is_reported_without_secret_or_silent_skip(tmp_path: 
     assert all(f"## {field}" in report for field in validator.REPORT_FIELDS)
     assert "SKIP" not in report
     assert "Bearer" not in report
-    assert "secret" not in report.lower()
+    assert "authorization-bearer-secret" not in report.lower()
 
 
 def test_asset_is_cleaned_when_upload_fails_after_session_creation(tmp_path: Path) -> None:
