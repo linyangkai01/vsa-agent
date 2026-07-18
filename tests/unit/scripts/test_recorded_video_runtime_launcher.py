@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -14,8 +15,11 @@ from pathlib import Path
 import pytest
 
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
+RUNTIME_LOG_SUPERVISOR = Path("scripts/runtime-log-supervisor.py")
 POWERSHELL_SCRIPT = Path("scripts/es-runtime-stack.ps1")
 POWERSHELL_LOG_PUMP = Path("scripts/lib/RuntimeLogPump.cs")
+BASH_RUNTIME_READINESS_TIMEOUT_SEC = 90
+BASH_SMOKE_COMPLETION_BOUNDARY_TIMEOUT_SEC = 180
 
 
 def _bash() -> str:
@@ -95,6 +99,274 @@ def _run_bash_probe(body: str, *, timeout: float = 5) -> subprocess.CompletedPro
     )
 
 
+def _bash_launcher_creationflags() -> int:
+    return subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+
+
+def test_bash_runtime_helper_uses_shared_readiness_timeout():
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_run_bash_runtime")
+    run_call = next(
+        node for node in ast.walk(helper) if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"
+    )
+    timeout_values = [keyword.value for keyword in run_call.keywords if keyword.arg == "timeout"]
+
+    assert len(timeout_values) == 1
+    assert ast.unparse(timeout_values[0]) == "BASH_RUNTIME_READINESS_TIMEOUT_SEC"
+
+
+def test_bash_runtime_launcher_processes_use_windows_process_group_isolation():
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    launcher_test_names = {
+        "test_bash_keep_running_reaches_readiness_stays_alive_and_cleans_on_signal",
+        "test_bash_interruption_cleans_validation_index_data_and_config",
+        "test_bash_rapid_back_to_back_terms_before_cleanup_still_finish_cleanup",
+        "test_bash_manifest_update_failure_during_signal_cleanup_is_aggregated",
+        "test_bash_second_signal_during_cleanup_still_finishes_all_cleanup",
+        "test_bash_signal_while_pass_log_is_lock_blocked_never_emits_pass",
+    }
+    launcher_starts = [
+        call
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef) and function.name in launcher_test_names
+        for call in ast.walk(function)
+        if isinstance(call, ast.Call)
+        and ast.unparse(call.func) == "subprocess.Popen"
+        and call.args
+        and "es-runtime-stack.sh" in ast.unparse(call.args[0])
+    ]
+
+    assert launcher_starts
+    assert "def _bash_launcher_creationflags()" in source
+    assert all(
+        any(
+            keyword.arg == "creationflags" and ast.unparse(keyword.value) == "_bash_launcher_creationflags()"
+            for keyword in call.keywords
+        )
+        for call in launcher_starts
+    )
+
+
+def test_bash_windows_cleanup_uses_only_registered_supervisor_pids():
+    bash = _bash()
+    stop_managed_process = _bash_function("stop_managed_process")
+
+    assert "taskkill" not in bash.lower()
+    assert 'stop_pid_bounded "$pid"' in stop_managed_process
+
+
+def test_bash_launcher_records_its_running_msys_pid_in_the_run_directory():
+    bash = _bash()
+
+    assert 'LAUNCHER_PID_PATH="$RUN_DIR/launcher.pid"' in bash
+    assert 'printf \'%s\\n\' "$BASHPID" >"$LAUNCHER_PID_PATH"' in bash
+    assert 'log_stack "launcher_pid=$BASHPID"' in bash
+
+
+def test_bash_cleanup_internal_status_lines_do_not_start_new_supervisors():
+    cleanup = _bash_function("cleanup")
+    delete_validation_resources = _bash_function("delete_validation_resources")
+
+    assert "log_stack " not in cleanup
+    assert "log_stack " not in delete_validation_resources
+    assert "log_stack_error " not in delete_validation_resources
+    assert cleanup.count("cleanup_log_line ") >= 3
+    assert "cleanup_log_error " in delete_validation_resources
+
+
+def test_bash_pass_publication_guards_all_registered_status_sidecars():
+    publisher = _bash_function("publish_pass")
+    script = _bash()
+
+    assert 'pid="${PROCESS_PIDS[$component]:-}"' in publisher
+    assert 'status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"' in publisher
+    assert 'status_guards+=(--require-running-status "$component" "$pid" "$status_file")' in publisher
+    assert 'publish_pass "PASS: ES runtime stack validation succeeded"' in script
+    assert 'publish_pass "PASS: ES recorded-video runtime stack is ready"' in script
+    assert 'log_stack "PASS:' not in script
+
+
+def test_bash_pid_running_uses_kill_probe_without_msys_ps_polling():
+    validator = _bash_function("pid_is_running")
+
+    assert '[[ -n "${MSYSTEM:-}" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]' in validator
+    assert "return 0" in validator
+
+
+def test_bash_cleanup_fans_out_term_before_waiting_for_any_supervisor():
+    cleanup = _bash_function("cleanup")
+
+    requests = [
+        cleanup.index(f"request_managed_process_stop {component}") for component in ("ui", "worker", "api", "es")
+    ]
+    waits = [cleanup.index(f'run_cleanup_stage "stop {component}"') for component in ("ui", "worker", "api", "es")]
+    assert requests == sorted(requests)
+    assert max(requests) < min(waits)
+
+
+def test_bash_stop_pid_bounded_does_not_wait_when_kill_cannot_stop_pid():
+    stop_pid_bounded = _bash_function("stop_pid_bounded")
+    probe = f"""
+    PROCESS_SHUTDOWN_GRACE_TICKS=1
+    pid_is_running() {{ return 0; }}
+    signal_process_tree() {{ printf 'signal=%s\\n' "$1" >&2; }}
+    wait() {{ printf 'waited\\n' >&2; return 0; }}
+    {stop_pid_bounded}
+    stop_pid_bounded 4242
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode != 0
+    assert "signal=TERM" in completed.stderr
+    assert "signal=KILL" in completed.stderr
+    assert "waited" not in completed.stderr
+
+
+def test_bash_component_stop_failure_preserves_survivor_ownership():
+    stop_managed_process = _bash_function("stop_managed_process")
+    probe = f"""
+    declare -A PROCESS_PIDS=([worker]=4242)
+    stop_pid_bounded() {{ return 1; }}
+    record_process_exit() {{ printf 'recorded=%s\\n' "$*"; }}
+    {stop_managed_process}
+    set +e
+    stop_managed_process worker
+    status=$?
+    printf 'status=%s pid=%s\\n' "$status" "${{PROCESS_PIDS[worker]}}"
+    exit "$status"
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode != 0
+    assert "pid=4242" in completed.stdout
+    assert "recorded=" not in completed.stdout
+
+
+def test_bash_sync_stop_failure_preserves_registered_pid_and_marks_cleanup_failed():
+    stop_sync_supervisor = _bash_function("stop_sync_supervisor")
+    cleanup = _bash_function("cleanup")
+    probe = f"""
+    SYNC_SUPERVISOR_PID=4242
+    stop_pid_bounded() {{ return 1; }}
+    {stop_sync_supervisor}
+    set +e
+    stop_sync_supervisor
+    status=$?
+    printf 'status=%s pid=%s\\n' "$status" "$SYNC_SUPERVISOR_PID"
+    exit "$status"
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode != 0
+    assert "pid=4242" in completed.stdout
+    assert 'run_cleanup_stage "stop sync supervisor" stop_sync_supervisor' in cleanup
+
+
+def test_bash_managed_failure_sync_stop_failure_preserves_pid_without_extra_wait(tmp_path: Path):
+    wait_sync_supervisor = _bash_function("wait_sync_supervisor")
+    stop_called = tmp_path / "stop.called"
+    wait_called = tmp_path / "wait.called"
+    probe = f"""
+    SYNC_SUPERVISOR_PID=4242
+    MANAGED_EXIT_COMPONENT=worker
+    MANAGED_EXIT_STATUS=17
+    pid_is_running() {{ return 0; }}
+    observe_managed_processes() {{ return 7; }}
+    stop_pid_bounded() {{ return 1; }}
+    stop_sync_supervisor() {{ : >{shlex.quote(stop_called.as_posix())}; return 1; }}
+    wait() {{ : >{shlex.quote(wait_called.as_posix())}; return 0; }}
+    log_stack_error() {{ :; }}
+    {wait_sync_supervisor}
+    set +e
+    if wait_sync_supervisor 1; then status=0; else status=$?; fi
+    printf 'status=%s pid=%s\\n' "$status" "$SYNC_SUPERVISOR_PID"
+    exit "$status"
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode != 0
+    assert "pid=4242" in completed.stdout
+    assert stop_called.exists()
+    assert not wait_called.exists()
+
+
+def test_bash_observe_managed_processes_preserves_pid_when_manifest_finalization_fails():
+    observer = _bash_function("observe_managed_processes")
+    probe = f"""
+    declare -A PROCESS_PIDS=([api]=4242)
+    MANAGED_EXIT_COMPONENT=""
+    MANAGED_EXIT_STATUS=0
+    pid_is_running() {{ return 1; }}
+    wait() {{ return 17; }}
+    record_process_exit() {{ return 91; }}
+    {observer}
+    set +e
+    observe_managed_processes
+    status=$?
+    set -e
+    printf 'status=%s pid=%s component=%s exit=%s\n' \
+      "$status" "${{PROCESS_PIDS[api]}}" "$MANAGED_EXIT_COMPONENT" "$MANAGED_EXIT_STATUS"
+    exit "$status"
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode == 91
+    assert "status=91 pid=4242 component=api exit=17" in completed.stdout
+
+
+def test_bash_cleanup_retries_pending_exit_without_overwriting_observed_status():
+    observer = _bash_function("observe_managed_processes")
+    requester = _bash_function("request_managed_process_stop")
+    stopper = _bash_function("stop_managed_process")
+    probe = f"""
+    declare -A PROCESS_PIDS=([api]=4242)
+    declare -A PROCESS_PENDING_EXIT_STATUS=()
+    MANAGED_EXIT_COMPONENT=""
+    MANAGED_EXIT_STATUS=0
+    STOPPED_PROCESS_STATUS=0
+    wait_calls=0
+    signal_calls=0
+    stop_calls=0
+    record_calls=0
+    recorded_statuses=""
+    pid_is_running() {{ return 1; }}
+    kill() {{ signal_calls=$((signal_calls + 1)); return 0; }}
+    wait() {{ wait_calls=$((wait_calls + 1)); return 17; }}
+    stop_pid_bounded() {{ stop_calls=$((stop_calls + 1)); STOPPED_PROCESS_STATUS=127; return 0; }}
+    record_process_exit() {{
+      record_calls=$((record_calls + 1))
+      recorded_statuses="${{recorded_statuses}}$2,"
+      [[ "$record_calls" == "1" ]] && return 91
+      return 0
+    }}
+    {observer}
+    {requester}
+    {stopper}
+    set +e
+    observe_managed_processes
+    observe_status=$?
+    request_managed_process_stop api
+    stop_managed_process api
+    cleanup_status=$?
+    set -e
+    printf 'observe=%s cleanup=%s waits=%s signals=%s stops=%s recorded=%s pending=%s pid=%s\n' \
+      "$observe_status" "$cleanup_status" "$wait_calls" "$signal_calls" "$stop_calls" "$recorded_statuses" \
+      "${{PROCESS_PENDING_EXIT_STATUS[api]:-}}" "${{PROCESS_PIDS[api]:-}}"
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "observe=91 cleanup=0 waits=1 signals=0 stops=0 recorded=17,17, pending= pid=" in completed.stdout
+
+
 def _run_powershell_probe(body: str) -> subprocess.CompletedProcess[str]:
     powershell = shutil.which("powershell")
     if powershell is None:
@@ -120,6 +392,7 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     scripts.mkdir(parents=True)
     fake_bin.mkdir()
     shutil.copy2(BASH_SCRIPT, scripts / BASH_SCRIPT.name)
+    shutil.copy2(RUNTIME_LOG_SUPERVISOR, scripts / RUNTIME_LOG_SUPERVISOR.name)
     (repo / ".deps").mkdir()
     (repo / ".deps/node-env.sh").write_text("", encoding="utf-8")
     turbo = repo / "frontend/original-ui/node_modules/.bin/turbo"
@@ -139,13 +412,6 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         encoding="utf-8",
     )
     _write_executable(
-        fake_bin / "setsid",
-        """
-        #!/usr/bin/env bash
-        exec "$@"
-        """,
-    )
-    _write_executable(
         fake_bin / "lsof",
         """
         #!/usr/bin/env bash
@@ -162,6 +428,14 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         if [[ "$1" == "inspect" && "$*" == *State.Pid* ]]; then echo 987654; exit 0; fi
         if [[ "$1" == "compose" && "$*" == *"logs"* ]]; then
           echo 'Authorization: Bearer es-secret'
+          if [[ -n "${HARNESS_ES_LOG_EXIT_STATUS:-}" ]]; then exit "$HARNESS_ES_LOG_EXIT_STATUS"; fi
+          if [[ -n "${HARNESS_ES_LOG_SMOKE_BOUNDARY_GATE:-}" ]]; then
+            : >"${HARNESS_ES_LOG_SMOKE_BOUNDARY_GATE}.ready"
+            while [[ ! -e "${HARNESS_ES_LOG_SMOKE_BOUNDARY_GATE}.smoke-complete" ]]; do sleep 0.01; done
+            exit "${HARNESS_ES_LOG_SMOKE_BOUNDARY_STATUS:-19}"
+          fi
+          trap 'exit 0' TERM INT
+          while :; do sleep 0.1; done
         fi
         exit 0
         """,
@@ -172,6 +446,10 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         #!/usr/bin/env bash
         printf 'curl=%s\n' "$*" >>"$HARNESS_TRACE"
         if [[ "$*" == *"-X DELETE"* ]]; then
+          if [[ -n "${HARNESS_DELETE_GATE:-}" && ! -e "${HARNESS_DELETE_GATE}.ready" ]]; then
+            : >"${HARNESS_DELETE_GATE}.ready"
+            while [[ ! -e "${HARNESS_DELETE_GATE}.release" ]]; do sleep 0.01; done
+          fi
           if [[ "${HARNESS_DELETE_FAIL:-0}" == "1" ]]; then exit 22; fi
           exit 0
         fi
@@ -191,6 +469,13 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           probe="$(mktemp)"
           cat >"$probe"
           if grep -q 'elasticsearch\\[async\\]>=8.14' "$probe"; then rm -f "$probe"; exit 0; fi
+          if grep -q 'payload = json.loads(path.read_text' "$probe" \
+            && [[ -n "${HARNESS_MANIFEST_FAILURE_GATE:-}" ]] \
+            && [[ -e "$HARNESS_MANIFEST_FAILURE_GATE" ]]; then
+            printf 'manifest_update_failed=1\n' >>"$HARNESS_TRACE"
+            rm -f "$probe"
+            exit 91
+          fi
           "$REAL_PYTHON" "$@" <"$probe"
           status=$?
           rm -f "$probe"
@@ -203,8 +488,16 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         fi
         if [[ "$1" == "-m" && "$2" == "uvicorn" ]]; then
           printf 'api_config=%s\n' "$VSA_CONFIG" >>"$HARNESS_TRACE"
+          printf 'api_pid=%s\n' "$$" >>"$HARNESS_TRACE"
           echo 'Authorization: Bearer api-secret'
           trap 'exit 0' TERM INT
+          if [[ -n "${HARNESS_API_EXIT_TRIGGER:-}" ]]; then
+            while [[ ! -e "$HARNESS_API_EXIT_TRIGGER" ]]; do sleep 0.01; done
+            "$REAL_PYTHON" -c \
+              'import sys; sys.stdout.write(("api drain payload=" + "x" * 96 + "\\n") * int(sys.argv[1]))' \
+              "${HARNESS_API_DRAIN_LINES:-0}"
+            exit 17
+          fi
           if [[ -n "${HARNESS_API_EXIT_AFTER:-}" ]]; then
             sleep "$HARNESS_API_EXIT_AFTER"
             exit 17
@@ -215,6 +508,7 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           shift
           [[ "$1" == "--config" ]]
           printf 'worker_config=%s\n' "$2" >>"$HARNESS_TRACE"
+          printf 'worker_pid=%s\n' "$$" >>"$HARNESS_TRACE"
           cp "$2" "$HARNESS_TRACE.config"
           grep -E 'embed_index:|data_root:|enabled:' "$2" | tr '\n' '|' >>"$HARNESS_TRACE"
           printf '\n' >>"$HARNESS_TRACE"
@@ -229,7 +523,21 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         fi
         if [[ "$1" == "scripts/es_ingest_smoke.py" ]]; then
           printf 'smoke=%s\n' "$*" >>"$HARNESS_TRACE"
+          printf 'smoke_pid=%s\n' "$$" >>"$HARNESS_TRACE"
           if [[ -n "${HARNESS_SMOKE_SLEEP:-}" ]]; then sleep "$HARNESS_SMOKE_SLEEP"; fi
+          if [[ -n "${HARNESS_SMOKE_GATE:-}" ]]; then
+            : >"${HARNESS_SMOKE_GATE}.ready"
+            while [[ ! -e "${HARNESS_SMOKE_GATE}.release" ]]; do sleep 0.01; done
+          fi
+          if [[ -n "${HARNESS_ES_LOG_SMOKE_BOUNDARY_GATE:-}" ]]; then
+            : >"${HARNESS_ES_LOG_SMOKE_BOUNDARY_GATE}.smoke-complete"
+            es_status_file="$(dirname "$VSA_CONFIG")/es.status.json"
+            while ! "$REAL_PYTHON" -c \
+              'import json,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(p["state"]!="exited")' \
+              "$es_status_file" 2>/dev/null; do
+              sleep 0.01
+            done
+          fi
           exit "${HARNESS_SMOKE_STATUS:-0}"
         fi
         exec "$REAL_PYTHON" "$@"
@@ -258,16 +566,56 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     ).stdout
     fake_bin_bash = as_bash_path(fake_bin)
     bash_env = repo / "harness-env.sh"
-    bash_env.write_text(f'export PATH="{fake_bin_bash}:$PATH"\nhash -r\n', encoding="utf-8", newline="\n")
+    bash_env.write_text(
+        f"""
+export PATH="{fake_bin_bash}:$PATH"
+if [[ -n "${{HARNESS_DEFINE_CONDA_FUNCTION:-}}" ]]; then
+  conda() {{
+    printf 'conda_function=%s\\n' "$*" >>"$HARNESS_TRACE"
+    [[ "$1" == "run" ]] && shift
+    [[ "${{1:-}}" == "--no-capture-output" ]] && shift
+    if [[ "${{1:-}}" == "-n" ]]; then shift 2; fi
+    "$@"
+  }}
+fi
+hash -r
+""".lstrip(),
+        encoding="utf-8",
+        newline="\n",
+    )
     env.update(
         {
             "PATH": f"{fake_bin_bash}:{bash_path}",
             "BASH_ENV": as_bash_path(bash_env),
             "REAL_PYTHON": as_bash_path(Path(sys.executable)),
+            "VSA_SUPERVISOR_PYTHON": as_bash_path(Path(sys.executable)),
             "HARNESS_TRACE": as_bash_path(trace),
         }
     )
     return repo, env
+
+
+def test_bash_runtime_harness_fake_api_drain_emits_requested_lines(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    api_exit_trigger = tmp_path / "api-exit.trigger"
+    api_exit_trigger.touch()
+    env["HARNESS_API_EXIT_TRIGGER"] = api_exit_trigger.as_posix()
+    env["HARNESS_API_DRAIN_LINES"] = "3"
+    bash = shutil.which("bash")
+    assert bash is not None
+
+    completed = subprocess.run(
+        [bash, (repo / "fake-bin/python").as_posix(), "-m", "uvicorn"],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 17, completed.stderr
+    assert completed.stdout.count("api drain payload=") == 3
 
 
 def _run_bash_runtime(repo: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -281,8 +629,62 @@ def _run_bash_runtime(repo: Path, env: dict[str, str], *args: str) -> subprocess
         check=False,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=BASH_RUNTIME_READINESS_TIMEOUT_SEC,
     )
+
+
+def _wait_for_bash_pids_gone(
+    bash: str,
+    repo: Path,
+    env: dict[str, str],
+    pids: list[int],
+    *,
+    timeout: float = 3.0,
+) -> list[int]:
+    deadline = time.monotonic() + timeout
+    survivors = pids
+    while survivors and time.monotonic() < deadline:
+        probe = subprocess.run(
+            [
+                bash,
+                "-c",
+                'for pid in "$@"; do kill -0 "$pid" 2>/dev/null && printf "%s\\n" "$pid"; done',
+                "bash",
+                *map(str, survivors),
+            ],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        survivors = [int(pid) for pid in probe.stdout.splitlines() if pid]
+        if survivors:
+            time.sleep(0.05)
+    return survivors
+
+
+def _kill_bash_pids(bash: str, repo: Path, env: dict[str, str], pids: list[int]) -> None:
+    if not pids:
+        return
+    subprocess.run(
+        [bash, "-c", 'for pid in "$@"; do kill -KILL "$pid" 2>/dev/null || true; done', "bash", *map(str, pids)],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+def _terminate_bash_launcher_process(process: subprocess.Popen[str]) -> None:
+    process.terminate()
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
 
 
 def _powershell_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
@@ -487,10 +889,11 @@ def _record_owned_powershell_descendants(
             if not parents:
                 continue
             current_parent = current_by_pid.get(parent_pid)
-            if current_parent is not None:
-                parents = [item for item in parents if _same_powershell_process_identity(item, current_parent)]
-                if not parents:
-                    continue
+            if current_parent is None:
+                continue
+            parents = [item for item in parents if _same_powershell_process_identity(item, current_parent)]
+            if not parents:
+                continue
             parent = max(parents, key=lambda item: str(item["creation"]))
             record = dict(child)
             record["lineage"] = [
@@ -696,7 +1099,15 @@ def _run_powershell_runtime(
             + "\n",
             encoding="utf-8",
         )
-    command = [powershell, "-NoProfile", "-NonInteractive", "-File", str(probe)]
+    command = [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(probe),
+    ]
     stdout_path = repo / "launcher.stdout.log"
     stderr_path = repo / "launcher.stderr.log"
     exit_trigger = repo / "api-exit.trigger"
@@ -704,6 +1115,8 @@ def _run_powershell_runtime(
     process_env["HARNESS_API_EXIT_TRIGGER"] = str(exit_trigger)
     owned_registry: dict[str, dict[str, object]] = {}
     primary_failure: BaseException | None = None
+    diagnostics_text: str | None = None
+    diagnostics_error: BaseException | None = None
     start_released = False
     next_observation = 0.0
     process: subprocess.Popen[str]
@@ -779,10 +1192,6 @@ def _run_powershell_runtime(
                 wait_with_observation(max(time.monotonic() + 1, deadline))
         except BaseException as exc:
             primary_failure = exc
-            try:
-                exc.add_note(_powershell_runtime_diagnostics(repo))
-            except BaseException as diagnostic_error:
-                exc.add_note(f"PowerShell harness diagnostics failed: {diagnostic_error!r}")
             raise
         finally:
             cleanup_errors: list[str] = []
@@ -807,6 +1216,14 @@ def _run_powershell_runtime(
                 except subprocess.TimeoutExpired:
                     pass
 
+            def capture_diagnostics() -> None:
+                nonlocal diagnostics_text, diagnostics_error
+                try:
+                    diagnostics_text = _powershell_runtime_diagnostics(repo)
+                except BaseException as error:
+                    diagnostics_error = error
+                    raise
+
             def exact_cleanup() -> None:
                 snapshot = _powershell_process_snapshot()
                 _record_owned_powershell_descendants(owned_registry, snapshot)
@@ -821,6 +1238,15 @@ def _run_powershell_runtime(
                     except subprocess.TimeoutExpired:
                         pass
 
+            def unreleased_root_fallback() -> None:
+                if start_released or process.poll() is not None:
+                    return
+                process.kill()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired as error:
+                    raise AssertionError("PowerShell start-gated root did not exit after forced cleanup") from error
+
             def verify_cleanup() -> None:
                 remaining = _powershell_repo_processes(repo)
                 if remaining:
@@ -828,16 +1254,23 @@ def _run_powershell_runtime(
 
             cleanup_stage("owned-process scan", cleanup_scan)
             cleanup_stage("graceful launcher trigger", graceful_cleanup)
-            cleanup_stage("trace diagnostics", lambda: _powershell_runtime_diagnostics(repo))
+            cleanup_stage("trace diagnostics", capture_diagnostics)
             cleanup_stage("exact tree termination", exact_cleanup)
+            cleanup_stage("unreleased root handle fallback", unreleased_root_fallback)
             cleanup_stage("final residual verification", verify_cleanup)
 
+            if primary_failure is not None and diagnostics_text is not None:
+                primary_failure.add_note(diagnostics_text)
             if cleanup_errors:
                 details = "PowerShell harness cleanup errors: " + "; ".join(cleanup_errors)
                 if primary_failure is not None:
                     primary_failure.add_note(details)
                 else:
-                    raise AssertionError(f"{details}\n{_powershell_runtime_diagnostics(repo)}")
+                    if diagnostics_text is not None:
+                        details = f"{details}\n{diagnostics_text}"
+                    elif diagnostics_error is not None:
+                        details = f"{details}\nPowerShell harness diagnostics failed: {diagnostics_error!r}"
+                    raise AssertionError(details)
         result = subprocess.CompletedProcess(command, process.returncode)
     return subprocess.CompletedProcess(
         command,
@@ -891,14 +1324,9 @@ def test_bash_keep_running_reaches_readiness_stays_alive_and_cleans_on_signal(tm
     repo, env = _bash_runtime_harness(tmp_path)
     bash = shutil.which("bash")
     assert bash is not None
-    launcher_pid_path = repo / "launcher.pid"
     process = subprocess.Popen(
         [
             bash,
-            "-c",
-            'pid_path="$1"; shift; printf "%s\\n" "$$" >"$pid_path"; exec "$@"',
-            "bash",
-            launcher_pid_path.as_posix(),
             (repo / "scripts/es-runtime-stack.sh").as_posix(),
             "--validate",
             "--keep-running",
@@ -910,9 +1338,10 @@ def test_bash_keep_running_reaches_readiness_stays_alive_and_cleans_on_signal(tm
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        creationflags=_bash_launcher_creationflags(),
     )
     try:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
         run_dir: Path | None = None
         while time.monotonic() < deadline:
             run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
@@ -940,7 +1369,7 @@ def test_bash_keep_running_reaches_readiness_stays_alive_and_cleans_on_signal(tm
         assert "es=http://127.0.0.1:9200" in ready_line
         assert f"index=validation-{run_dir.name}" in ready_line
 
-        launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+        launcher_pid = (run_dir / "launcher.pid").read_text(encoding="utf-8").strip()
         terminated = subprocess.run(
             [bash, "-c", 'kill -TERM "$1"', "bash", launcher_pid],
             cwd=repo,
@@ -958,7 +1387,8 @@ def test_bash_keep_running_reaches_readiness_stays_alive_and_cleans_on_signal(tm
         assert f"http://127.0.0.1:9200/validation-{run_dir.name}" in trace
     finally:
         if process.poll() is None:
-            if launcher_pid_path.exists():
+            launcher_pid_path = run_dir / "launcher.pid" if run_dir is not None else None
+            if launcher_pid_path is not None and launcher_pid_path.exists():
                 launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
                 subprocess.run(
                     [bash, "-c", 'kill -TERM "$1"', "bash", launcher_pid],
@@ -1084,13 +1514,9 @@ def test_bash_worker_readiness_failure_cleans_started_processes(tmp_path: Path):
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
     assert all(item["exit_status"] is not None for item in manifest["processes"])
     stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
-    assert any(
-        message in stack_log
-        for message in (
-            "recorded-video Worker exited before readiness",
-            "recorded-video Worker did not emit ready=true",
-        )
-    )
+    assert "component=worker" in stack_log
+    assert "state=exited" in stack_log
+    assert "exit_code=7" in stack_log
 
 
 def test_bash_normal_start_never_invokes_validation_smoke(tmp_path: Path):
@@ -1104,8 +1530,177 @@ def test_bash_normal_start_never_invokes_validation_smoke(tmp_path: Path):
     assert "smoke=" not in trace
     run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
-    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker", "ui"}
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api"}
     assert all(item["exit_status"] is not None for item in manifest["processes"])
+
+
+def test_bash_conda_shell_function_adapter_covers_doctor_and_long_running_api(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_DEFINE_CONDA_FUNCTION"] = "1"
+    env["HARNESS_API_EXIT_AFTER"] = "1"
+    fake_bin = env["PATH"].split(":", 1)[0]
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+
+    completed = _run_bash_runtime(repo, env, "--conda-env", "vsa-agent", "--timeout-sec", "3")
+
+    assert completed.returncode == 17, completed.stderr
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    conda_calls = [line for line in trace.splitlines() if line.startswith("conda_function=")]
+    assert any("scripts/runtime-doctor.py" in line for line in conda_calls)
+    assert any("python -m uvicorn" in line for line in conda_calls)
+
+
+def test_bash_es_log_stream_exit_fails_validation_even_when_es_health_is_good(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_ES_LOG_EXIT_STATUS"] = "19"
+
+    completed = _run_bash_runtime(repo, env, "--validate", "--smoke-only", "--timeout-sec", "3")
+
+    assert completed.returncode != 0
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "smoke=" not in trace
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    assert "PASS:" not in completed.stdout
+    assert "PASS:" not in completed.stderr
+    assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8")
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+    es = next(item for item in manifest["processes"] if item["component"] == "es")
+    assert es["exit_status"] is not None
+
+
+def test_bash_es_log_exit_at_smoke_completion_boundary_prevents_pass(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    boundary_gate = tmp_path / "es-log-smoke-boundary"
+    env["HARNESS_ES_LOG_SMOKE_BOUNDARY_GATE"] = boundary_gate.as_posix()
+    env["HARNESS_ES_LOG_SMOKE_BOUNDARY_STATUS"] = "23"
+
+    bash = shutil.which("bash")
+    assert bash is not None
+    completed = subprocess.run(
+        [bash, (repo / "scripts/es-runtime-stack.sh").as_posix(), "--validate", "--smoke-only", "--timeout-sec", "3"],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=BASH_SMOKE_COMPLETION_BOUNDARY_TIMEOUT_SEC,
+    )
+
+    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+    es_status = json.loads((run_dir / "es.status.json").read_text(encoding="utf-8"))
+    diagnostics = (
+        completed.returncode,
+        es_status,
+        (repo / "trace.log").read_text(encoding="utf-8"),
+        (run_dir / "stack.log").read_text(encoding="utf-8"),
+        completed.stdout,
+        completed.stderr,
+    )
+    assert boundary_gate.with_suffix(".ready").exists(), diagnostics
+    assert boundary_gate.with_suffix(".smoke-complete").exists(), diagnostics
+    assert es_status["state"] == "exited", diagnostics
+    assert es_status["exit_code"] == 23, diagnostics
+    assert completed.returncode != 0, (es_status, completed.stdout, completed.stderr)
+    stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert "PASS:" not in completed.stdout
+    assert "PASS:" not in completed.stderr
+    assert "PASS:" not in stack_log
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+    es = next(item for item in manifest["processes"] if item["component"] == "es")
+    assert es["exit_status"] is not None
+    owned_pids = [int(item["pid"]) for item in manifest["processes"]]
+    survivors = _wait_for_bash_pids_gone(bash, repo, env, owned_pids)
+    try:
+        assert not survivors, f"owned process survived boundary failure: {survivors}"
+    finally:
+        _kill_bash_pids(bash, repo, env, survivors)
+
+
+@pytest.mark.parametrize(
+    ("failure", "payload_update"),
+    [
+        ("missing", {}),
+        ("corrupt", {}),
+        ("exited", {"state": "exited", "exit_code": 23}),
+        ("stale-run", {"run_id": "another-run"}),
+        ("supervisor-pid", {"supervisor_pid": 999999}),
+        ("workload-pid", {"workload_pid": 0}),
+    ],
+)
+def test_bash_status_sidecar_validator_rejects_invalid_component_state(
+    tmp_path: Path, failure: str, payload_update: dict[str, object]
+):
+    validator = _bash_function("validate_component_status")
+    status_file = tmp_path / "api.status.json"
+    payload = {
+        "schema_version": 1,
+        "run_id": "run-1",
+        "component": "api",
+        "state": "running",
+        "supervisor_pid": os.getpid(),
+        "workload_pid": os.getpid(),
+        "exit_code": None,
+        "updated_at": "2026-07-16T00:00:00Z",
+    }
+    payload.update(payload_update)
+    if failure == "corrupt":
+        status_file.write_text("{not-json", encoding="utf-8")
+    elif failure != "missing":
+        status_file.write_text(json.dumps(payload), encoding="utf-8")
+    probe = f"""
+    RUN_ID=run-1
+    {validator}
+    validate_component_status api {shlex.quote(status_file.as_posix())} {os.getpid()}
+    """
+
+    completed = _run_bash_probe(probe)
+
+    if failure == "exited":
+        assert completed.returncode == 23
+    else:
+        assert completed.returncode != 0
+    assert "component=api" in completed.stderr
+    assert f"status_file={status_file.as_posix()}" in completed.stderr
+    assert "exit_code=" in completed.stderr
+
+
+def test_bash_wait_component_status_running_returns_terminal_sidecar_exit_code(tmp_path: Path):
+    validator = _bash_function("validate_component_status")
+    waiter = _bash_function("wait_component_status_running")
+    status_file = tmp_path / "api.status.json"
+    status_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "run-1",
+                "component": "api",
+                "state": "exited",
+                "supervisor_pid": os.getpid(),
+                "workload_pid": os.getpid(),
+                "exit_code": 17,
+                "updated_at": "2026-07-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    probe = f"""
+    RUN_ID=run-1
+    TIMEOUT_SEC=1
+    declare -A PROCESS_PIDS=([api]={os.getpid()})
+    declare -A PROCESS_STATUS_FILES=([api]={shlex.quote(status_file.as_posix())})
+    fail_if_managed_process_exited() {{ return 0; }}
+    log_stack_error() {{ printf '%s\n' "$*" >&2; }}
+    {validator}
+    {waiter}
+    wait_component_status_running api
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode == 17
+    assert "component=api" in completed.stderr
+    assert "state=exited" in completed.stderr
+    assert "exit_code=17" in completed.stderr
 
 
 @pytest.mark.parametrize("signal_name", ["TERM", "INT"])
@@ -1115,38 +1710,655 @@ def test_bash_interruption_cleans_validation_index_data_and_config(tmp_path: Pat
     bash = shutil.which("bash")
     assert bash is not None
     launcher = (repo / "scripts/es-runtime-stack.sh").as_posix()
+    trace_path = repo / "trace.log"
+    launcher_pid_path: Path | None = None
 
-    completed = subprocess.run(
+    process = subprocess.Popen(
         [
             bash,
             "-c",
-            'timeout --preserve-status -k 5 -s "$1" 3 "$2" --validate --smoke-only --timeout-sec 3',
+            'exec "$@"',
             "bash",
-            signal_name,
             launcher,
+            "--validate",
+            "--smoke-only",
+            "--timeout-sec",
+            "3",
         ],
         cwd=repo,
         env=env,
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=15,
+        creationflags=_bash_launcher_creationflags(),
     )
+    try:
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
+        run_dir: Path | None = None
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"launcher exited before smoke readiness: rc={process.returncode}\n{stdout}\n{stderr}")
+            run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
+            if run_dirs:
+                candidate = run_dirs[0]
+                marker = candidate / f"validation-{candidate.name}/interruption-ready.marker"
+                trace = trace_path.read_text(encoding="utf-8") if trace_path.exists() else ""
+                candidate_launcher_pid_path = candidate / "launcher.pid"
+                if (
+                    "smoke=" in trace
+                    and marker.exists()
+                    and (candidate / "validation-config.yaml").exists()
+                    and candidate_launcher_pid_path.exists()
+                ):
+                    run_dir = candidate
+                    launcher_pid_path = candidate_launcher_pid_path
+                    break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("launcher did not reach smoke readiness before interruption")
 
-    assert completed.returncode == 130, completed.stderr
-    run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
-    trace = (repo / "trace.log").read_text(encoding="utf-8")
-    assert "-X DELETE" in trace
+        assert launcher_pid_path is not None
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+        signaled = subprocess.run(
+            [bash, "-c", 'kill -s "$1" "$2"', "bash", signal_name, launcher_pid],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert signaled.returncode == 0, signaled.stderr
+        stdout, stderr = process.communicate(timeout=15)
+    finally:
+        if process.poll() is None:
+            if launcher_pid_path is not None and launcher_pid_path.exists():
+                launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+                subprocess.run(
+                    [bash, "-c", 'kill -s TERM "$1"', "bash", launcher_pid],
+                    cwd=repo,
+                    env=env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                _terminate_bash_launcher_process(process)
+
+    assert process.returncode == 130, stderr
+    assert run_dir is not None
+    trace = trace_path.read_text(encoding="utf-8")
+    assert "smoke=" in trace
+    assert "PASS:" not in stdout
+    assert "PASS:" not in stderr
+    assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8")
+    delete_lines = [line for line in trace.splitlines() if "-X DELETE" in line]
+    assert any(line.endswith(f"/validation-{run_dir.name}-legacy-smoke") for line in delete_lines)
+    assert any(line.endswith(f"/validation-{run_dir.name}") for line in delete_lines)
     assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / "config.yaml").exists()
     assert not (run_dir / f"validation-{run_dir.name}").exists()
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+    assert manifest["processes"]
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    owned_pids = [int(item["pid"]) for item in manifest["processes"]]
+    owned_pids.extend(
+        int(line.split("=", 1)[1])
+        for line in trace.splitlines()
+        if line.startswith(("api_pid=", "worker_pid=", "smoke_pid="))
+    )
+    survivors = _wait_for_bash_pids_gone(bash, repo, env, owned_pids)
+    assert not survivors, f"owned process survived interruption: {survivors}"
+
+
+def test_bash_rapid_back_to_back_terms_before_cleanup_still_finish_cleanup(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_SMOKE_SLEEP"] = "30"
+    bash = shutil.which("bash")
+    assert bash is not None
+    trace_path = repo / "trace.log"
+    launcher_pid_path: Path | None = None
+    process = subprocess.Popen(
+        [
+            bash,
+            "-c",
+            'exec "$@"',
+            "bash",
+            (repo / "scripts/es-runtime-stack.sh").as_posix(),
+            "--validate",
+            "--smoke-only",
+            "--timeout-sec",
+            "3",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=_bash_launcher_creationflags(),
+    )
+    owned_pids: list[int] = []
+    try:
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
+        run_dir = None
+        while time.monotonic() < deadline:
+            assert process.poll() is None
+            run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
+            trace = trace_path.read_text(encoding="utf-8") if trace_path.exists() else ""
+            if run_dirs and "smoke=" in trace:
+                candidate = run_dirs[0]
+                marker = candidate / f"validation-{candidate.name}/interruption-ready.marker"
+                if marker.exists() and (candidate / "validation-config.yaml").exists():
+                    run_dir = candidate
+                    launcher_pid_path = run_dir / "launcher.pid"
+                    break
+            time.sleep(0.02)
+        assert run_dir is not None
+        assert launcher_pid_path is not None
+
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+        signaled = subprocess.run(
+            [
+                bash,
+                "-c",
+                'for ((attempt = 0; attempt < 256; attempt++)); do kill -s TERM "$1" 2>/dev/null || break; done',
+                "bash",
+                launcher_pid,
+            ],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert signaled.returncode == 0, signaled.stderr
+        stdout, stderr = process.communicate(timeout=20)
+
+        assert process.returncode == 130, stderr
+        trace = trace_path.read_text(encoding="utf-8")
+        assert len([line for line in trace.splitlines() if "-X DELETE" in line]) == 2
+        assert not (run_dir / "validation-config.yaml").exists()
+        assert not (run_dir / "config.yaml").exists()
+        assert not (run_dir / f"validation-{run_dir.name}").exists()
+        manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+        assert all(item["exit_status"] is not None for item in manifest["processes"])
+        assert "PASS:" not in stdout
+        owned_pids = [int(item["pid"]) for item in manifest["processes"]]
+        owned_pids.extend(
+            int(line.split("=", 1)[1])
+            for line in trace.splitlines()
+            if line.startswith(("api_pid=", "worker_pid=", "smoke_pid="))
+        )
+        assert not _wait_for_bash_pids_gone(bash, repo, env, owned_pids)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+        _kill_bash_pids(bash, repo, env, owned_pids)
+
+
+def test_bash_interrupt_entry_masks_followup_signals_before_cleanup_dispatch():
+    handler = _bash_function("handle_interrupt")
+    cleanup = _bash_function("cleanup")
+    script = _bash()
+
+    assert "trap '' INT TERM" in handler
+    assert handler.index("trap '' INT TERM") < handler.index("INTERRUPTED_SIGNAL=")
+    assert "trap 'handle_interrupt" not in cleanup
+    assert 'trap \'status=$?; trap "" INT TERM; cleanup "$status"\' EXIT' in script
+
+
+def test_bash_component_supervisor_exports_registered_pid_and_cleanup_preserves_primary_status():
+    start_component = _bash_function("start_supervised_process")
+    cleanup = _bash_function("cleanup")
+    script = _bash()
+
+    assert 'VSA_SUPERVISOR_REGISTERED_PID="$BASHPID" exec "$@"' in start_component
+    assert 'local status="${1:-$?}" cleanup_failed=0' in cleanup
+    assert 'trap \'status=$?; trap "" INT TERM; cleanup "$status"\' EXIT' in script
+
+
+def test_bash_status_validator_does_not_probe_workload_pid_with_os_signal():
+    validator = _bash_function("validate_component_status")
+
+    assert "invalid workload PID" in validator
+    assert "os.kill(workload_pid, 0)" not in validator
+    assert "OpenProcess" not in validator
+    assert "GetExitCodeProcess" not in validator
+
+
+def test_bash_manifest_update_failure_during_signal_cleanup_is_aggregated(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_SMOKE_SLEEP"] = "30"
+    manifest_failure_gate = tmp_path / "manifest-update.fail"
+    env["HARNESS_MANIFEST_FAILURE_GATE"] = manifest_failure_gate.as_posix()
+    bash = shutil.which("bash")
+    assert bash is not None
+    trace_path = repo / "trace.log"
+    launcher_pid_path: Path | None = None
+    process = subprocess.Popen(
+        [
+            bash,
+            "-c",
+            'exec "$@"',
+            "bash",
+            (repo / "scripts/es-runtime-stack.sh").as_posix(),
+            "--validate",
+            "--smoke-only",
+            "--timeout-sec",
+            "3",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=_bash_launcher_creationflags(),
+    )
+    owned_pids: list[int] = []
+    try:
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
+        run_dir = None
+        while time.monotonic() < deadline:
+            assert process.poll() is None
+            run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
+            trace = trace_path.read_text(encoding="utf-8") if trace_path.exists() else ""
+            if run_dirs and "smoke=" in trace:
+                run_dir = run_dirs[0]
+                launcher_pid_path = run_dir / "launcher.pid"
+                break
+            time.sleep(0.02)
+        assert run_dir is not None
+        assert launcher_pid_path is not None
+
+        manifest_failure_gate.touch()
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+        signaled = subprocess.run(
+            [bash, "-c", 'kill -s TERM "$1"', "bash", launcher_pid],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert signaled.returncode == 0, signaled.stderr
+        stdout, stderr = process.communicate(timeout=20)
+
+        assert process.returncode != 0, stderr
+        trace = trace_path.read_text(encoding="utf-8")
+        assert trace.count("manifest_update_failed=1") >= 3
+        assert len([line for line in trace.splitlines() if "-X DELETE" in line]) == 2
+        assert not (run_dir / "validation-config.yaml").exists()
+        assert not (run_dir / "config.yaml").exists()
+        assert not (run_dir / f"validation-{run_dir.name}").exists()
+        stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
+        for component in ("worker", "api", "es"):
+            assert f"cleanup stage failed: stop {component}" in stack_log
+        assert "PASS:" not in stdout
+        manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+        owned_pids = [int(item["pid"]) for item in manifest["processes"]]
+        owned_pids.extend(
+            int(line.split("=", 1)[1])
+            for line in trace.splitlines()
+            if line.startswith(("api_pid=", "worker_pid=", "smoke_pid="))
+        )
+        assert not _wait_for_bash_pids_gone(bash, repo, env, owned_pids)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+        _kill_bash_pids(bash, repo, env, owned_pids)
+
+
+def test_bash_second_signal_during_cleanup_still_finishes_all_cleanup(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    env["HARNESS_SMOKE_SLEEP"] = "30"
+    delete_gate = tmp_path / "delete-gate"
+    env["HARNESS_DELETE_GATE"] = delete_gate.as_posix()
+    delete_ready = Path(f"{delete_gate}.ready")
+    delete_release = Path(f"{delete_gate}.release")
+    bash = shutil.which("bash")
+    assert bash is not None
+    trace_path = repo / "trace.log"
+    launcher_pid_path: Path | None = None
+    process = subprocess.Popen(
+        [
+            bash,
+            "-c",
+            'exec "$@"',
+            "bash",
+            (repo / "scripts/es-runtime-stack.sh").as_posix(),
+            "--validate",
+            "--smoke-only",
+            "--timeout-sec",
+            "3",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=_bash_launcher_creationflags(),
+    )
+    try:
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
+        run_dir = None
+        while time.monotonic() < deadline:
+            assert process.poll() is None
+            run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
+            trace = trace_path.read_text(encoding="utf-8") if trace_path.exists() else ""
+            if run_dirs and "smoke=" in trace:
+                run_dir = run_dirs[0]
+                launcher_pid_path = run_dir / "launcher.pid"
+                break
+            time.sleep(0.05)
+        assert run_dir is not None
+        assert launcher_pid_path is not None
+
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8").strip()
+        first = subprocess.run(
+            [bash, "-c", 'kill -s TERM "$1"', "bash", launcher_pid],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert first.returncode == 0, first.stderr
+        deadline = time.monotonic() + 15
+        while not delete_ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.02)
+        assert delete_ready.exists()
+
+        second = subprocess.run(
+            [bash, "-c", 'kill -s TERM "$1"', "bash", launcher_pid],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert second.returncode == 0, second.stderr
+        delete_release.touch()
+        stdout, stderr = process.communicate(timeout=15)
+    finally:
+        delete_release.touch()
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+    assert process.returncode == 130, stderr
+    trace = trace_path.read_text(encoding="utf-8")
+    delete_lines = [line for line in trace.splitlines() if "-X DELETE" in line]
+    assert len(delete_lines) == 2
+    assert not (run_dir / "validation-config.yaml").exists()
+    assert not (run_dir / "config.yaml").exists()
+    assert not (run_dir / f"validation-{run_dir.name}").exists()
+    manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
+    assert all(item["exit_status"] is not None for item in manifest["processes"])
+    stack_log = (run_dir / "stack.log").read_text(encoding="utf-8")
+    assert "process manifest:" in stack_log
+    assert "stack log:" in stack_log
+    assert "interruption signal=" in stack_log
+    assert "PASS:" not in stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows lock contention probe")
+def test_bash_signal_while_pass_log_is_lock_blocked_never_emits_pass(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    smoke_gate = tmp_path / "smoke-gate"
+    env["HARNESS_SMOKE_GATE"] = smoke_gate.as_posix()
+    smoke_ready = Path(f"{smoke_gate}.ready")
+    smoke_release = Path(f"{smoke_gate}.release")
+    pass_attempt = tmp_path / "pass-attempt.marker"
+    wrapper_events = tmp_path / "wrapper-events.log"
+    locker_events = tmp_path / "locker-events.log"
+    supervisor_wrapper = repo / "fake-bin/supervisor-python"
+    _write_executable(
+        supervisor_wrapper,
+        f"""
+        #!/usr/bin/env bash
+        if [[ "$*" == *"PASS: ES runtime stack validation succeeded"* ]]; then
+          : >{shlex.quote(pass_attempt.as_posix())}
+          printf 'started wrapper=%s\n' "$BASHPID" >>{shlex.quote(wrapper_events.as_posix())}
+        fi
+        exec "$REAL_PYTHON" "$@"
+        """,
+    )
+    env["VSA_SUPERVISOR_PYTHON"] = supervisor_wrapper.as_posix()
+    bash = shutil.which("bash")
+    assert bash is not None
+    launcher_pid_path: Path | None = None
+    process = subprocess.Popen(
+        [
+            bash,
+            "-c",
+            'exec "$@"',
+            "bash",
+            (repo / "scripts/es-runtime-stack.sh").as_posix(),
+            "--validate",
+            "--smoke-only",
+            "--timeout-sec",
+            "3",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=_bash_launcher_creationflags(),
+    )
+    lock_release = tmp_path / "lock.release"
+    locker = None
+    try:
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
+        run_dir = None
+        while time.monotonic() < deadline:
+            assert process.poll() is None
+            run_dirs = list((repo / ".runtime/es-stack/runs").glob("*"))
+            if run_dirs and smoke_ready.exists():
+                run_dir = run_dirs[0]
+                launcher_pid_path = run_dir / "launcher.pid"
+                break
+            time.sleep(0.02)
+        assert run_dir is not None
+        assert launcher_pid_path is not None
+        lock_path = run_dir / "stack.log.lock"
+        lock_ready = tmp_path / "lock.ready"
+        locker_code = """
+import msvcrt
+import pathlib
+import sys
+import time
+
+lock_path, ready, release = map(pathlib.Path, sys.argv[1:4])
+with pathlib.Path(sys.argv[4]).open('a', encoding='utf-8') as events:
+    events.write('opened\\n')
+with lock_path.open("r+b", buffering=0) as stream:
+    stream.seek(0)
+    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+    pathlib.Path(sys.argv[4]).open('a', encoding='utf-8').write('locked\\n')
+    ready.touch()
+    while not release.exists():
+        time.sleep(0.01)
+    stream.seek(0)
+    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    pathlib.Path(sys.argv[4]).open('a', encoding='utf-8').write('released\\n')
+"""
+        locker = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                locker_code,
+                str(lock_path),
+                str(lock_ready),
+                str(lock_release),
+                str(locker_events),
+            ]
+        )
+        deadline = time.monotonic() + 5
+        while not lock_ready.exists() and time.monotonic() < deadline:
+            assert locker.poll() is None
+            time.sleep(0.01)
+        assert lock_ready.exists()
+
+        smoke_release.touch()
+        deadline = time.monotonic() + 10
+        while not pass_attempt.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.01)
+        assert pass_attempt.exists()
+        time.sleep(0.5)
+        locker_state = locker_events.read_text(encoding="utf-8") if locker_events.exists() else "<missing>"
+        assert "locked" in locker_state
+        assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8"), (
+            locker_state,
+            wrapper_events.read_text(encoding="utf-8") if wrapper_events.exists() else "<missing>",
+        )
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8")
+        signaled = subprocess.run(
+            [bash, "-c", 'kill -s TERM "$1"', "bash", launcher_pid],
+            cwd=repo,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert signaled.returncode == 0, signaled.stderr
+        time.sleep(0.1)
+        lock_release.touch()
+        stdout, stderr = process.communicate(timeout=15)
+    finally:
+        smoke_release.touch()
+        lock_release.touch()
+        if locker is not None:
+            if locker.poll() is None:
+                locker.kill()
+            locker.wait(timeout=5)
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+    assert process.returncode == 130, stderr
+    events = wrapper_events.read_text(encoding="utf-8") if wrapper_events.exists() else "<missing>"
+    assert "PASS:" not in stdout, events
+    assert "PASS:" not in stderr
+    assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows deterministic PASS publication probe")
+def test_bash_pass_publication_rejects_terminal_sidecar_while_supervisor_drains(tmp_path: Path):
+    repo, env = _bash_runtime_harness(tmp_path)
+    api_exit_trigger = tmp_path / "api-exit.trigger"
+    pass_attempt = tmp_path / "pass-attempt.marker"
+    pass_release = tmp_path / "pass.release"
+    env["HARNESS_API_EXIT_TRIGGER"] = api_exit_trigger.as_posix()
+    env["HARNESS_API_DRAIN_LINES"] = "20000"
+    supervisor_wrapper = repo / "fake-bin/supervisor-python"
+    _write_executable(
+        supervisor_wrapper,
+        f"""
+        #!/usr/bin/env bash
+        if [[ "$*" == *"PASS: ES runtime stack validation succeeded"* ]]; then
+          : >{shlex.quote(pass_attempt.as_posix())}
+          while [[ ! -e {shlex.quote(pass_release.as_posix())} ]]; do sleep 0.01; done
+        fi
+        exec "$REAL_PYTHON" "$@"
+        """,
+    )
+    env["VSA_SUPERVISOR_PYTHON"] = supervisor_wrapper.as_posix()
+    bash = shutil.which("bash")
+    assert bash is not None
+    stdout_path = tmp_path / "launcher.stdout.log"
+    stderr_path = tmp_path / "launcher.stderr.log"
+    stdout_sink = stdout_path.open("w", encoding="utf-8")
+    stderr_sink = stderr_path.open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        [
+            bash,
+            (repo / "scripts/es-runtime-stack.sh").as_posix(),
+            "--validate",
+            "--smoke-only",
+            "--timeout-sec",
+            "3",
+        ],
+        cwd=repo,
+        env=env,
+        stdout=stdout_sink,
+        stderr=stderr_sink,
+        text=True,
+        creationflags=_bash_launcher_creationflags(),
+    )
+    run_dir: Path | None = None
+    try:
+        deadline = time.monotonic() + BASH_RUNTIME_READINESS_TIMEOUT_SEC
+        while not pass_attempt.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.01)
+        assert pass_attempt.exists()
+        run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
+        api_exit_trigger.touch()
+        api_status_path = run_dir / "api.status.json"
+        api_status = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if api_status_path.exists():
+                api_status = json.loads(api_status_path.read_text(encoding="utf-8"))
+                if api_status.get("state") == "exited":
+                    break
+            time.sleep(0.005)
+        assert api_status is not None
+        assert api_status["state"] == "exited"
+        assert api_status["exit_code"] == 17
+        assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8")
+        pass_release.touch()
+        process.wait(timeout=20)
+    finally:
+        api_exit_trigger.touch()
+        pass_release.touch()
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        stdout_sink.close()
+        stderr_sink.close()
+
+    assert run_dir is not None
+    stdout = stdout_path.read_text(encoding="utf-8")
+    stderr = stderr_path.read_text(encoding="utf-8")
+    assert process.returncode != 0, stderr
+    assert "PASS:" not in stdout
+    assert "PASS:" not in stderr
+    assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8")
 
 
 def test_bash_runtime_monitor_detects_api_exit_while_worker_and_ui_continue():
-    functions = "\n".join(_bash_function(name) for name in ("pid_is_running", "wait_runtime_processes"))
+    functions = "\n".join(
+        _bash_function(name)
+        for name in (
+            "pid_is_running",
+            "observe_managed_processes",
+            "fail_if_managed_process_exited",
+            "wait_runtime_processes",
+        )
+    )
     probe = f"""
     declare -A PROCESS_PIDS=()
     record_process_exit() {{ :; }}
     log_stack_error() {{ printf '%s' "$*" >&2; }}
+    validate_managed_statuses() {{ return 0; }}
     {functions}
     bash -c 'exit 7' & PROCESS_PIDS[api]=$!
     bash -c 'while :; do :; done' & PROCESS_PIDS[worker]=$!
@@ -1159,6 +2371,129 @@ def test_bash_runtime_monitor_detects_api_exit_while_worker_and_ui_continue():
 
     assert completed.returncode != 0
     assert "api" in completed.stderr
+
+
+@pytest.mark.parametrize("mode", ["sync", "component"])
+def test_bash_signal_in_supervisor_registration_window_cleans_registered_pid(tmp_path: Path, mode: str):
+    function_names = (
+        "handle_interrupt",
+        "begin_supervisor_start",
+        "finish_supervisor_start",
+        "start_sync_supervisor",
+        "wait_sync_supervisor",
+        "run_stack_command",
+        "start_supervised_process",
+        "observe_managed_processes",
+        "pid_is_running",
+        "signal_process_tree",
+        "stop_pid_bounded",
+    )
+    functions = "\n".join(_bash_function(name) for name in function_names)
+    fake_supervisor = tmp_path / "fake-supervisor.py"
+    fake_supervisor.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    ready = tmp_path / f"{mode}.ready"
+    release = tmp_path / f"{mode}.release"
+    launcher_pid_path = tmp_path / f"{mode}.launcher.pid"
+    supervisor_pid_path = tmp_path / f"{mode}.supervisor.pid"
+    stack_log = tmp_path / "stack.log"
+    component_log = tmp_path / "component.log"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    probe = f"""
+    set -Eeuo pipefail
+    SUPERVISOR_PYTHON={shlex.quote(Path(sys.executable).as_posix())}
+    RUNTIME_LOG_SUPERVISOR={shlex.quote(fake_supervisor.as_posix())}
+    STACK_LOG_PATH={shlex.quote(stack_log.as_posix())}
+    RUN_DIR={shlex.quote(run_dir.as_posix())}
+    SYNC_SUPERVISOR_PID=""
+    STARTED_SUPERVISOR_PID=""
+    INTERRUPTED_SIGNAL=""
+    INTERRUPT_PENDING=0
+    CLEANUP_ACTIVE=0
+    SUPERVISOR_START_CRITICAL=0
+    PROCESS_SHUTDOWN_GRACE_TICKS=2
+    declare -A PROCESS_PIDS=()
+    declare -A PROCESS_STATUS_FILES=()
+    record_process() {{ PROCESS_PIDS["$1"]="$2"; }}
+    {functions}
+    register_sync_supervisor() {{
+      SYNC_SUPERVISOR_PID="$1"
+      printf '%s' "$1" >{shlex.quote(supervisor_pid_path.as_posix())}
+      : >{shlex.quote(ready.as_posix())}
+      while [[ ! -e {shlex.quote(release.as_posix())} ]]; do sleep 0.01; done
+    }}
+    register_component_supervisor() {{
+      STARTED_SUPERVISOR_PID="$2"
+      record_process "$1" "$2" "$3"
+      printf '%s' "$2" >{shlex.quote(supervisor_pid_path.as_posix())}
+      : >{shlex.quote(ready.as_posix())}
+      while [[ ! -e {shlex.quote(release.as_posix())} ]]; do sleep 0.01; done
+    }}
+    cleanup_probe() {{
+      local status=$?
+      trap - EXIT
+      trap ':' INT TERM
+      CLEANUP_ACTIVE=1
+      [[ -z "$SYNC_SUPERVISOR_PID" ]] || stop_pid_bounded "$SYNC_SUPERVISOR_PID" || true
+      for pid in "${{PROCESS_PIDS[@]:-}}"; do [[ -z "$pid" ]] || stop_pid_bounded "$pid" || true; done
+      exit "$status"
+    }}
+    trap cleanup_probe EXIT
+    trap 'handle_interrupt INT' INT
+    trap 'handle_interrupt TERM' TERM
+    printf '%s' "$BASHPID" >{shlex.quote(launcher_pid_path.as_posix())}
+    if [[ {shlex.quote(mode)} == sync ]]; then
+      run_stack_command ignored
+    else
+      start_supervised_process api {shlex.quote(component_log.as_posix())} safe ignored
+      sleep 30
+    fi
+    exit 99
+    """
+    bash = shutil.which("bash")
+    assert bash is not None
+    process = subprocess.Popen(
+        [bash, "-c", textwrap.dedent(probe)],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"probe exited before registration: stdout={stdout!r} stderr={stderr!r}")
+            time.sleep(0.01)
+        assert ready.exists()
+        launcher_pid = launcher_pid_path.read_text(encoding="utf-8")
+        signaled = subprocess.run(
+            [bash, "-c", 'kill -s TERM "$1"', "bash", launcher_pid],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert signaled.returncode == 0, signaled.stderr
+        release.touch()
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        release.touch()
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+    assert process.returncode == 130, (stdout, stderr)
+    supervisor_pid = supervisor_pid_path.read_text(encoding="utf-8")
+    gone = subprocess.run(
+        [bash, "-c", 'kill -0 "$1" 2>/dev/null', "bash", supervisor_pid],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert gone.returncode != 0
 
 
 def test_powershell_full_validation_run_records_manifest_and_shared_isolated_config(tmp_path: Path):
@@ -1291,38 +2626,47 @@ def test_powershell_helper_abandoned_wait_reclaims_only_its_owned_process_tree(
         _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
 
 
-def test_powershell_helper_initial_identity_capture_failure_reclaims_start_gated_host(
+def test_powershell_helper_persistent_snapshot_failure_reclaims_unreleased_root_handle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     repo, env = _powershell_runtime_harness(tmp_path)
-    original_snapshot = _powershell_process_snapshot
     snapshot_calls = 0
+    original_popen = subprocess.Popen
+    root_handles: list[subprocess.Popen[str]] = []
 
-    class HarnessIdentityCaptureError(RuntimeError):
+    class HarnessPersistentSnapshotError(RuntimeError):
         pass
 
-    def fail_initial_identity_capture() -> list[dict[str, object]]:
+    def fail_every_snapshot() -> list[dict[str, object]]:
         nonlocal snapshot_calls
         snapshot_calls += 1
-        if snapshot_calls == 1:
-            raise HarnessIdentityCaptureError("intentional initial identity capture failure")
-        return original_snapshot()
+        raise HarnessPersistentSnapshotError("intentional persistent snapshot failure")
+
+    def capture_root_handle(*args, **kwargs) -> subprocess.Popen[str]:
+        process = original_popen(*args, **kwargs)
+        root_handles.append(process)
+        return process
 
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(
-                sys.modules[__name__],
-                "_powershell_process_snapshot",
-                fail_initial_identity_capture,
-            )
+            patch.setattr(sys.modules[__name__], "_powershell_process_snapshot", fail_every_snapshot)
+            patch.setattr(subprocess, "Popen", capture_root_handle)
             with pytest.raises(
-                HarnessIdentityCaptureError,
-                match="intentional initial identity capture failure",
-            ):
+                HarnessPersistentSnapshotError,
+                match="intentional persistent snapshot failure",
+            ) as captured:
                 _run_powershell_runtime(repo, env, "-Validate", "-KeepRunning", "-TimeoutSec", "3")
-        assert _powershell_repo_processes(repo) == []
+        assert snapshot_calls >= 4
+        assert len(root_handles) == 1
+        assert root_handles[0].poll() is not None
+        assert not (repo / "harness-start.trigger").exists()
+        assert any("PowerShell harness cleanup errors" in note for note in captured.value.__notes__)
+        assert any("intentional persistent snapshot failure" in note for note in captured.value.__notes__)
     finally:
-        _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
+        for handle in root_handles:
+            if handle.poll() is None:
+                handle.kill()
+                handle.wait(timeout=5)
 
 
 def test_powershell_helper_cleanup_scan_failure_preserves_primary_and_reclaims_runtime(
@@ -1372,6 +2716,33 @@ def test_powershell_helper_cleanup_scan_failure_preserves_primary_and_reclaims_r
         _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
 
 
+def test_powershell_helper_cleanup_diagnostics_failure_is_aggregated_once_without_survivors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    diagnostics_calls = 0
+
+    class HarnessDiagnosticsError(RuntimeError):
+        pass
+
+    def fail_diagnostics(_: Path) -> str:
+        nonlocal diagnostics_calls
+        diagnostics_calls += 1
+        raise HarnessDiagnosticsError("intentional cleanup diagnostics failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sys.modules[__name__], "_powershell_runtime_diagnostics", fail_diagnostics)
+            with pytest.raises(AssertionError, match="PowerShell harness cleanup errors") as captured:
+                _run_powershell_runtime(repo, env, "-Validate", "-TimeoutSec", "3")
+        assert "trace diagnostics" in str(captured.value)
+        assert "intentional cleanup diagnostics failure" in str(captured.value)
+        assert diagnostics_calls == 1
+        assert _powershell_repo_processes(repo) == []
+    finally:
+        _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
+
+
 def test_powershell_helper_reclaims_recorded_descendant_after_its_parent_exits(tmp_path: Path):
     repo, env = _powershell_runtime_harness(tmp_path)
     env["HARNESS_DETACHED_CHILD"] = "1"
@@ -1415,7 +2786,9 @@ def test_powershell_helper_reclaims_recorded_descendant_after_its_parent_exits(t
             _terminate_exact_powershell_processes([detached_identity])
 
 
-def test_powershell_registry_rejects_preexisting_children_and_reused_parent_pid():
+def test_powershell_registry_rejects_first_seen_child_when_recorded_parent_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
     def identity(pid: int, parent_pid: int, creation: str) -> dict[str, object]:
         return {
             "pid": pid,
@@ -1435,15 +2808,29 @@ def test_powershell_registry_rejects_preexisting_children_and_reused_parent_pid(
     _record_owned_powershell_descendants(registry, [reused_root, older_child, reused_child])
     assert {_powershell_identity_key(item) for item in registry.values()} == {_powershell_identity_key(root)}
 
-    child = identity(13, 10, "2026-07-16T01:00:01.0000000Z")
+    unrelated_child = identity(13, 10, "2026-07-16T03:00:01.0000000Z")
+    _record_owned_powershell_descendants(registry, [unrelated_child])
+    terminated: list[dict[str, object]] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            sys.modules[__name__],
+            "_terminate_exact_powershell_processes",
+            lambda processes: terminated.extend(processes),
+        )
+        _terminate_exact_powershell_processes(list(registry.values()))
+    assert _powershell_identity_key(unrelated_child) not in registry
+    assert unrelated_child not in terminated
+
+    child = identity(14, 10, "2026-07-16T01:00:01.0000000Z")
     _record_owned_powershell_descendants(registry, [root, child])
-    grandchild = identity(14, 13, "2026-07-16T01:00:02.0000000Z")
-    _record_owned_powershell_descendants(registry, [grandchild])
+    grandchild = identity(15, 14, "2026-07-16T01:00:02.0000000Z")
+    _record_owned_powershell_descendants(registry, [child, grandchild])
     assert registry[_powershell_identity_key(grandchild)]["lineage"] == [
         {"pid": 10, "creation": root["creation"]},
-        {"pid": 13, "creation": child["creation"]},
-        {"pid": 14, "creation": grandchild["creation"]},
+        {"pid": 14, "creation": child["creation"]},
+        {"pid": 15, "creation": grandchild["creation"]},
     ]
+    assert _current_registered_powershell_processes(registry, [grandchild]) == [grandchild]
 
 
 def test_powershell_external_pipeline_stop_runs_launcher_finally_and_cleans_owned_runtime(tmp_path: Path):
@@ -1689,9 +3076,12 @@ def test_component_output_is_aggregated_with_required_prefixes():
     powershell_log_pump = POWERSHELL_LOG_PUMP.read_text(encoding="utf-8")
 
     assert "[stack]" in bash
-    assert 'sed -u "s/^/[$label] /"' in bash
-    assert "redact_component_output es" in bash
-    assert "redact_component_output" in bash
+    assert "runtime-log-supervisor.py" in bash
+    assert "--label" in bash
+    assert "--component-log" in bash
+    assert "redact_component_output" not in bash
+    assert "> >(redact" not in bash
+    assert "sed -u" not in bash
 
     assert "[stack]" in powershell
     assert '"[$Component]"' in powershell
@@ -1723,7 +3113,9 @@ def test_validation_worker_uses_the_same_isolated_config_as_the_api():
         line for line in text.splitlines() if "API_CONFIG_PATH=" in line and "VALIDATION_CONFIG_PATH" in line
     )
     worker_line = next(
-        line for line in text.splitlines() if "recorded-video-worker.py --config" in line and "setsid" in line
+        line
+        for line in text.splitlines()
+        if "recorded-video-worker.py --config" in line and '"$API_CONFIG_PATH"' in line
     )
     match = re.search(r'--config "(\$[A-Z_]+)"', worker_line)
     assert match is not None
@@ -1820,17 +3212,12 @@ def test_bash_validation_delete_failure_propagates_nonzero_after_local_cleanup(t
     ("function_loader", "probe_runner", "probe"),
     [
         (
-            lambda: _bash_function("redact_runtime_text"),
-            _run_bash_probe,
-            "printf '%s' 'Authorization: Bearer top-secret' | redact_runtime_text",
-        ),
-        (
             lambda: _powershell_function("Protect-RuntimeText"),
             _run_powershell_probe,
             "Protect-RuntimeText 'Authorization: Bearer top-secret'",
         ),
     ],
-    ids=("bash", "powershell"),
+    ids=("powershell",),
 )
 def test_runtime_redactor_hides_header_token_and_image_payload(
     function_loader: object,
@@ -1845,7 +3232,7 @@ def test_runtime_redactor_hides_header_token_and_image_payload(
     assert "[REDACTED]" in completed.stdout
 
 
-@pytest.mark.parametrize("launcher", ["bash", "powershell"])
+@pytest.mark.parametrize("launcher", ["powershell"])
 def test_runtime_redactor_covers_quoted_json_secrets_and_multiline_image_payload(launcher: str):
     first_chunk = "A" * 96
     second_chunk = "B" * 96
@@ -1854,13 +3241,9 @@ def test_runtime_redactor_covers_quoted_json_secrets_and_multiline_image_payload
         '"token":"json-token-secret","password":"json-password-secret",'
         f'"image":"data:image/png;base64,\n{first_chunk}\n{second_chunk}"}}'
     )
-    if launcher == "bash":
-        function = _bash_function("redact_runtime_text")
-        completed = _run_bash_probe(f"{function}\nprintf %s {shlex.quote(payload)} | redact_runtime_text")
-    else:
-        function = _powershell_function("Protect-RuntimeText")
-        escaped = payload.replace("'", "''")
-        completed = _run_powershell_probe(f"{function}\nProtect-RuntimeText @'\n{escaped}\n'@")
+    function = _powershell_function("Protect-RuntimeText")
+    escaped = payload.replace("'", "''")
+    completed = _run_powershell_probe(f"{function}\nProtect-RuntimeText @'\n{escaped}\n'@")
 
     assert completed.returncode == 0, completed.stderr
     for secret in (
@@ -1880,7 +3263,7 @@ def test_powershell_shutdown_does_not_block_on_a_stubborn_process():
     probe = f"""
     $ErrorActionPreference = 'Stop'
     function Set-ProcessExit {{ param($Component, $ExitStatus) }}
-    function taskkill.exe {{ }}
+    function cmd.exe {{ $global:LASTEXITCODE = 0 }}
     {function}
     $child = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 2') -PassThru
     $childId = $child.Id
