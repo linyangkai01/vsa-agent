@@ -96,14 +96,16 @@ const dynamicComponents = {
   NemoAgentToolkitApp: dynamic(() => 
     import('@nemo-agent-toolkit/ui').then(mod => mod.NemoAgentToolkitApp).catch((error) => {
       console.error('[DynamicImport] Failed to load NemoAgentToolkitApp:', error);
-      return () => (
-        <div className="flex-1 p-6 overflow-auto">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Chat</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            NemoAgentToolkit component library not available. Please install @nemo-agent-toolkit/ui package.
-          </p>
-        </div>
-      );
+      return function NemoAgentToolkitAppFallback() {
+        return (
+          <div className="flex-1 p-6 overflow-auto">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Chat</h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              NemoAgentToolkit component library not available. Please install @nemo-agent-toolkit/ui package.
+            </p>
+          </div>
+        );
+      };
     }),
     { 
       ssr: true,
@@ -119,14 +121,16 @@ const dynamicComponents = {
   AlertsComponent: dynamic(() => 
     import('@nv-metropolis-bp-vss-ui/all').then(mod => mod.AlertsComponent).catch((error) => {
       console.error('[DynamicImport] Failed to load AlertsComponent:', error);
-      return () => (
-        <div className="flex-1 p-6 overflow-auto">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Alerts</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            Alerts component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
-          </p>
-        </div>
-      );
+      return function AlertsComponentFallback() {
+        return (
+          <div className="flex-1 p-6 overflow-auto">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Alerts</h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              Alerts component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
+            </p>
+          </div>
+        );
+      };
     }),
     { 
       ssr: true,
@@ -142,14 +146,16 @@ const dynamicComponents = {
   SearchComponent: dynamic(() => 
     import('@nv-metropolis-bp-vss-ui/all').then(mod => mod.SearchComponent).catch((error) => {
       console.error('[DynamicImport] Failed to load SearchComponent:', error);
-      return () => (
-        <div className="flex-1 p-6 overflow-auto">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Search</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            Search component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
-          </p>
-        </div>
-      );
+      return function SearchComponentFallback() {
+        return (
+          <div className="flex-1 p-6 overflow-auto">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Search</h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              Search component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
+            </p>
+          </div>
+        );
+      };
     }),
     { 
       ssr: true,
@@ -165,14 +171,16 @@ const dynamicComponents = {
   DashboardComponent: dynamic(() => 
     import('@nv-metropolis-bp-vss-ui/all').then(mod => mod.DashboardComponent).catch((error) => {
       console.error('[DynamicImport] Failed to load DashboardComponent:', error);
-      return () => (
-        <div className="flex-1 p-6 overflow-auto">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Dashboard</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            Dashboard component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
-          </p>
-        </div>
-      );
+      return function DashboardComponentFallback() {
+        return (
+          <div className="flex-1 p-6 overflow-auto">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Dashboard</h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              Dashboard component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
+            </p>
+          </div>
+        );
+      };
     }),
     { 
       ssr: true,
@@ -188,14 +196,16 @@ const dynamicComponents = {
   MapComponent: dynamic(() => 
     import('@nv-metropolis-bp-vss-ui/all').then(mod => mod.MapComponent).catch((error) => {
       console.error('[DynamicImport] Failed to load MapComponent:', error);
-      return () => (
-        <div className="flex-1 p-6 overflow-auto">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Map</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            Map component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
-          </p>
-        </div>
-      );
+      return function MapComponentFallback() {
+        return (
+          <div className="flex-1 p-6 overflow-auto">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Map</h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              Map component library not available. Please install @nv-metropolis-bp-vss-ui/all package.
+            </p>
+          </div>
+        );
+      };
     }),
     { 
       ssr: true,
@@ -211,14 +221,16 @@ const dynamicComponents = {
   VideoManagementComponent: dynamic(() => 
     import('@nv-metropolis-bp-vss-ui/all').then(mod => mod.VideoManagementComponent).catch((error) => {
       console.error('[DynamicImport] Failed to load VideoManagementComponent:', error);
-      return () => (
-        <div className="flex-1 p-6 overflow-auto">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Video Management</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            Video Management component library not available.
-          </p>
-        </div>
-      );
+      return function VideoManagementComponentFallback() {
+        return (
+          <div className="flex-1 p-6 overflow-auto">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Video Management</h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              Video Management component library not available.
+            </p>
+          </div>
+        );
+      };
     }),
     { 
       ssr: true,
@@ -627,7 +639,7 @@ export default function Home({ alertsData, searchData, dashboardData, mapData, v
         >
           <div>
             <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-4">Unknown Component</h2>
-            <p className="text-gray-600 dark:text-gray-400">Component "{tabConfig.component}" not found.</p>
+            <p className="text-gray-600 dark:text-gray-400">Component &quot;{tabConfig.component}&quot; not found.</p>
           </div>
         </div>
       );

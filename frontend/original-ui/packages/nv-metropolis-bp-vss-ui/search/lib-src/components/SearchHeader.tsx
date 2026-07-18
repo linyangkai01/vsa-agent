@@ -297,7 +297,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({ onUpdateSearchParams
                           onClick={isSearching ? undefined : () => handleUpdateQuery('')}
                         />
                       ) : contentDisabled ? undefined : (
-                        <Whisper placement="bottom" speaker={<Tooltip>Ask a natural language query like "a person in green jacket carrying boxes"</Tooltip>}>
+                        <Whisper placement="bottom" speaker={<Tooltip>Ask a natural language query like &quot;a person in green jacket carrying boxes&quot;</Tooltip>}>
                           <InfoRoundIcon style={{ cursor: 'help', transition: 'opacity 0.2s' }} />
                         </Whisper>
                       )
