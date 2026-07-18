@@ -892,7 +892,7 @@ def test_windows_sync_workload_without_status_file_uses_assignment_gate(
     assert not workload_pid_path.exists()
 
 
-def test_windows_pid_handoff_unlink_failure_stops_job_before_reraising(
+def test_windows_pid_handoff_unlink_failure_does_not_stop_started_job(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -944,12 +944,83 @@ def test_windows_pid_handoff_unlink_failure_stops_job_before_reraising(
     monkeypatch.setattr(module, "_new_windows_start_gate", lambda: gate)
     monkeypatch.setattr(module, "_unlink_with_windows_retry", failing_unlink)
 
-    with pytest.raises(PermissionError, match="PID handoff unlink denied"):
-        module._start_workload(["ignored"])
+    started, observed_job = module._start_workload(["ignored"])
 
-    assert process.killed
-    assert process.waited
-    assert job.closed
+    assert started is process
+    assert observed_job is job
+    assert module._workload_pid(process) == 8765
+    assert not process.killed
+    assert not process.waited
+    assert not job.closed
+
+
+def test_windows_pid_handoff_retries_transient_read_denial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_supervisor_module()
+    monkeypatch.setattr(module.os, "name", "nt")
+    gate = tmp_path / "read.gate"
+    workload_pid_path = gate.with_suffix(".pid")
+    real_read_text = Path.read_text
+    read_attempts = 0
+
+    class FakeProcess:
+        pid = 4321
+        _handle = 123
+        returncode = None
+        killed = False
+        waited = False
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self) -> int:
+            self.waited = True
+            return 1
+
+    class FakeJob:
+        closed = False
+
+        def assign(self, _process: object) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    process = FakeProcess()
+    job = FakeJob()
+
+    def fake_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        workload_pid_path.write_text("8765", encoding="utf-8")
+        return process
+
+    def transiently_denied_read(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_attempts
+        if path == workload_pid_path:
+            read_attempts += 1
+            if read_attempts == 1:
+                raise PermissionError(13, "PID handoff read denied", path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module, "_WindowsJob", lambda: job)
+    monkeypatch.setattr(module, "_new_windows_start_gate", lambda: gate)
+    monkeypatch.setattr(Path, "read_text", transiently_denied_read)
+
+    started, observed_job = module._start_workload(["ignored"])
+
+    assert started is process
+    assert observed_job is job
+    assert module._workload_pid(process) == 8765
+    assert read_attempts == 2
+    assert not process.killed
+    assert not process.waited
+    assert not job.closed
+    assert not workload_pid_path.exists()
 
 
 def test_windows_bash_command_wraps_when_bash_env_marks_bash_runtime(

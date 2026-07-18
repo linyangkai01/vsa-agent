@@ -509,7 +509,7 @@ def _start_workload(command: list[str]) -> tuple[subprocess.Popen[str], _Windows
         while workload_pid is None:
             try:
                 candidate = int(workload_pid_path.read_text(encoding="utf-8").strip())
-            except (FileNotFoundError, ValueError):
+            except (FileNotFoundError, PermissionError, ValueError):
                 candidate = 0
             if candidate > 0:
                 workload_pid = candidate
@@ -520,7 +520,11 @@ def _start_workload(command: list[str]) -> tuple[subprocess.Popen[str], _Windows
                 raise OSError("workload PID handoff timed out")
             time.sleep(0.005)
         process._vsa_workload_pid = workload_pid  # type: ignore[attr-defined]
-        _unlink_with_windows_retry(workload_pid_path)
+        try:
+            _unlink_with_windows_retry(workload_pid_path)
+        except PermissionError:
+            # The PID is captured; a delete-sharing denial cannot invalidate startup.
+            pass
     except BaseException:
         if process is not None:
             try:
