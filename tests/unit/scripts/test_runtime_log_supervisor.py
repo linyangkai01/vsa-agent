@@ -204,6 +204,114 @@ def test_windows_workload_pid_handoff_files_use_retrying_unlink_helper() -> None
     assert "_unlink_with_windows_retry(gate)" in source
 
 
+def test_windows_bootstrap_publishes_pid_with_same_directory_atomic_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_supervisor_module()
+    gate = tmp_path / "bootstrap.gate"
+    pid_path = tmp_path / "bootstrap.pid"
+    replacements: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    class FakeProcess:
+        pid = 4242
+
+        def wait(self) -> int:
+            return 0
+
+    def observe_replace(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> None:
+        source_path = Path(source)
+        target_path = Path(target)
+        assert target_path == pid_path
+        assert source_path.parent == pid_path.parent
+        assert source_path != pid_path
+        assert not pid_path.exists()
+        replacements.append((source_path, target_path))
+        real_replace(source, target)
+
+    gate.touch()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(module.os, "replace", observe_replace)
+    monkeypatch.setattr(sys, "argv", ["bootstrap", str(gate), str(pid_path), "ignored-workload"])
+
+    with pytest.raises(SystemExit) as exited:
+        exec(module._WINDOWS_BOOTSTRAP, {"__name__": "__main__"})
+
+    assert exited.value.code == 0
+    assert replacements
+    assert pid_path.read_text(encoding="utf-8") == "4242"
+    assert not list(tmp_path.glob(".bootstrap.pid.*.tmp"))
+
+
+def test_windows_bootstrap_removes_pid_temporary_file_when_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_supervisor_module()
+    gate = tmp_path / "bootstrap.gate"
+    pid_path = tmp_path / "bootstrap.pid"
+
+    class FakeProcess:
+        pid = 4242
+
+        def wait(self) -> int:
+            return 0
+
+    def denied_replace(*_args: object) -> None:
+        raise OSError("PID handoff replace denied")
+
+    gate.touch()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(module.os, "replace", denied_replace)
+    monkeypatch.setattr(sys, "argv", ["bootstrap", str(gate), str(pid_path), "ignored-workload"])
+
+    with pytest.raises(OSError, match="PID handoff replace denied"):
+        exec(module._WINDOWS_BOOTSTRAP, {"__name__": "__main__"})
+
+    assert not pid_path.exists()
+    assert not list(tmp_path.glob(".bootstrap.pid.*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows replace sharing contract")
+def test_windows_bootstrap_retries_transient_pid_replace_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_supervisor_module()
+    gate = tmp_path / "bootstrap.gate"
+    pid_path = tmp_path / "bootstrap.pid"
+    attempts = 0
+    real_replace = os.replace
+
+    class FakeProcess:
+        pid = 4242
+
+        def wait(self) -> int:
+            return 0
+
+    def transiently_denied_replace(source: object, target: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("PID handoff target is being read")
+        real_replace(source, target)
+
+    gate.touch()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(module.os, "replace", transiently_denied_replace)
+    monkeypatch.setattr(module.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(sys, "argv", ["bootstrap", str(gate), str(pid_path), "ignored-workload"])
+
+    with pytest.raises(SystemExit) as exited:
+        exec(module._WINDOWS_BOOTSTRAP, {"__name__": "__main__"})
+
+    assert exited.value.code == 0
+    assert attempts == 2
+    assert pid_path.read_text(encoding="utf-8") == "4242"
+    assert not list(tmp_path.glob(".bootstrap.pid.*.tmp"))
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PID handoff contract")
 def test_windows_pid_handoff_waits_for_nonempty_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_supervisor_module()

@@ -38,8 +38,10 @@ _STATUS_REPLACE_RETRY_INTERVAL_SEC = 0.005
 _STATUS_FAILURE_EXIT_CODE = 74
 _WINDOWS_BOOTSTRAP = """
 import pathlib
+import os
 import subprocess
 import sys
+import tempfile
 import time
 
 gate = pathlib.Path(sys.argv[1])
@@ -51,7 +53,25 @@ try:
 except FileNotFoundError:
     pass
 process = subprocess.Popen(sys.argv[3:])
-pid_path.write_text(str(process.pid), encoding="utf-8")
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=f".{pid_path.name}.", suffix=".tmp", dir=pid_path.parent
+)
+temporary = pathlib.Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as pid_file:
+        pid_file.write(str(process.pid))
+        pid_file.flush()
+    deadline = time.monotonic() + 0.5
+    while True:
+        try:
+            os.replace(temporary, pid_path)
+            break
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+finally:
+    temporary.unlink(missing_ok=True)
 raise SystemExit(process.wait())
 """
 
