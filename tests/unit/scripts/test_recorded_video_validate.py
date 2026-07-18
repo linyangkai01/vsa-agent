@@ -200,7 +200,8 @@ def _runtime(
     embedding_checkpoint_model: str = "embedding-model",
     log_contents: str | None = None,
 ):
-    run_dir = tmp_path / "123e4567-e89b-12d3-a456-426614174000"
+    run_id = "123e4567-e89b-12d3-a456-426614174000"
+    run_dir = tmp_path / run_id
     data_root = run_dir / "data"
     data_root.mkdir(parents=True)
     database_path = data_root / "recorded-video.sqlite3"
@@ -249,7 +250,11 @@ def _runtime(
     video_path.write_bytes(b"video")
     report_path = run_dir / "report.md"
     (run_dir / "stack.log").write_text(
-        log_contents if log_contents is not None else "run_id=123e4567-e89b-12d3-a456-426614174000\n",
+        log_contents if log_contents is not None else f"run_id={run_id}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "processes.json").write_text(
+        json.dumps({"run_id": run_id, "processes": []}),
         encoding="utf-8",
     )
     return data_root, video_path, report_path, FakeClient(data_root, media_status=media_status)
@@ -322,7 +327,7 @@ def test_runtime_config_summary_is_production_only_and_never_records_keys(tmp_pa
 def test_mock_active_provider_fails_with_complete_report(tmp_path: Path, mock_role: str) -> None:
     data_root, video_path, report_path, client = _runtime(tmp_path)
     config = _write_config(
-        tmp_path,
+        report_path.parent,
         vision_provider="mock" if mock_role == "vision" else "openai_compatible",
         embedding_provider="mock" if mock_role == "embedding" else "openai_compatible",
     )
@@ -516,7 +521,14 @@ def test_client_close_failure_does_not_mask_primary_failure(
     assert "close-secret" not in report
 
 
-def _options(data_root: Path, video_path: Path, report_path: Path, *, config: Path | None = None):
+def _options(
+    data_root: Path,
+    video_path: Path,
+    report_path: Path,
+    *,
+    config: Path | None = None,
+    log_ref: Path | None = None,
+):
     return validator.ValidationOptions(
         api_url="http://api.test",
         ui_url="http://ui.test",
@@ -528,6 +540,7 @@ def _options(data_root: Path, video_path: Path, report_path: Path, *, config: Pa
         timeout_seconds=1.0,
         poll_interval_seconds=0.0,
         minimum_similarity=0.5,
+        log_ref=log_ref,
     )
 
 
@@ -599,6 +612,69 @@ def test_report_rejects_log_artifact_without_same_run_id(tmp_path: Path) -> None
     report = report_path.read_text(encoding="utf-8")
     assert "## runtime\n\nFAIL" in report
     assert "log" in report.lower()
+
+
+def test_runtime_log_must_belong_to_config_run_directory(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+    foreign_log = tmp_path / "other-run" / "stack.log"
+    foreign_log.parent.mkdir()
+    foreign_log.write_text(
+        "run_id=123e4567-e89b-12d3-a456-426614174000\n",
+        encoding="utf-8",
+    )
+
+    exit_code = validator.run_validation(
+        _options(data_root, video_path, report_path, log_ref=foreign_log),
+        client=client,
+    )
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## runtime\n\nFAIL" in report
+    assert "run directory" in report.lower() or "log" in report.lower()
+
+
+def test_runtime_log_requires_same_run_process_manifest(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+    (report_path.parent / "processes.json").unlink()
+
+    exit_code = validator.run_validation(
+        _options(data_root, video_path, report_path),
+        client=client,
+    )
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## runtime\n\nFAIL" in report
+    assert "process" in report.lower()
+
+
+def test_runtime_log_rejects_mismatched_process_manifest_run_id(tmp_path: Path) -> None:
+    data_root, video_path, report_path, client = _runtime(tmp_path)
+    (report_path.parent / "processes.json").write_text(
+        json.dumps({"run_id": "123e4567-e89b-12d3-a456-426614174001", "processes": []}),
+        encoding="utf-8",
+    )
+
+    exit_code = validator.run_validation(
+        _options(data_root, video_path, report_path),
+        client=client,
+    )
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "## runtime\n\nFAIL" in report
+    assert "process" in report.lower() or "run_id" in report.lower()
+
+
+def test_direct_stack_config_cannot_synthesize_run_id(tmp_path: Path) -> None:
+    data_root, video_path, report_path, _ = _runtime(tmp_path)
+    config = tmp_path / ".runtime" / "es-stack" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("active_profile: production\n", encoding="utf-8")
+
+    with pytest.raises(validator.ValidationError, match="run directory"):
+        validator._initial_evidence_context(_options(data_root, video_path, report_path, config=config))
 
 
 def test_es_rejects_duplicate_or_unexpected_segments(tmp_path: Path) -> None:

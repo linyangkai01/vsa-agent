@@ -81,6 +81,7 @@ class EvidenceContext:
     run_id: str
     timestamp_utc: str
     log_ref: Path | None = None
+    run_dir: Path | None = None
     asset_id: str | None = None
     job_id: str | None = None
     segment_id: str | None = None
@@ -282,14 +283,6 @@ def _canonical_uuid(value: object) -> str | None:
     return str(parsed)
 
 
-def _run_id_from_path(path: Path) -> str | None:
-    for candidate in (path.name, path.parent.name):
-        run_id = _canonical_uuid(candidate)
-        if run_id is not None:
-            return run_id
-    return None
-
-
 def _runtime_log_path(options: ValidationOptions) -> Path:
     if options.log_ref is not None:
         return options.log_ref
@@ -303,18 +296,26 @@ def _runtime_log_path(options: ValidationOptions) -> Path:
     return config_parent / "stack.log"
 
 
+def _active_run_dir(options: ValidationOptions) -> tuple[Path, str]:
+    try:
+        config_path = options.config.resolve(strict=False)
+    except OSError as exc:
+        _fail("runtime", f"active config path cannot be resolved: {type(exc).__name__}")
+    run_dir = config_path.parent
+    run_id = _canonical_uuid(run_dir.name)
+    if run_id is None:
+        _fail("runtime", "active config must reside in a UUID run directory")
+    return run_dir, run_id
+
+
 def _initial_evidence_context(options: ValidationOptions) -> EvidenceContext:
-    log_ref = _runtime_log_path(options)
-    run_id = _run_id_from_path(log_ref)
-    if run_id is None:
-        try:
-            run_id = _run_id_from_path(options.config.resolve())
-        except OSError:
-            run_id = _run_id_from_path(options.config)
-    if run_id is None:
-        run_id = str(uuid.uuid4())
+    run_dir, run_id = _active_run_dir(options)
+    try:
+        log_ref = _runtime_log_path(options).resolve(strict=False)
+    except OSError as exc:
+        _fail("runtime", f"runtime log_ref path cannot be resolved: {type(exc).__name__}")
     timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    return EvidenceContext(run_id=run_id, timestamp_utc=timestamp, log_ref=log_ref)
+    return EvidenceContext(run_id=run_id, timestamp_utc=timestamp, log_ref=log_ref, run_dir=run_dir)
 
 
 _SECRET_LOG_PATTERN = re.compile(
@@ -326,9 +327,37 @@ _SECRET_LOG_PATTERN = re.compile(
 def _check_runtime_log(context: EvidenceContext) -> EvidenceContext:
     if context.log_ref is None:
         _fail("runtime", "runtime log_ref 未配置")
-    path = context.log_ref
+    if context.run_dir is None:
+        _fail("runtime", "runtime log_ref has no active run directory")
+    try:
+        run_dir = context.run_dir.resolve(strict=False)
+        path = context.log_ref.resolve(strict=False)
+    except OSError as exc:
+        _fail("runtime", f"runtime evidence path cannot be resolved: {type(exc).__name__}")
+    try:
+        path.relative_to(run_dir)
+    except ValueError:
+        _fail("runtime", "runtime log_ref must be inside the active run directory")
+    if path.name == "stack.log" and path.parent != run_dir:
+        _fail("runtime", "stack.log must be a file in the active run directory")
     if not path.is_file():
         _fail("runtime", f"runtime log_ref 不存在：{path}")
+    manifest = run_dir / "processes.json"
+    try:
+        manifest_path = manifest.resolve(strict=False)
+    except OSError as exc:
+        _fail("runtime", f"runtime processes.json path cannot be resolved: {type(exc).__name__}")
+    if manifest_path.parent != run_dir or manifest_path.name != "processes.json" or not manifest_path.is_file():
+        _fail("runtime", "runtime processes.json must be a file in the active run directory")
+    try:
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail("runtime", "runtime processes.json is missing or invalid JSON")
+    if not isinstance(manifest_payload, dict):
+        _fail("runtime", "runtime processes.json must contain an object")
+    manifest_run_id = _canonical_uuid(manifest_payload.get("run_id"))
+    if manifest_run_id != context.run_id:
+        _fail("runtime", "runtime processes.json run_id does not match the active run")
     try:
         content = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -337,7 +366,7 @@ def _check_runtime_log(context: EvidenceContext) -> EvidenceContext:
         _fail("runtime", "runtime log_ref 未包含本次 run_id")
     if _SECRET_LOG_PATTERN.search(content):
         _fail("runtime", "runtime log_ref 包含未脱敏密钥或凭据")
-    return replace(context, secret_scan="PASS (无密钥)")
+    return replace(context, log_ref=path, run_dir=run_dir, secret_scan="PASS (无密钥)")
 
 
 def _normalize_base_url(value: str, label: str) -> str:
@@ -1040,7 +1069,11 @@ def _check_quality_options(options: ValidationOptions) -> None:
 
 def run_validation(options: ValidationOptions, *, client: HttpClient | None = None) -> int:
     results = {field: StepResult("FAIL", "未执行：前置验证尚未完成。") for field in REPORT_FIELDS}
-    context = _initial_evidence_context(options)
+    context = EvidenceContext(
+        run_id="unbound",
+        timestamp_utc=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        log_ref=_runtime_log_path(options),
+    )
     current_field = "runtime"
     asset_id: str | None = None
     job_id: str | None = None
@@ -1052,6 +1085,7 @@ def run_validation(options: ValidationOptions, *, client: HttpClient | None = No
     failure: ValidationError | None = None
     try:
         _check_quality_options(options)
+        context = _initial_evidence_context(options)
         if http_client is None:
             http_client = httpx.Client(timeout=options.timeout_seconds, follow_redirects=False)
             owned_client = True

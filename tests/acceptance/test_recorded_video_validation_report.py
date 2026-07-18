@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -88,6 +89,8 @@ def _assert_complete_server_evidence(report: str) -> None:
     assert log_path.is_file()
     log_contents = log_path.read_text(encoding="utf-8")
     assert common["run_id"] in log_contents
+    manifest = json.loads((log_path.parent / "processes.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"] == common["run_id"]
     assert not re.search(r"(?i)(authorization\s*:\s*bearer|api[_ -]?key\s*[:=]\s*\S+)", log_contents)
     assert _field(sections["runtime"], "secret_scan") == "PASS (无密钥)"
     assert "三并发" in sections["job_stages"]
@@ -121,6 +124,10 @@ def _complete_contract_report(tmp_path: Path) -> str:
     run_dir.mkdir()
     log_path = run_dir / "stack.log"
     log_path.write_text(f"run_id={run_id}\nredaction=clean\n", encoding="utf-8")
+    (run_dir / "processes.json").write_text(
+        json.dumps({"run_id": run_id, "processes": []}),
+        encoding="utf-8",
+    )
     common = """- run_id: 123e4567-e89b-12d3-a456-426614174000
 - timestamp_utc: 2026-07-18T12:34:56Z
 - asset_id: asset-20260718-0001
