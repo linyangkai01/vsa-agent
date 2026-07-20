@@ -23,6 +23,14 @@ node_modules/
 .turbo/
 artifacts/
 tmp/
+/.runtime/
+/.runtime-*
+/.task*
+/.*-audit*.md
+/.*-report*.md
+/.*-review*.md
+/.*-review*.diff
+/.sync-*
 
 
 # Contains local API keys and machine-specific overrides
