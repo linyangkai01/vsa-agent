@@ -1,12 +1,12 @@
 # Development Status
 
-Last updated: 2026-07-15
+Last updated: 2026-07-21
 
 ## Current State
 
 - Active OpenSpec change: `production-recorded-video-ingest`.
 - Active branch: `codex/production-recorded-video-ingest`.
-- Phase: build；主会话按 `subagent-driven-development + TDD + thorough review` 连续执行。
+- Phase: build; implementation progress remains tracked in the active OpenSpec tasks.
 - Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
@@ -23,8 +23,7 @@ Last updated: 2026-07-15
 
 ## Parallel Development Policy
 
-- Comet decides whether work should be parallelized.
-- Parallel work must use the relevant Comet/Superpowers skills, such as `dispatching-parallel-agents` or `subagent-driven-development`.
+- Parallelize only genuinely independent work with clear ownership boundaries.
 - The main session remains responsible for integration, verification, cleanup, and the final local merge to `master`.
 
 ## Latest Verified Change
