@@ -115,6 +115,9 @@ export const useSearch = ({ agentApiUrl, params = {} }: UseSearchOptions) => {
       
       // Transform API response to SearchData format
       const transformedSearchResults: SearchData[] = (data.data || []).map((searchResult: any) => ({
+        asset_id: searchResult.asset_id || '',
+        segment_id: searchResult.segment_id || '',
+        job_id: searchResult.job_id || '',
         video_name: searchResult.video_name || '',
         similarity: Number(searchResult.similarity) || 0,
         screenshot_url: searchResult.screenshot_url || '',

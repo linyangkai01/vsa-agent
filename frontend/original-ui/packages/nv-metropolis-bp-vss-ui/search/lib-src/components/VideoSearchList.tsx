@@ -19,15 +19,21 @@ const AddContextButton: React.FC<{ item: SearchData; onAddContext?: (ctx: QueryD
   const handleClick = useCallback(() => {
     if (!onAddContext) return;
     const ctx: QueryDataContext = {
-      id: `${item.video_name}-${item.start_time}-${item.end_time}`,
+      id: item.segment_id
+        ? `${item.asset_id || item.sensor_id}-${item.segment_id}`
+        : `${item.video_name}-${item.start_time}-${item.end_time}`,
       label: item.video_name,
       // contextType: UI-only (chip tooltip / future grouping); not sent to the backend — see Chat onSend.
       contextType: 'media/video',
       data: {
-        sensorName: item.video_name,
+        assetId: item.asset_id || item.sensor_id,
+        segmentId: item.segment_id,
+        jobId: item.job_id,
+        sensorId: item.sensor_id,
+        videoName: item.video_name,
         startTime: item.start_time,
         endTime: item.end_time,
-        mediaType: 'sensor-clip',
+        mediaType: 'recorded-video-segment',
       },
     };
     onAddContext(ctx);

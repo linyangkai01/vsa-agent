@@ -49,6 +49,9 @@ class DecomposedQuery(BaseModel):
 class SearchResult(BaseModel):
     """A single search result item matching the query."""
 
+    asset_id: str = Field(default="", description="Recorded-video asset identifier")
+    segment_id: str = Field(default="", description="Recorded-video segment identifier")
+    job_id: str = Field(default="", description="Recorded-video processing job identifier")
     video_name: str = Field(..., description="Name of the video file")
     description: str = Field(..., description="Description of the video content")
     start_time: str = Field(..., description="Start time ISO timestamp")

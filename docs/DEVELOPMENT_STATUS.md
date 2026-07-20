@@ -7,7 +7,7 @@ Last updated: 2026-07-21
 - Active development track: `production-recorded-video-ingest`.
 - Active branch: `codex/production-recorded-video-ingest`.
 - Phase: build; implementation progress is tracked in this document and Git history.
-- Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
+- Goal: deliver original-UI recorded-video upload, durable analysis, Elasticsearch search, selected-video understanding Q&A, thumbnail and time-range playback without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
 
@@ -52,6 +52,7 @@ Result: `79 passed, 1 warning`.
 - 当前分支：`codex/production-recorded-video-ingest`；Task 20 运行时实现与加固提交为 `473a001`、`71d5d71`、`a7f6f71`、`5252ddb`。启动器 focused tests、脚本语法与生命周期验证由对应任务记录。
 - Task 20A 最终本地证据：三文件串行 aggregate `185 passed, 1 conditional skip`，PowerShell lifecycle `45 passed`，TERM/PASS-lock 高风险 Bash probe 连续三轮通过；PowerShell AST、Bash syntax、compileall、Ruff check/format 和 diff check 全绿。v5 thorough review 为 Critical `0`、Important `0`。候选进程绑定失败仍不写 reason-code 日志，暂作为非阻塞可观测性 Minor 保留，避免 250ms tracker 轮询产生重复日志噪声。
 - Task 23 新增 `scripts/recorded-video-validate.py`：按 `runtime/job_stages/provider/es/search/media/delete` 记录证据，任何依赖或质量失败均写失败报告并返回非零，且在中途失败后仍尝试清理验证资产。中文手册为 `docs/recorded-video-runtime.md`；Ubuntu 真实模型证据仍须由 Task 24 采集，当前报告不得视为服务器通过。
+- 2026-07-21 已补齐搜索结果到视频问答的身份链路：Search API 保留 `asset_id/segment_id/job_id`，原版 UI `+ Chat` 发送片段 context，后端只通过 SQLite 和受控资产目录解析真实路径与相对时间范围，再交给 `video_understanding`。本地证据：相关 Python `136 passed`，Search Jest `165 passed`，Search typecheck 通过。
 
 ## Python Quality Program
 

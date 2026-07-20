@@ -53,6 +53,9 @@ function extractJsonFromText(text: string): SearchApiShape | null {
 
 function transformToSearchData(data: unknown[]): SearchData[] {
   return data.map((item: any) => ({
+    asset_id: item.asset_id || '',
+    segment_id: item.segment_id || '',
+    job_id: item.job_id || '',
     video_name: item.video_name || '',
     similarity: Number(item.similarity) || 0,
     screenshot_url: item.screenshot_url || '',

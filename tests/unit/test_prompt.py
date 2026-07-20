@@ -17,6 +17,10 @@ class TestSystemPrompts:
     def test_default_system_prompt_mentions_report_agent(self):
         assert "report_agent" in SYSTEM_PROMPT_DEFAULT
 
+    def test_default_system_prompt_honors_selected_recorded_video_context(self):
+        assert "server-validated selected recorded video context" in SYSTEM_PROMPT_DEFAULT
+        assert "Do not call find_video or list_videos" in SYSTEM_PROMPT_DEFAULT
+
     def test_default_system_prompt_mentions_multi_report_agent(self):
         assert "multi_report_agent" in SYSTEM_PROMPT_DEFAULT
 

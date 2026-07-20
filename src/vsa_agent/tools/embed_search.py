@@ -36,6 +36,9 @@ class SearchDependencyError(RuntimeError):
 class EmbedSearchResultItem(BaseModel):
     """A single embed search result with all fields extracted."""
 
+    asset_id: str = Field(default="", description="Recorded-video asset identifier")
+    segment_id: str = Field(default="", description="Recorded-video segment identifier")
+    job_id: str = Field(default="", description="Recorded-video processing job identifier")
     video_name: str = Field(default="", description="Video filename")
     description: str = Field(default="", description="Video/sensor description")
     start_time: str = Field(default="", description="Start time (ISO format)")
@@ -294,6 +297,9 @@ async def _process_search_hit(
             return None
 
     return EmbedSearchResultItem(
+        asset_id=str(source.get("asset_id") or source.get("video_id") or ""),
+        segment_id=str(source.get("segment_id") or ""),
+        job_id=str(source.get("job_id") or ""),
         video_name=video_name,
         description=(
             source.get("description")
@@ -510,6 +516,9 @@ async def _search_real_es(
 
         search_results = [
             SearchResult(
+                asset_id=item.asset_id,
+                segment_id=item.segment_id,
+                job_id=item.job_id,
                 video_name=item.video_name,
                 description=item.description,
                 start_time=item.start_time,

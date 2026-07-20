@@ -18,6 +18,9 @@ def test_original_ui_search_preserves_vss_contract(monkeypatch):
         return SearchOutput(
             data=[
                 SearchResult(
+                    asset_id="asset-runtime-1",
+                    segment_id="segment-runtime-1",
+                    job_id="job-runtime-1",
                     video_name="runtime-validation.mp4",
                     description="forklift near worker",
                     start_time="2026-07-04T08:00:00Z",
@@ -46,6 +49,8 @@ def test_original_ui_search_preserves_vss_contract(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["data"][0]["video_name"] == "runtime-validation.mp4"
+    assert response.json()["data"][0]["asset_id"] == "asset-runtime-1"
+    assert response.json()["data"][0]["segment_id"] == "segment-runtime-1"
     assert captured["input"].query == "forklift near worker"
     assert captured["input"].top_k == 3
     assert captured["input"].max_results == 3

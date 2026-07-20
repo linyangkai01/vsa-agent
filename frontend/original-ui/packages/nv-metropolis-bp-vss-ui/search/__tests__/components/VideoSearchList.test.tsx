@@ -7,6 +7,9 @@ import { SearchData } from '../../lib-src/types';
 jest.mock('@nemo-agent-toolkit/ui');
 
 const makeItem = (overrides: Partial<SearchData> = {}): SearchData => ({
+  asset_id: 'asset-1',
+  segment_id: 'segment-1',
+  job_id: 'job-1',
   video_name: 'video-1.mp4',
   similarity: 0.85,
   screenshot_url: 'http://img.test/thumb1.jpg',
@@ -74,11 +77,27 @@ describe('VideoSearchList', () => {
   });
 
   it('renders + Chat when onAddContext is provided', () => {
+    const onAddContext = jest.fn();
     const data = [makeItem({ video_name: 'clip-a.mp4' })];
     render(
-      <VideoSearchList {...defaultProps} data={data} onAddContext={jest.fn()} />,
+      <VideoSearchList {...defaultProps} data={data} onAddContext={onAddContext} />,
     );
-    expect(screen.getByRole('button', { name: /\+\s*chat/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /\+\s*chat/i }));
+    expect(onAddContext).toHaveBeenCalledWith({
+      id: 'asset-1-segment-1',
+      label: 'clip-a.mp4',
+      contextType: 'media/video',
+      data: {
+        assetId: 'asset-1',
+        segmentId: 'segment-1',
+        jobId: 'job-1',
+        sensorId: 'sensor-1',
+        videoName: 'clip-a.mp4',
+        startTime: '2024-01-15T09:00:00',
+        endTime: '2024-01-15T09:05:00',
+        mediaType: 'recorded-video-segment',
+      },
+    });
   });
 
   it('displays formatted time from start and end times', () => {

@@ -32,6 +32,9 @@ export interface CriticResult {
 }
 
 export interface SearchData {
+  asset_id: string;
+  segment_id: string;
+  job_id: string;
   video_name: string;
   description: string;
   start_time: string;

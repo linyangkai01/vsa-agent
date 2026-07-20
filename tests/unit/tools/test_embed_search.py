@@ -63,6 +63,9 @@ class TestProcessSearchHit:
         hit = {
             "_score": 1.83,
             "_source": {
+                "asset_id": "asset-7",
+                "segment_id": "segment-7",
+                "job_id": "job-7",
                 "sensor_id": "camera-7",
                 "video_name": "site-a.mp4",
                 "description": "worker enters restricted zone",
@@ -75,6 +78,9 @@ class TestProcessSearchHit:
         result = await _process_search_hit(hit)
 
         assert result is not None
+        assert result.asset_id == "asset-7"
+        assert result.segment_id == "segment-7"
+        assert result.job_id == "job-7"
         assert result.video_name == "site-a.mp4"
         assert result.sensor_id == "camera-7"
         assert result.description == "worker enters restricted zone"

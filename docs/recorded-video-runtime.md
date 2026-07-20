@@ -78,6 +78,8 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@10.157.68.44
 
 第 2 节命令用于持续交互运行。它只做非写入 readiness，业务视频由原版 UI 上传，并写入配置的生产 alias 与数据根目录。
 
+搜索结果卡片上的 `+ Chat` 会把 `asset_id`、`segment_id`、`job_id` 和时间范围作为原版 Chat context 发送。API 不接受浏览器提供的本地文件路径，而是用 `asset_id` 从 SQLite 读取 ready 资产，再由受控资产目录解析源文件；`segment_id` 必须属于该资产，问答只分析该片段的相对时间范围。相关日志事件为 `original_ui.chat.context.resolved`、`original_ui.chat.request`、`top_agent.tool.call` 和 `video_understanding.result`。
+
 ### 隔离 `--validate` 模式
 
 下面命令创建 `validation-{run_id}` 索引和 run 内独立数据目录，执行隔离 readiness/smoke 后退出；成功、失败或中断都会清理临时配置、隔离数据和验证索引：

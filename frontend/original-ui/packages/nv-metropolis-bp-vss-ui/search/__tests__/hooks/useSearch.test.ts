@@ -54,6 +54,9 @@ describe('useSearch', () => {
     const apiResponse = {
       data: [
         {
+          asset_id: 'asset-1',
+          segment_id: 'segment-1',
+          job_id: 'job-1',
           video_name: 'test.mp4',
           similarity: 0.85,
           screenshot_url: 'http://img.test/thumb.jpg',
@@ -92,6 +95,8 @@ describe('useSearch', () => {
     expect(body.top_k).toBe(5);
 
     expect(result.current.searchResults[0].video_name).toBe('test.mp4');
+    expect(result.current.searchResults[0].asset_id).toBe('asset-1');
+    expect(result.current.searchResults[0].segment_id).toBe('segment-1');
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
   });
@@ -241,6 +246,9 @@ describe('useSearch', () => {
     });
 
     expect(result.current.searchResults[0]).toEqual({
+      asset_id: '',
+      segment_id: '',
+      job_id: '',
       video_name: 'partial.mp4',
       similarity: 0,
       screenshot_url: '',

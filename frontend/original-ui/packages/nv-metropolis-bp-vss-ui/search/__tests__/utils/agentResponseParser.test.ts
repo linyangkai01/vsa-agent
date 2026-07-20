@@ -5,6 +5,9 @@ describe('extractSearchResultsFromAgentResponse', () => {
   const validData = {
     data: [
       {
+        asset_id: 'asset-1',
+        segment_id: 'segment-1',
+        job_id: 'job-1',
         video_name: 'clip1.mp4',
         similarity: 0.95,
         screenshot_url: 'http://example.com/thumb1.jpg',
@@ -46,6 +49,8 @@ describe('extractSearchResultsFromAgentResponse', () => {
       expect(result).toHaveLength(1);
       expect(result![0].video_name).toBe('clip1.mp4');
       expect(result![0].similarity).toBe(0.95);
+      expect(result![0].asset_id).toBe('asset-1');
+      expect(result![0].segment_id).toBe('segment-1');
       expect(result![0].object_ids).toEqual(['obj-1', 'obj-2']);
     });
 
@@ -128,6 +133,9 @@ describe('extractSearchResultsFromAgentResponse', () => {
       const result = extractSearchResultsFromAgentResponse(text);
       expect(result).toHaveLength(1);
       expect(result![0]).toEqual({
+        asset_id: '',
+        segment_id: '',
+        job_id: '',
         video_name: '',
         similarity: 0,
         screenshot_url: '',

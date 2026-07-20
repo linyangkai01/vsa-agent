@@ -2,20 +2,26 @@ import json
 import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from vsa_agent.agents.data_models import AgentMessageChunk, AgentMessageChunkType
 from vsa_agent.api.original_ui_chat import (
     OriginalUIChatRequest,
+    SelectedRecordedVideoContext,
     extract_latest_user_text,
+    extract_query_context,
     format_chunk_for_original_ui,
     format_done,
     format_intermediate_data,
     format_openai_delta,
     inject_configured_video_context,
+    inject_selected_recorded_video_context,
+    resolve_selected_recorded_video_context,
     stream_original_ui_chat,
 )
+from vsa_agent.recorded_video.models import AssetStatus
 
 
 def test_extract_latest_user_text_uses_last_user_message():
@@ -88,6 +94,93 @@ def test_inject_configured_video_context_ignores_unrelated_text():
     )
 
     assert prompt == "Say hello from vsa-agent."
+
+
+def test_extract_query_context_preserves_selected_recorded_video_identity():
+    text = (
+        '[Context: [{"assetId":"asset-1","segmentId":"segment-1",'
+        '"videoName":"yard.mp4","startTime":"2026-07-04T08:00:00Z",'
+        '"endTime":"2026-07-04T08:00:05Z"}]]\n\nWhat safety risk is visible?'
+    )
+
+    question, context_items = extract_query_context(text)
+
+    assert question == "What safety risk is visible?"
+    assert context_items == [
+        {
+            "assetId": "asset-1",
+            "segmentId": "segment-1",
+            "videoName": "yard.mp4",
+            "startTime": "2026-07-04T08:00:00Z",
+            "endTime": "2026-07-04T08:00:05Z",
+        }
+    ]
+
+
+def test_inject_selected_recorded_video_context_uses_server_resolved_path_and_offsets():
+    selected = SelectedRecordedVideoContext(
+        asset_id="asset-1",
+        segment_id="segment-1",
+        video_name="yard.mp4",
+        video_path=Path("/srv/vsa-data/assets/asset-1/source/original.mp4"),
+        start_offset_sec=5.0,
+        end_offset_sec=10.0,
+    )
+
+    prompt = inject_selected_recorded_video_context("What happened?", selected)
+
+    assert "asset_id: asset-1" in prompt
+    assert "segment_id: segment-1" in prompt
+    assert f"video_path: {selected.video_path}" in prompt
+    assert "start_timestamp: 5" in prompt
+    assert "end_timestamp: 10" in prompt
+    assert "Do not call find_video or list_videos" in prompt
+
+
+@pytest.mark.asyncio
+async def test_resolve_selected_recorded_video_context_uses_server_asset_and_segment(tmp_path: Path):
+    source_path = tmp_path / "assets" / "asset-1" / "source" / "original.mp4"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"video")
+    asset = SimpleNamespace(
+        asset_id="asset-1",
+        display_filename="yard.mp4",
+        status=AssetStatus.READY,
+        deleted_at=None,
+    )
+    segment = SimpleNamespace(
+        segment_id="segment-1",
+        start_offset_ms=5_000,
+        end_offset_ms=10_000,
+    )
+
+    class Repository:
+        async def initialize(self):
+            return None
+
+        async def get_asset(self, asset_id):
+            assert asset_id == "asset-1"
+            return asset
+
+        async def list_segments(self, asset_id):
+            assert asset_id == "asset-1"
+            return [segment]
+
+    class Store:
+        async def resolve_source_path(self, resolved_asset):
+            assert resolved_asset is asset
+            return source_path
+
+    resolved = await resolve_selected_recorded_video_context(
+        [{"assetId": "asset-1", "segmentId": "segment-1", "videoPath": "C:/untrusted.mp4"}],
+        repository=Repository(),
+        asset_store=Store(),
+    )
+
+    assert resolved is not None
+    assert resolved.video_path == source_path
+    assert resolved.start_offset_sec == 5.0
+    assert resolved.end_offset_sec == 10.0
 
 
 def test_format_openai_delta_frame_matches_original_ui_proxy():
@@ -270,6 +363,53 @@ async def test_stream_original_ui_chat_injects_configured_video_path():
     assert "Configured video_path: /data/project/lyk/video/1597042367-1-192.mp4" in (
         fake_graph.received_state.current_message.content
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_original_ui_chat_resolves_search_context_before_graph_execution():
+    fake_graph = FakeGraph()
+    request = OriginalUIChatRequest(
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    '[Context: [{"assetId":"asset-1","segmentId":"segment-1",'
+                    '"videoName":"yard.mp4"}]]\n\nWhat happened in this clip?'
+                ),
+            }
+        ]
+    )
+    captured_context = None
+
+    selected = SelectedRecordedVideoContext(
+        asset_id="asset-1",
+        segment_id="segment-1",
+        video_name="yard.mp4",
+        video_path=Path("/srv/vsa-data/assets/asset-1/source/original.mp4"),
+        start_offset_sec=0.0,
+        end_offset_sec=5.0,
+    )
+
+    async def resolve_context(items):
+        nonlocal captured_context
+        captured_context = items
+        return selected
+
+    frames = [
+        frame
+        async for frame in stream_original_ui_chat(
+            request,
+            graph_builder=lambda: build_fake_graph(fake_graph),
+            recorded_video_context_resolver=resolve_context,
+        )
+    ]
+
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert captured_context == [{"assetId": "asset-1", "segmentId": "segment-1", "videoName": "yard.mp4"}]
+    prompt = fake_graph.received_state.current_message.content
+    assert prompt.startswith("What happened in this clip?")
+    assert f"video_path: {selected.video_path}" in prompt
+    assert "start_timestamp: 0" in prompt
 
 
 @pytest.mark.asyncio
