@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import signal
+import subprocess
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+LOGGER = logging.getLogger(__name__)
+_READY_MARKER = "PASS: ES recorded-video runtime stack is ready"
+_MANAGED_COMPONENTS = ("es", "api", "worker", "ui")
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +39,7 @@ class RunHandle:
     run_id: str
     run_dir: Path
     process_pid: int
+    launcher_log: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +66,100 @@ class ValidationError(RuntimeError):
         super().__init__(message)
         self.field = field
         self.message = message
+
+
+@dataclass(frozen=True, slots=True)
+class LauncherArgs:
+    repo_root: Path
+    api_port: int
+    es_port: int
+    ui_port: int
+    index: str
+    data_root: Path
+    conda_env: str | None
+    env: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        ports = (self.api_port, self.es_port, self.ui_port)
+        if any(not _positive_integer(port) or port > 65535 for port in ports) or len(set(ports)) != 3:
+            raise ValueError("launcher ports must be three distinct values between 1 and 65535")
+        index = self.index.strip() if isinstance(self.index, str) else ""
+        if not index or any(character.isspace() for character in index):
+            raise ValueError("launcher index must be a non-empty value without whitespace")
+        conda_env = self.conda_env.strip() if isinstance(self.conda_env, str) else self.conda_env
+        if conda_env == "":
+            raise ValueError("launcher conda environment must be non-empty when provided")
+        if not isinstance(self.env, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()
+        ):
+            raise ValueError("launcher environment must contain string keys and values")
+        object.__setattr__(self, "repo_root", Path(self.repo_root).resolve(strict=False))
+        object.__setattr__(self, "data_root", Path(self.data_root).resolve(strict=False))
+        object.__setattr__(self, "index", index)
+        object.__setattr__(self, "conda_env", conda_env)
+        object.__setattr__(self, "env", dict(self.env))
+
+
+class LauncherProcess(Protocol):
+    pid: int
+
+    def poll(self) -> int | None: ...
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
+class ProcessRunner(Protocol):
+    def start(
+        self,
+        arguments: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        log_path: Path,
+    ) -> LauncherProcess: ...
+
+    def send_signal(self, pid: int, requested_signal: signal.Signals) -> None: ...
+
+    def current_uid(self) -> int: ...
+
+    def monotonic(self) -> float: ...
+
+    def sleep(self, seconds: float) -> None: ...
+
+
+class _SubprocessRunner:
+    def start(
+        self,
+        arguments: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        log_path: Path,
+    ) -> subprocess.Popen[bytes]:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab", buffering=0) as output:
+            return subprocess.Popen(
+                arguments,
+                cwd=cwd,
+                env=env,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+    def send_signal(self, pid: int, requested_signal: signal.Signals) -> None:
+        os.kill(pid, requested_signal)
+
+    def current_uid(self) -> int:
+        if not hasattr(os, "getuid"):
+            raise ValidationError("launcher", "production launcher control requires Ubuntu process identity")
+        return os.getuid()
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -251,3 +354,292 @@ def validate_worker_identity(
         raise _identity_error("worker process is not owned by the current UID")
     arguments = _read_process_arguments(Path(proc_root), worker_pid)
     _validate_supervisor_command(arguments, run_dir)
+
+
+def _launcher_error(message: str) -> ValidationError:
+    return ValidationError("launcher", message)
+
+
+def _canonical_run_id(value: str) -> str:
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise _launcher_error("launcher latest pointer does not contain a canonical UUID run ID") from None
+    canonical = str(parsed)
+    if value.lower() != canonical:
+        raise _launcher_error("launcher latest pointer does not contain a canonical UUID run ID")
+    return canonical
+
+
+def _resolve_latest_run(repo_root: Path) -> Path | None:
+    runtime_root = repo_root / ".runtime" / "es-stack"
+    latest = runtime_root / "latest"
+    if not latest.is_symlink() and not latest.exists():
+        return None
+    try:
+        if latest.is_symlink() or latest.is_dir():
+            candidate = latest.resolve(strict=True)
+        elif latest.is_file():
+            raw = latest.read_text(encoding="utf-8").strip()
+            if not raw:
+                raise OSError("latest pointer file is empty")
+            pointer = Path(raw)
+            candidate = (pointer if pointer.is_absolute() else latest.parent / pointer).resolve(strict=True)
+        else:
+            raise OSError("latest pointer has an unsupported file type")
+    except OSError as error:
+        raise _launcher_error(f"launcher latest pointer is unreadable: {error}") from None
+    runs_root = (runtime_root / "runs").resolve(strict=False)
+    if not candidate.is_dir() or candidate.parent != runs_root:
+        raise _launcher_error("launcher latest pointer escaped the run directory")
+    _canonical_run_id(candidate.name)
+    return candidate
+
+
+def _read_positive_pid(path: Path, label: str) -> int:
+    try:
+        value = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        raise _launcher_error(f"{label} is missing or invalid") from None
+    if not _positive_integer(value):
+        raise _launcher_error(f"{label} is missing or invalid")
+    return value
+
+
+def _active_component_pids(manifest_path: Path, run_id: str) -> dict[str, int]:
+    payload = _load_process_manifest(manifest_path)
+    if payload.get("run_id") != run_id:
+        raise _identity_error("worker process manifest run ID does not match the active run ID")
+    processes = payload.get("processes")
+    if not isinstance(processes, list):
+        raise _identity_error("worker process manifest processes must be a JSON array")
+    active: dict[str, int] = {}
+    for component in _MANAGED_COMPONENTS:
+        matches = [
+            entry
+            for entry in processes
+            if isinstance(entry, dict) and entry.get("component") == component and entry.get("exit_status") is None
+        ]
+        if len(matches) != 1 or not _positive_integer(matches[0].get("pid")):
+            raise _identity_error(f"process manifest must contain exactly one active {component} process")
+        active[component] = matches[0]["pid"]
+    return active
+
+
+class LauncherController:
+    def __init__(
+        self,
+        arguments: LauncherArgs,
+        *,
+        runner: ProcessRunner | None = None,
+        proc_root: Path = Path("/proc"),
+        startup_timeout: float = 120.0,
+        poll_interval: float = 0.1,
+    ) -> None:
+        if startup_timeout <= 0 or poll_interval <= 0:
+            raise ValueError("launcher timeouts must be positive")
+        self.arguments = arguments
+        self._runner = runner or _SubprocessRunner()
+        self._proc_root = Path(proc_root)
+        self._startup_timeout = startup_timeout
+        self._poll_interval = poll_interval
+        self.acceptance_id = str(uuid.uuid4())
+        self.acceptance_dir = self.arguments.repo_root / ".runtime" / "production-acceptance" / self.acceptance_id
+        self._processes: dict[str, LauncherProcess] = {}
+        self._handles: list[RunHandle] = []
+        self._stopped_workers: set[str] = set()
+
+    def _command(self) -> list[str]:
+        command = [
+            "bash",
+            "scripts/es-runtime-stack.sh",
+            "--api-port",
+            str(self.arguments.api_port),
+            "--es-port",
+            str(self.arguments.es_port),
+            "--ui-port",
+            str(self.arguments.ui_port),
+            "--index",
+            self.arguments.index,
+            "--data-root",
+            str(self.arguments.data_root),
+        ]
+        if self.arguments.conda_env is not None:
+            command.extend(("--conda-env", self.arguments.conda_env))
+        return command
+
+    def _environment(self) -> dict[str, str]:
+        environment = dict(os.environ)
+        environment.update(self.arguments.env)
+        return environment
+
+    def _abort_known_launcher(self, process: LauncherProcess) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            self._runner.send_signal(process.pid, signal.SIGTERM)
+        except OSError:
+            LOGGER.exception("production_acceptance.launcher.abort_failed pid=%s", process.pid)
+
+    def start(self) -> RunHandle:
+        try:
+            previous_run = _resolve_latest_run(self.arguments.repo_root)
+        except ValidationError:
+            previous_run = None
+        self.acceptance_dir.mkdir(parents=True, exist_ok=True)
+        launch_number = len(self._handles) + 1
+        launcher_log = self.acceptance_dir / f"launcher-{launch_number}.log"
+        command = self._command()
+        LOGGER.info(
+            "production_acceptance.launcher.start acceptance_id=%s launch=%d log=%s",
+            self.acceptance_id,
+            launch_number,
+            launcher_log,
+        )
+        try:
+            process = self._runner.start(
+                command,
+                cwd=self.arguments.repo_root,
+                env=self._environment(),
+                log_path=launcher_log,
+            )
+        except OSError as error:
+            raise _launcher_error(f"failed to start runtime launcher: {error}") from None
+
+        deadline = self._runner.monotonic() + self._startup_timeout
+        pointer_error: ValidationError | None = None
+        try:
+            while self._runner.monotonic() < deadline:
+                return_code = process.poll()
+                if return_code is not None:
+                    raise _launcher_error(
+                        f"runtime launcher exited before publishing its run directory with status {return_code}; "
+                        f"log={launcher_log}"
+                    )
+                try:
+                    candidate = _resolve_latest_run(self.arguments.repo_root)
+                    pointer_error = None
+                except ValidationError as error:
+                    pointer_error = error
+                    self._runner.sleep(self._poll_interval)
+                    continue
+                if candidate is not None and candidate != previous_run and candidate.name not in self._processes:
+                    run_id = _canonical_run_id(candidate.name)
+                    launcher_pid = _read_positive_pid(candidate / "launcher.pid", "launcher PID file")
+                    if launcher_pid != process.pid:
+                        raise _launcher_error("launcher PID file does not match the process started by acceptance")
+                    handle = RunHandle(
+                        run_id=run_id,
+                        run_dir=candidate,
+                        process_pid=process.pid,
+                        launcher_log=launcher_log,
+                    )
+                    self._processes[run_id] = process
+                    self._handles.append(handle)
+                    LOGGER.info(
+                        "production_acceptance.launcher.bound acceptance_id=%s run_id=%s pid=%d",
+                        self.acceptance_id,
+                        run_id,
+                        process.pid,
+                    )
+                    return handle
+                self._runner.sleep(self._poll_interval)
+        except Exception:
+            self._abort_known_launcher(process)
+            raise
+        self._abort_known_launcher(process)
+        if pointer_error is not None:
+            raise _launcher_error(
+                f"runtime launcher did not publish a valid run within {self._startup_timeout:g}s: "
+                f"{pointer_error.message}"
+            )
+        raise _launcher_error(f"runtime launcher did not publish a new run within {self._startup_timeout:g}s")
+
+    def _process(self, handle: RunHandle) -> LauncherProcess:
+        process = self._processes.get(handle.run_id)
+        if process is None or process.pid != handle.process_pid:
+            raise _launcher_error("run handle is not owned by this acceptance controller")
+        return process
+
+    def wait_ready(self, handle: RunHandle) -> RunHandle:
+        process = self._process(handle)
+        deadline = self._runner.monotonic() + self._startup_timeout
+        stack_log = handle.run_dir / "stack.log"
+        while self._runner.monotonic() < deadline:
+            return_code = process.poll()
+            if return_code is not None:
+                raise _launcher_error(
+                    f"runtime launcher exited before readiness with status {return_code}; log={handle.launcher_log}"
+                )
+            try:
+                ready = _READY_MARKER in stack_log.read_text(encoding="utf-8")
+            except OSError:
+                ready = False
+            if ready:
+                manifest = handle.run_dir / "processes.json"
+                active = _active_component_pids(manifest, handle.run_id)
+                validate_worker_identity(
+                    manifest,
+                    handle.run_id,
+                    active["worker"],
+                    self._runner.current_uid(),
+                    proc_root=self._proc_root,
+                )
+                LOGGER.info(
+                    "production_acceptance.launcher.ready acceptance_id=%s run_id=%s worker_pid=%d",
+                    self.acceptance_id,
+                    handle.run_id,
+                    active["worker"],
+                )
+                return handle
+            self._runner.sleep(self._poll_interval)
+        raise _launcher_error(f"runtime launcher did not become ready within {self._startup_timeout:g}s")
+
+    def stop_worker(self, handle: RunHandle) -> None:
+        if handle.run_id in self._stopped_workers:
+            raise _launcher_error("worker was already stopped for this launcher run")
+        manifest = handle.run_dir / "processes.json"
+        active = _active_component_pids(manifest, handle.run_id)
+        worker_pid = active["worker"]
+        validate_worker_identity(
+            manifest,
+            handle.run_id,
+            worker_pid,
+            self._runner.current_uid(),
+            proc_root=self._proc_root,
+        )
+        LOGGER.info(
+            "production_acceptance.worker.term acceptance_id=%s run_id=%s worker_pid=%d",
+            self.acceptance_id,
+            handle.run_id,
+            worker_pid,
+        )
+        try:
+            self._runner.send_signal(worker_pid, signal.SIGTERM)
+        except OSError as error:
+            raise _launcher_error(f"failed to stop verified worker PID {worker_pid}: {error}") from None
+        self._stopped_workers.add(handle.run_id)
+
+    def wait_exit(self, handle: RunHandle, timeout: float) -> int:
+        if timeout <= 0:
+            raise ValueError("launcher exit timeout must be positive")
+        process = self._process(handle)
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise _launcher_error(f"runtime launcher did not exit within {timeout:g}s") from None
+        LOGGER.info(
+            "production_acceptance.launcher.exit acceptance_id=%s run_id=%s status=%d",
+            self.acceptance_id,
+            handle.run_id,
+            status,
+        )
+        return status
+
+    def restart(self) -> RunHandle:
+        if not self._handles:
+            raise _launcher_error("cannot restart before the first launcher run")
+        previous = self._process(self._handles[-1])
+        if previous.poll() is None:
+            raise _launcher_error("cannot restart while the previous launcher is still running")
+        return self.start()

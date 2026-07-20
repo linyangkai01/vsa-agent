@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -302,3 +304,202 @@ def test_validate_worker_identity_accepts_bound_worker_supervisor(tmp_path: Path
     _write_fake_proc(proc_root, run_dir=run_dir, worker_pid=101, uid=1000)
 
     module.validate_worker_identity(manifest, "run-a", 101, 1000, proc_root=proc_root)
+
+
+_RUN_IDS = (
+    "123e4567-e89b-42d3-a456-426614174001",
+    "123e4567-e89b-42d3-a456-426614174002",
+)
+
+
+class _FakeLauncherProcess:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("fake-launcher", timeout)
+        return self.returncode
+
+
+class _FakeProcessRunner:
+    def __init__(self, repo_root: Path, proc_root: Path, run_ids: tuple[str, ...] = _RUN_IDS) -> None:
+        self.repo_root = repo_root
+        self.proc_root = proc_root
+        self.run_ids = list(run_ids)
+        self.invocations: list[dict[str, object]] = []
+        self.signals: list[tuple[int, signal.Signals]] = []
+        self.processes: list[_FakeLauncherProcess] = []
+        self.worker_to_process: dict[int, _FakeLauncherProcess] = {}
+        self.now = 0.0
+
+    def start(
+        self,
+        arguments: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        log_path: Path,
+    ) -> _FakeLauncherProcess:
+        run_id = self.run_ids.pop(0)
+        launcher_pid = 4000 + len(self.processes)
+        worker_pid = 5000 + len(self.processes)
+        process = _FakeLauncherProcess(launcher_pid)
+        self.processes.append(process)
+        self.worker_to_process[worker_pid] = process
+        self.invocations.append({"arguments": list(arguments), "cwd": cwd, "env": dict(env), "log_path": log_path})
+
+        run_dir = self.repo_root / ".runtime" / "es-stack" / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "launcher.pid").write_text(str(launcher_pid), encoding="utf-8")
+        (run_dir / "stack.log").write_text("[stack] PASS: ES recorded-video runtime stack is ready\n", encoding="utf-8")
+        processes = [
+            {
+                "component": component,
+                "pid": worker_pid if component == "worker" else worker_pid + offset,
+                "command": "python scripts/recorded-video-worker.py --config <runtime-config>"
+                if component == "worker"
+                else component,
+                "started_at": "2026-07-21T00:00:00Z",
+                "exit_status": None,
+            }
+            for offset, component in enumerate(("es", "api", "worker", "ui"), start=1)
+        ]
+        (run_dir / "processes.json").write_text(
+            json.dumps({"run_id": run_id, "processes": processes}), encoding="utf-8"
+        )
+        _write_fake_proc(self.proc_root, run_dir=run_dir, worker_pid=worker_pid, uid=1000)
+        latest = self.repo_root / ".runtime" / "es-stack" / "latest"
+        latest.parent.mkdir(parents=True, exist_ok=True)
+        latest.write_text(str(run_dir), encoding="utf-8")
+        return process
+
+    def send_signal(self, pid: int, requested_signal: signal.Signals) -> None:
+        self.signals.append((pid, requested_signal))
+        process = self.worker_to_process.get(pid)
+        if process is not None:
+            process.returncode = 128 + int(requested_signal)
+
+    def current_uid(self) -> int:
+        return 1000
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _fake_launcher_args(tmp_path: Path):
+    module = _production_acceptance_module()
+    return module.LauncherArgs(
+        repo_root=tmp_path,
+        api_port=8000,
+        es_port=9200,
+        ui_port=3000,
+        index="vsa-video-embeddings",
+        data_root=tmp_path / "video-data",
+        conda_env="vsa-agent",
+        env={"OPENAI_API_KEY": "test-secret"},
+    )
+
+
+def test_controller_start_binds_new_run_and_exact_production_arguments(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    proc_root = tmp_path / "proc"
+    runner = _FakeProcessRunner(tmp_path, proc_root, (_RUN_IDS[0],))
+    controller = module.LauncherController(
+        _fake_launcher_args(tmp_path), runner=runner, proc_root=proc_root, startup_timeout=1.0
+    )
+
+    handle = controller.start()
+
+    assert handle.run_id == _RUN_IDS[0]
+    assert handle.run_dir == tmp_path / ".runtime" / "es-stack" / "runs" / _RUN_IDS[0]
+    assert handle.process_pid == 4000
+    assert runner.invocations[0]["arguments"] == [
+        "bash",
+        "scripts/es-runtime-stack.sh",
+        "--api-port",
+        "8000",
+        "--es-port",
+        "9200",
+        "--ui-port",
+        "3000",
+        "--index",
+        "vsa-video-embeddings",
+        "--data-root",
+        str(tmp_path / "video-data"),
+        "--conda-env",
+        "vsa-agent",
+    ]
+    assert runner.invocations[0]["cwd"] == tmp_path.resolve()
+
+
+def test_controller_wait_ready_validates_full_stack_and_worker_identity(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    proc_root = tmp_path / "proc"
+    runner = _FakeProcessRunner(tmp_path, proc_root, (_RUN_IDS[0],))
+    controller = module.LauncherController(
+        _fake_launcher_args(tmp_path), runner=runner, proc_root=proc_root, startup_timeout=1.0
+    )
+    handle = controller.start()
+
+    assert controller.wait_ready(handle) == handle
+
+
+def test_controller_rejects_worker_pid_from_a_foreign_run(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    proc_root = tmp_path / "proc"
+    runner = _FakeProcessRunner(tmp_path, proc_root, ())
+    controller = module.LauncherController(
+        _fake_launcher_args(tmp_path), runner=runner, proc_root=proc_root, startup_timeout=1.0
+    )
+    handle = module.RunHandle(run_id=_RUN_IDS[0], run_dir=tmp_path / _RUN_IDS[0], process_pid=41)
+    _write_worker_manifest(handle.run_dir / "processes.json", run_id=_RUN_IDS[1], worker_pid=101)
+
+    with pytest.raises(module.ValidationError, match="run ID"):
+        controller.stop_worker(handle)
+
+    assert runner.signals == []
+
+
+def test_controller_stops_only_the_verified_worker_once(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    proc_root = tmp_path / "proc"
+    runner = _FakeProcessRunner(tmp_path, proc_root, (_RUN_IDS[0],))
+    controller = module.LauncherController(
+        _fake_launcher_args(tmp_path), runner=runner, proc_root=proc_root, startup_timeout=1.0
+    )
+    handle = controller.start()
+    controller.wait_ready(handle)
+
+    controller.stop_worker(handle)
+
+    assert runner.signals == [(5000, signal.SIGTERM)]
+    with pytest.raises(module.ValidationError, match="already stopped"):
+        controller.stop_worker(handle)
+    assert runner.signals == [(5000, signal.SIGTERM)]
+
+
+def test_controller_restart_reuses_arguments_after_first_launcher_exits(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    proc_root = tmp_path / "proc"
+    runner = _FakeProcessRunner(tmp_path, proc_root)
+    controller = module.LauncherController(
+        _fake_launcher_args(tmp_path), runner=runner, proc_root=proc_root, startup_timeout=1.0
+    )
+    first = controller.start()
+    controller.wait_ready(first)
+    controller.stop_worker(first)
+
+    assert controller.wait_exit(first, timeout=1.0) == 143
+    second = controller.restart()
+
+    assert second.run_id != first.run_id
+    assert runner.invocations[1]["arguments"] == runner.invocations[0]["arguments"]
+    assert runner.invocations[1]["cwd"] == runner.invocations[0]["cwd"]
