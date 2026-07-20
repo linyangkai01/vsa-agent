@@ -490,6 +490,33 @@ def test_launcher_starts_worker_and_default_mode_does_not_run_ingest_smoke():
 - [x] **Step 4: 验证通过。** Run: `pytest tests/unit/recorded_video/test_composition.py tests/unit/recorded_video/test_worker.py tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_recorded_video_runtime_launcher.py -q`。Expected: PASS。
 - [x] **Step 5: 提交。** Run: `git add src/vsa_agent/recorded_video/composition.py src/vsa_agent/recorded_video/worker.py scripts/es-runtime-stack.sh scripts/es-runtime-stack.ps1 tests/unit/recorded_video/test_composition.py tests/unit/scripts/test_es_runtime_stack_script.py tests/unit/scripts/test_recorded_video_runtime_launcher.py && git commit -m "feat: run recorded video stack with worker logs"`。
 
+### Task 20A: B1 单进程日志 supervisor 与确定性中断清理（OpenSpec 7.3、7.4）
+
+**Files:**
+- Create: `scripts/runtime-log-supervisor.py`, `tests/unit/scripts/test_runtime_log_supervisor.py`
+- Modify: `scripts/es-runtime-stack.sh`, `tests/unit/scripts/test_recorded_video_runtime_launcher.py`, `tests/unit/scripts/test_es_runtime_stack_script.py`
+
+**Interfaces:**
+- Produces: `python scripts/runtime-log-supervisor.py --label LABEL --stack-log PATH [--component-log PATH] -- COMMAND [ARG ...]`；只使用 Python 标准库，返回 workload 的真实退出码。
+- Consumes: 启动器现有 `Protect/Redact` 规则、run directory、组件前缀和进程 manifest 契约。
+- Produces: 显式 supervisor PID/进程组所有权；INT/TERM 中断后关闭所有 stdout/stderr writer，并清理两个验证索引、验证目录和临时配置。
+
+- [x] **Step 1: 写 supervisor RED 测试。** 覆盖 stdout/stderr 合并、Authorization/API key/image 脱敏、组件日志无前缀、`stack.log` 与终端带前缀、长行完整写入和 workload 原始退出码；测试必须先因 helper 不存在而失败。
+- [x] **Step 2: 写真实中断 RED 测试。** 在 fake runtime 到达 `smoke=`、validation marker 和 validation config 后触发 TERM/INT；断言退出 130、无 PASS、两个 DELETE、验证数据与配置删除、manifest 收尾、supervisor/workload/writer 无残留，并证明 `communicate()` 在边界时间内获得 EOF。
+- [x] **Step 3: 验证 RED。** Run: `pytest -q tests/unit/scripts/test_runtime_log_supervisor.py tests/unit/scripts/test_recorded_video_runtime_launcher.py -k "runtime_log_supervisor or interruption"`。Expected: FAIL，原因分别是 supervisor 不存在和旧日志管道无法确定性关闭。
+- [x] **Step 4: 实现最小 B1 supervisor。** 单进程读取 workload 合并输出，复用一份脱敏规则并逐行写组件日志、`stack.log` 和终端；POSIX 创建独立 session/process group 并有界转发 TERM/KILL，Windows 测试路径使用可验证的当前用户子树回收。不得创建 raw 输出文件或新增第三方依赖。
+- [x] **Step 5: 接入 Bash 启动器并删除冗余实现。** `run_stack_command`、ES、API、Worker、UI 全部通过 supervisor；移除匿名 `redact | sed | tee` 管道、process substitution、`ACTIVE_STACK_COMMAND_PID` 实验代码和不再使用的重复脱敏函数。保持唯一用户入口和现有参数不变。
+- [x] **Step 6: 完成 GREEN 与稳定性门。** Run: `pytest -q tests/unit/scripts/test_runtime_log_supervisor.py tests/unit/scripts/test_recorded_video_runtime_launcher.py tests/unit/scripts/test_es_runtime_stack_script.py`。Expected: PASS。随后 TERM/INT 中断测试各重复 10 次，任一失败即停止并保留诊断。
+- [x] **Step 7: 语法、质量与审查。** Run: `bash -n scripts/es-runtime-stack.sh`、`python -m compileall -q scripts/runtime-log-supervisor.py tests/unit/scripts`、`ruff check scripts/runtime-log-supervisor.py tests/unit/scripts`、`ruff format --check scripts/runtime-log-supervisor.py tests/unit/scripts`。Expected: 全部 PASS；thorough reviewer 无 Critical/Important。
+- [x] **Step 8: 提交。** Run: `git add scripts/runtime-log-supervisor.py scripts/es-runtime-stack.sh tests/unit/scripts/test_runtime_log_supervisor.py tests/unit/scripts/test_recorded_video_runtime_launcher.py tests/unit/scripts/test_es_runtime_stack_script.py docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md && git commit -m "fix: supervise runtime logging and interruption cleanup"`。
+
+#### B1.1 补充：真实 workload 状态 sidecar
+
+- [x] **Step 8.1: 写 sidecar RED。** supervisor 测试覆盖原子 `starting/running/exited` 转换、真实 workload PID/exit code、状态首次写失败时不启动 workload、运行中写失败时终止受管子树；launcher 边界测试让 ES log workload 与 smoke 同步退出，并证明仅观察 supervisor PID 会错误写 PASS。后续 review RED 还覆盖 terminal marker 创建失败与已消费 exit status 被 cleanup 覆盖两个边界。
+- [x] **Step 8.2: 实现 sidecar 与 fail-closed。** ES/API/Worker/UI 使用独立 `{component}.status.json`；supervisor 在 workload 根退出时先原子写 `exited` 再排空日志。terminal marker 写失败时在同一 stack lock 下写入 run-scoped `status_sidecar_write_failed` 事件；原始 exit status 在 manifest 写失败后保留到 cleanup 重试，不引入 `processes.json` 并发 writer。
+- [x] **Step 8.3: 在 PASS 前建立状态线性化点。** guarded PASS 在共享 stack lock 内先拒绝本 run 的 status failure event，再校验 component、supervisor/workload PID、`running` 状态和 JSON 完整性；sidecar 缺失、损坏、陈旧、退出、PID 不匹配或终态持久化失败均 fail closed。
+- [x] **Step 8.4: 完成 GREEN、re-review 与提交门。** 最终串行 aggregate 为 `185 passed, 1 conditional skip`；PowerShell lifecycle 全集为 `45 passed`；TERM 与 PASS-lock 两个高风险 Bash probe 连续三轮均通过。PowerShell AST、Bash syntax、compileall、Ruff check/format、`git diff --check` 和 OpenSpec strict 均通过。v5 thorough review 为 Critical `0`、Important `0`；仅保留候选绑定失败缺少去重 reason-code 日志的非阻塞 Minor。
+
 ### Task 21: 后端集成与故障注入（OpenSpec 8.1、8.2、8.3）
 
 **Files:**

@@ -33,6 +33,7 @@ _QUOTED_IMAGE = re.compile(
 )
 _BASE64 = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{64,}(?![A-Za-z0-9+/=_-])")
 _STOP_GRACE_SEC = 2.0
+_WORKLOAD_PID_HANDOFF_TIMEOUT_SEC = 10.0
 _STATUS_REPLACE_RETRY_SEC = 0.5
 _STATUS_REPLACE_RETRY_INTERVAL_SEC = 0.005
 _STATUS_FAILURE_EXIT_CODE = 74
@@ -194,6 +195,8 @@ class _AppendWriter:
                 return False
             if guard is not None:
                 guard()
+            if cancelled is not None and cancelled.is_set():
+                return False
             self.write_locked(data)
         return True
 
@@ -504,7 +507,7 @@ def _start_workload(command: list[str]) -> tuple[subprocess.Popen[str], _Windows
         process = subprocess.Popen(bootstrap, **options)  # type: ignore[arg-type]
         job.assign(process)
         gate.touch()
-        deadline = time.monotonic() + _STOP_GRACE_SEC
+        deadline = time.monotonic() + _WORKLOAD_PID_HANDOFF_TIMEOUT_SEC
         workload_pid: int | None = None
         while workload_pid is None:
             try:
@@ -525,19 +528,28 @@ def _start_workload(command: list[str]) -> tuple[subprocess.Popen[str], _Windows
         except PermissionError:
             # The PID is captured; a delete-sharing denial cannot invalidate startup.
             pass
-    except BaseException:
+    except BaseException as primary:
+        cleanup_errors: list[tuple[str, BaseException]] = []
         if process is not None:
             try:
                 process.kill()
-            except OSError:
-                pass
-            process.wait()
-        job.close()
+            except BaseException as error:
+                cleanup_errors.append(("process.kill", error))
+            try:
+                process.wait(timeout=_STOP_GRACE_SEC)
+            except BaseException as error:
+                cleanup_errors.append(("process.wait", error))
+        try:
+            job.close()
+        except BaseException as error:
+            cleanup_errors.append(("job.close", error))
         for path in (gate, workload_pid_path):
             try:
                 _unlink_with_windows_retry(path)
-            except OSError:
-                pass
+            except BaseException as error:
+                cleanup_errors.append((f"unlink {path.as_posix()}", error))
+        for phase, error in cleanup_errors:
+            primary.add_note(f"startup cleanup {phase} failed: {type(error).__name__}: {error}")
         raise
     assert process is not None
     return process, job

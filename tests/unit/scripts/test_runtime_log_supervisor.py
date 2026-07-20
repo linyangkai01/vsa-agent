@@ -116,6 +116,152 @@ def test_runtime_log_supervisor_preserves_one_complete_long_line(tmp_path: Path)
     assert completed.stdout == f"[api] {long_line}\n"
 
 
+def test_windows_pid_handoff_allows_delayed_fake_bootstrap_within_startup_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_supervisor_module()
+    monkeypatch.setattr(module.os, "name", "nt")
+    gate = tmp_path / "delayed.gate"
+    workload_pid_path = gate.with_suffix(".pid")
+    clock_calls = 0
+    sleep_calls = 0
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+        killed = False
+        waited = False
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self) -> int:
+            self.waited = True
+            return 0
+
+    class FakeJob:
+        closed = False
+
+        def assign(self, _process: FakeProcess) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    process = FakeProcess()
+    job = FakeJob()
+
+    def fake_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        workload_pid_path.write_text("", encoding="utf-8")
+        return process
+
+    def fake_monotonic() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return {1: 0.0, 2: 1.0, 3: 2.5}.get(clock_calls, 100.0)
+
+    def fake_sleep(_delay: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            workload_pid_path.write_text("8765", encoding="utf-8")
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module, "_WindowsJob", lambda: job)
+    monkeypatch.setattr(module, "_new_windows_start_gate", lambda: gate)
+    monkeypatch.setattr(module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(module.time, "sleep", fake_sleep)
+
+    started, observed_job = module._start_workload(["ignored-workload"])
+
+    assert started is process
+    assert observed_job is job
+    assert module._workload_pid(process) == 8765
+    assert sleep_calls == 2
+    assert not process.killed
+    assert not process.waited
+    assert not job.closed
+    assert not workload_pid_path.exists()
+
+
+def test_windows_startup_cleanup_preserves_primary_error_and_runs_every_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_supervisor_module()
+    monkeypatch.setattr(module.os, "name", "nt")
+    gate = tmp_path / "failed.gate"
+    workload_pid_path = gate.with_suffix(".pid")
+    events: list[object] = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 17
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            events.append("process.kill")
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append(("process.wait", timeout))
+            raise subprocess.TimeoutExpired(["fake-bootstrap"], timeout)
+
+    class FakeJob:
+        def assign(self, _process: FakeProcess) -> None:
+            return None
+
+        def close(self) -> None:
+            events.append("job.close")
+            raise OSError("job close failed")
+
+    def fake_unlink(path: Path) -> None:
+        events.append(("unlink", path))
+        if path == gate:
+            raise PermissionError("gate unlink failed")
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(module, "_WindowsJob", FakeJob)
+    monkeypatch.setattr(module, "_new_windows_start_gate", lambda: gate)
+    monkeypatch.setattr(module, "_unlink_with_windows_retry", fake_unlink)
+
+    with pytest.raises(OSError, match="workload bootstrap exited before PID handoff: 17") as raised:
+        module._start_workload(["ignored-workload"])
+
+    assert events == [
+        "process.kill",
+        ("process.wait", module._STOP_GRACE_SEC),
+        "job.close",
+        ("unlink", gate),
+        ("unlink", workload_pid_path),
+    ]
+    notes = getattr(raised.value, "__notes__", [])
+    assert any("process.wait" in note and "timed out" in note for note in notes)
+    assert any("job.close" in note and "job close failed" in note for note in notes)
+    assert any("unlink" in note and "gate unlink failed" in note for note in notes)
+
+
+def test_append_writer_rechecks_cancellation_after_guard(tmp_path: Path) -> None:
+    module = _load_supervisor_module()
+    output = tmp_path / "stack.log"
+    writer = module._AppendWriter(output, shared=False)
+    cancelled = threading.Event()
+
+    def cancel_during_guard() -> None:
+        cancelled.set()
+
+    try:
+        published = writer.write("PASS: guarded publication\n", cancelled=cancelled, guard=cancel_during_guard)
+    finally:
+        writer.close()
+
+    assert published is False
+    assert output.read_bytes() == b""
+
+
 def test_status_sidecar_writer_uses_atomic_replaces_and_valid_transitions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1114,7 +1260,7 @@ def test_windows_job_assignment_failure_is_fail_closed(tmp_path: Path, monkeypat
         def kill(self) -> None:
             self.killed = True
 
-        def wait(self) -> int:
+        def wait(self, timeout: float | None = None) -> int:
             self.waited = True
             return 1
 

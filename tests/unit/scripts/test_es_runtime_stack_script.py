@@ -6,6 +6,7 @@ import pytest
 
 SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
+RUNTIME_LOG_SUPERVISOR = Path("scripts/runtime-log-supervisor.py")
 SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 ES_COMPOSE = Path("docker-compose.es.yml")
 PYPROJECT = Path("pyproject.toml")
@@ -148,11 +149,13 @@ def test_es_runtime_stack_reports_pass_and_cleans_up_owned_process():
     assert "finally" in text
 
 
-def test_es_runtime_stack_terminates_the_owned_process_tree():
+def test_es_runtime_stack_terminates_owned_processes_through_verified_handles():
     text = _script_text()
 
-    assert "taskkill.exe" in text
-    assert "/T" in text
+    assert "taskkill.exe" not in text
+    assert "VsaProcessTracker" in text
+    assert "BoundProcess" in text
+    assert ".Kill()" in text
 
 
 def test_es_runtime_stack_retains_temporary_config_with_an_explicit_notice():
@@ -163,6 +166,19 @@ def test_es_runtime_stack_retains_temporary_config_with_an_explicit_notice():
 
 def test_es_runtime_stack_bash_script_exists():
     assert BASH_SCRIPT.exists()
+
+
+def test_es_runtime_stack_bash_uses_one_standard_library_log_supervisor():
+    text = _bash_script_text()
+
+    assert RUNTIME_LOG_SUPERVISOR.exists()
+    assert 'RUNTIME_LOG_SUPERVISOR="$SCRIPT_DIR/runtime-log-supervisor.py"' in text
+    assert "ACTIVE_STACK_COMMAND_PID" not in text
+    assert "redact_runtime_text" not in text
+    assert "redact_component_output" not in text
+    assert "> >(redact" not in text
+    assert "sed -u" not in text
+    assert "taskkill.exe" not in text
 
 
 def test_es_runtime_stack_bash_exposes_expected_options():
@@ -211,12 +227,18 @@ def test_es_runtime_stack_bash_generates_temporary_search_config():
     assert "enabled: true" in text
 
 
+def test_linux_stack_exports_selected_runtime_config_to_short_lived_commands():
+    text = _bash_script_text()
+
+    assert 'export VSA_CONFIG="$API_CONFIG_PATH"' in text
+
+
 def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
     text = _script_text()
     for required in (
         "Get-NetTCPConnection",
         "Win32_Process",
-        "taskkill.exe",
+        "Get-Process",
         "Wait-PortFree",
         "run_original_ui_vss.sh",
         "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
@@ -225,6 +247,7 @@ def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
         "SmokeOnly",
     ):
         assert required in text
+    assert "taskkill.exe" not in text
 
 
 def test_windows_stack_waits_for_ui_readiness_and_reports_failures():
@@ -264,8 +287,9 @@ def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
         "UI_URL=",
         "UI_LOG_PATH=",
         "ES_LOG_PATH=",
-        "Original UI process exited before readiness",
-        "redact_component_output",
+        'log_stack_error "$MANAGED_EXIT_COMPONENT exited with status $MANAGED_EXIT_STATUS"',
+        "fail_if_managed_process_exited",
+        "runtime-log-supervisor.py",
         "start_es_log_stream",
         "wait_runtime_processes",
         "PYTHONUNBUFFERED=1",
@@ -297,7 +321,9 @@ def test_linux_stack_preflights_python_and_reports_each_service_failure():
         "aiohttp",
         "elasticsearch[async]>=8.14,<9",
         "kill -KILL",
-        "exited after readiness",
+        'MANAGED_EXIT_COMPONENT=""',
+        "MANAGED_EXIT_STATUS=0",
+        'log_stack_error "$MANAGED_EXIT_COMPONENT exited with status $MANAGED_EXIT_STATUS"',
     ):
         assert required in text
 
@@ -314,7 +340,7 @@ def test_es_runtime_stack_bash_reports_pass_and_cleans_up_owned_process():
     text = _bash_script_text()
 
     assert "PASS: ES runtime stack validation succeeded" in text
-    assert "trap cleanup EXIT" in text
+    assert 'trap \'status=$?; trap "" INT TERM; cleanup "$status"\' EXIT' in text
     assert "API_PID" in text
     assert "kill" in text
 
@@ -322,7 +348,8 @@ def test_es_runtime_stack_bash_reports_pass_and_cleans_up_owned_process():
 def test_es_runtime_stack_bash_terminates_the_owned_process_group_and_checks_health_payload():
     text = _bash_script_text()
 
-    assert "setsid" in text
+    assert "runtime-log-supervisor.py" in text
+    assert "SYNC_SUPERVISOR_PID" in text
     assert "stop_managed_process" in text
     assert "signal_process_tree" in text
     assert 'kill -"$signal" -- "-$target_pgid"' in text
@@ -352,7 +379,19 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"tests\\unit\\api\\test_video_search_ingest.py"' in text
     assert '"scripts\\bootstrap_node.sh"' in text
     assert '"scripts\\run_original_ui_vss.sh"' in text
+    assert '"scripts\\runtime-log-supervisor.py"' in text
+    assert '"frontend\\original-ui\\package.json"' in text
+    assert '"frontend\\original-ui\\package-lock.json"' in text
+    assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\package.json"' in text
     assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\next.config.js"' in text
+    for task22_server_e2e_path in (
+        "frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\playwright.config.ts",
+        "frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\e2e\\config.e2e.yaml",
+        "frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\e2e\\fake-openai-provider.py",
+        "frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\e2e\\fixtures.ts",
+        "frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\e2e\\recorded-video.spec.ts",
+    ):
+        assert f'"{task22_server_e2e_path}"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\map\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\dashboard\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\alerts\\lib-src\\server.d.ts"' in text
@@ -444,4 +483,15 @@ def test_sync_server_files_default_dry_run_uses_approved_manifest(tmp_path: Path
     completed = _run_sync_script(tmp_path)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "PASS: dry run completed for selected files" in completed.stdout
+
+
+def test_sync_server_files_dry_run_normalizes_task22_include_path(tmp_path: Path) -> None:
+    completed = _run_sync_script(
+        tmp_path,
+        "FRONTEND/original-ui/APPS/nv-metropolis-bp-vss-ui/E2E/FIXTURES.ts",
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "DRYRUN:" in completed.stdout
     assert "PASS: dry run completed for selected files" in completed.stdout

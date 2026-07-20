@@ -76,6 +76,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RUNTIME_LOG_SUPERVISOR="$SCRIPT_DIR/runtime-log-supervisor.py"
+SUPERVISOR_PYTHON="${VSA_SUPERVISOR_PYTHON:-python}"
 RUNTIME_DIR="$REPO_ROOT/.runtime/es-stack"
 RUNS_DIR="$RUNTIME_DIR/runs"
 
@@ -105,11 +107,22 @@ API_CONFIG_PATH="$CONFIG_PATH"
 STACK_STARTED_AT=""
 ES_STARTED_BY_RUN=0
 ES_LOG_PID=""
+SYNC_SUPERVISOR_PID=""
+STARTED_SUPERVISOR_PID=""
 API_PID=""
 WORKER_PID=""
 UI_PID=""
+INTERRUPTED_SIGNAL=""
+INTERRUPT_PENDING=0
+CLEANUP_ACTIVE=0
+SUPERVISOR_START_CRITICAL=0
+MANAGED_EXIT_COMPONENT=""
+MANAGED_EXIT_STATUS=0
+STOPPED_PROCESS_STATUS=0
 declare -A PROCESS_PIDS=()
 declare -A PROCESS_EXIT_RECORDED=()
+declare -A PROCESS_STATUS_FILES=()
+declare -A PROCESS_PENDING_EXIT_STATUS=()
 
 mkdir -p "$RUN_DIR"
 for path in "$STACK_LOG_PATH" "$API_LOG_PATH" "$WORKER_LOG_PATH" "$UI_LOG_PATH" "$ES_LOG_PATH"; do
@@ -118,49 +131,160 @@ done
 if [[ -L "$LATEST_LINK" || -f "$LATEST_LINK" ]]; then
   rm -f -- "$LATEST_LINK"
 elif [[ -e "$LATEST_LINK" ]]; then
-  printf '[stack] ERROR: LATEST_POINTER_CONFLICT: refusing to replace directory %s\n' "$LATEST_LINK" | tee -a "$STACK_LOG_PATH" >&2
+  printf '[stack] ERROR: LATEST_POINTER_CONFLICT: refusing to replace directory %s\n' "$LATEST_LINK" >>"$STACK_LOG_PATH"
+  printf '[stack] ERROR: LATEST_POINTER_CONFLICT: refusing to replace directory %s\n' "$LATEST_LINK" >&2
   exit 1
 fi
 ln -sfn "$RUN_DIR" "$LATEST_LINK"
 
-redact_runtime_text() {
-  python -u -c '
-import re
-import sys
+LAUNCHER_PID_PATH="$RUN_DIR/launcher.pid"
+if ! printf '%s\n' "$BASHPID" >"$LAUNCHER_PID_PATH"; then
+  printf '[stack] ERROR: unable to record launcher PID at %s\n' "$LAUNCHER_PID_PATH" >&2
+  exit 1
+fi
 
-def protect(text):
-    text = re.sub(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(?i)([\"'"'"']authorization[\"'"'"']\s*:\s*[\"'"'"'])(?:bearer\s+)?[^\"'"'"']*([\"'"'"'])", r"\1[REDACTED]\2", text)
-    text = re.sub(r"(?i)([\"'"'"'](?:api[-_]?key|access[-_]?token|token|password)[\"'"'"']\s*:\s*[\"'"'"'])[^\"'"'"']*([\"'"'"'])", r"\1[REDACTED]\2", text)
-    text = re.sub(r"(?i)((?:api[-_]?key|access[-_]?token|token|password)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(?i)data:image/[^;\s\"'"'"']+;base64,[A-Za-z0-9+/=_-]*", "[REDACTED_IMAGE]", text)
-    text = re.sub(r"(?i)([\"'"'"'](?:image|image_url|input_image|b64_json)[\"'"'"']\s*:\s*[\"'"'"'])[A-Za-z0-9+/=_-]{64,}([\"'"'"'])", r"\1[REDACTED_IMAGE]\2", text)
-    return re.sub(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{64,}(?![A-Za-z0-9+/=_-])", "[REDACTED_BASE64]", text)
+handle_interrupt() {
+  trap '' INT TERM
+  INTERRUPTED_SIGNAL="$1"
+  INTERRUPT_PENDING=1
+  if [[ "$CLEANUP_ACTIVE" == "1" || "$SUPERVISOR_START_CRITICAL" == "1" ]]; then
+    return 0
+  fi
+  exit 130
+}
 
-for line in sys.stdin:
-    sys.stdout.write(protect(line))
-    sys.stdout.flush()
-'
+begin_supervisor_start() {
+  SUPERVISOR_START_CRITICAL=1
+}
+
+finish_supervisor_start() {
+  SUPERVISOR_START_CRITICAL=0
+  if [[ "$INTERRUPT_PENDING" == "1" && "$CLEANUP_ACTIVE" != "1" ]]; then
+    exit 130
+  fi
+}
+
+register_sync_supervisor() {
+  SYNC_SUPERVISOR_PID="$1"
+}
+
+register_component_supervisor() {
+  local component="$1" pid="$2" safe_command="$3"
+  STARTED_SUPERVISOR_PID="$pid"
+  record_process "$component" "$pid" "$safe_command"
+}
+
+start_sync_supervisor() {
+  begin_supervisor_start
+  "$SUPERVISOR_PYTHON" -u "$RUNTIME_LOG_SUPERVISOR" --label stack --stack-log "$STACK_LOG_PATH" -- "$@" &
+  local command_pid=$!
+  register_sync_supervisor "$command_pid"
+  finish_supervisor_start
+}
+
+wait_sync_supervisor() {
+  local monitor_runtime="$1" command_pid="$SYNC_SUPERVISOR_PID" status=0 failure_status
+  set +e
+  while pid_is_running "$command_pid"; do
+    if [[ "$monitor_runtime" == "1" ]]; then
+      if observe_managed_processes; then
+        :
+      else
+        failure_status=$?
+        if ! stop_sync_supervisor; then
+          set -e
+          return 1
+        fi
+        set -e
+        log_stack_error "$MANAGED_EXIT_COMPONENT exited with status $MANAGED_EXIT_STATUS"
+        return "$failure_status"
+      fi
+    fi
+    sleep 0.05
+  done
+  wait "$command_pid" || status=$?
+  if [[ "$SYNC_SUPERVISOR_PID" == "$command_pid" ]]; then
+    SYNC_SUPERVISOR_PID=""
+  fi
+  set -e
+  return "$status"
 }
 
 log_stack() {
-  local message
-  message="$(printf '%s' "$*" | redact_runtime_text)"
-  printf '[stack] %s\n' "$message" | tee -a "$STACK_LOG_PATH"
+  start_sync_supervisor printf '%s\n' "$*"
+  wait_sync_supervisor 1
+}
+
+publish_status() {
+  local component pid status_file
+  local -a status_guards=()
+  for component in es api worker ui; do
+    pid="${PROCESS_PIDS[$component]:-}"
+    [[ -z "$pid" ]] && continue
+    status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"
+    status_guards+=(--require-running-status "$component" "$pid" "$status_file")
+  done
+  begin_supervisor_start
+  "$SUPERVISOR_PYTHON" -u "$RUNTIME_LOG_SUPERVISOR" \
+    --label stack \
+    --stack-log "$STACK_LOG_PATH" \
+    "${status_guards[@]}" \
+    -- printf '%s\n' "$*" &
+  local command_pid=$!
+  register_sync_supervisor "$command_pid"
+  finish_supervisor_start
+  wait_sync_supervisor 1
 }
 
 log_stack_error() {
-  local message
-  message="$(printf '%s' "$*" | redact_runtime_text)"
-  printf '[stack] ERROR: %s\n' "$message" | tee -a "$STACK_LOG_PATH" >&2
+  start_sync_supervisor printf 'ERROR: %s\n' "$*" >&2
+  wait_sync_supervisor 0
+}
+
+cleanup_log_line() {
+  printf '[stack] %s\n' "$*" >>"$STACK_LOG_PATH"
+  printf '[stack] %s\n' "$*"
+}
+
+cleanup_log_error() {
+  printf '[stack] ERROR: %s\n' "$*" >>"$STACK_LOG_PATH"
+  printf '[stack] ERROR: %s\n' "$*" >&2
 }
 
 run_stack_command() {
-  set +e
-  "$@" 2>&1 | redact_runtime_text | sed -u 's/^/[stack] /' | tee -a "$STACK_LOG_PATH"
-  local status=${PIPESTATUS[0]}
-  set -e
-  return "$status"
+  start_sync_supervisor "$@"
+  wait_sync_supervisor 1
+}
+
+run_conda_stack_command() {
+  run_stack_command bash -c 'conda "$@"' vsa-conda "$@"
+}
+
+run_python_stack_command() {
+  if [[ -n "$CONDA_ENV" ]]; then
+    run_conda_stack_command run --no-capture-output -n "$CONDA_ENV" python "$@"
+  else
+    run_stack_command python "$@"
+  fi
+}
+
+start_supervised_process() {
+  local component="$1" component_log="$2" safe_command="$3" status_file
+  shift 3
+  status_file="$RUN_DIR/$component.status.json"
+  PROCESS_STATUS_FILES["$component"]="$status_file"
+  begin_supervisor_start
+  bash -c 'VSA_SUPERVISOR_REGISTERED_PID="$BASHPID" exec "$@"' vsa-supervisor \
+    "$SUPERVISOR_PYTHON" -u "$RUNTIME_LOG_SUPERVISOR" \
+    --label "$component" \
+    --stack-log "$STACK_LOG_PATH" \
+    --component-log "$component_log" \
+    --status-file "$status_file" \
+    --component "$component" \
+    -- "$@" &
+  local supervisor_pid=$!
+  register_component_supervisor "$component" "$supervisor_pid" "$safe_command"
+  finish_supervisor_start
 }
 
 init_process_manifest() {
@@ -220,13 +344,12 @@ record_process() {
 record_process_exit() {
   local component="$1" status="$2"
   if [[ "${PROCESS_EXIT_RECORDED[$component]:-0}" == "0" ]]; then
-    update_process_manifest finish "$component" "$status"
+    if ! update_process_manifest finish "$component" "$status"; then
+      return 1
+    fi
     PROCESS_EXIT_RECORDED["$component"]=1
   fi
 }
-
-init_process_manifest
-log_stack "run_id=$RUN_ID evidence=$RUN_DIR"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -267,7 +390,7 @@ ensure_python_runtime() {
   fi
   log_stack "installing project Python dependencies into the selected runtime"
   if [[ -n "$CONDA_ENV" ]]; then
-    run_stack_command conda run -n "$CONDA_ENV" python -m pip install --upgrade -e '.[dev]'
+    run_conda_stack_command run -n "$CONDA_ENV" python -m pip install --upgrade -e '.[dev]'
   else
     run_stack_command python -m pip install --upgrade -e '.[dev]'
   fi
@@ -383,24 +506,172 @@ reclaim_port() {
   wait_for_port_free "$port"
 }
 
-redact_component_output() {
-  local label="$1" path="$2"
-  redact_runtime_text | tee -a "$path" | sed -u "s/^/[$label] /" | tee -a "$STACK_LOG_PATH"
+start_es_log_stream() {
+  start_supervised_process \
+    es \
+    "$ES_LOG_PATH" \
+    "docker compose -f docker-compose.es.yml logs --since <run-start> -f elasticsearch" \
+    docker compose -f docker-compose.es.yml logs --since "$STACK_STARTED_AT" -f elasticsearch
+  ES_LOG_PID="$STARTED_SUPERVISOR_PID"
 }
 
-start_es_log_stream() {
-  setsid docker compose -f docker-compose.es.yml logs --since "$STACK_STARTED_AT" -f elasticsearch > >(redact_component_output es "$ES_LOG_PATH") 2>&1 &
-  ES_LOG_PID=$!
-  record_process es "$ES_LOG_PID" "docker compose -f docker-compose.es.yml logs --since <run-start> -f elasticsearch"
+observe_managed_processes() {
+  local component pid status finalization_status pending_status
+  MANAGED_EXIT_COMPONENT=""
+  MANAGED_EXIT_STATUS=0
+  for component in es api worker ui; do
+    pid="${PROCESS_PIDS[$component]:-}"
+    [[ -z "$pid" ]] && continue
+    pending_status="${PROCESS_PENDING_EXIT_STATUS[$component]:-}"
+    if [[ -n "$pending_status" ]]; then
+      status="$pending_status"
+    elif ! pid_is_running "$pid"; then
+      status=0
+      wait "$pid" >/dev/null 2>&1 || status=$?
+      PROCESS_PENDING_EXIT_STATUS["$component"]="$status"
+    else
+      continue
+    fi
+    MANAGED_EXIT_COMPONENT="$component"
+    MANAGED_EXIT_STATUS="$status"
+    if record_process_exit "$component" "$status"; then
+      PROCESS_PENDING_EXIT_STATUS["$component"]=""
+      PROCESS_PIDS["$component"]=""
+      [[ "$status" == "0" ]] && return 1
+      return "$status"
+    else
+      finalization_status=$?
+      return "$finalization_status"
+    fi
+  done
+  return 0
+}
+
+validate_component_status() {
+  local component="$1" status_file="$2" expected_supervisor_pid="$3"
+  python - "$status_file" "$RUN_ID" "$component" "$expected_supervisor_pid" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+run_id, component, expected_supervisor_pid = sys.argv[2], sys.argv[3], int(sys.argv[4])
+payload = None
+
+def fail(reason, status=1):
+    state = payload.get("state") if isinstance(payload, dict) else "unknown"
+    exit_code = payload.get("exit_code") if isinstance(payload, dict) else None
+    print(
+        f"component={component} status_file={path.as_posix()} state={state} "
+        f"exit_code={json.dumps(exit_code)} error={reason}",
+        file=sys.stderr,
+    )
+    raise SystemExit(status)
+
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    fail(f"unreadable status sidecar: {error}")
+if not isinstance(payload, dict):
+    fail("status sidecar root must be an object")
+if payload.get("schema_version") != 1:
+    fail("schema_version mismatch")
+if payload.get("run_id") != run_id:
+    fail("run_id mismatch")
+if payload.get("component") != component:
+    fail("component mismatch")
+if payload.get("supervisor_pid") != expected_supervisor_pid:
+    fail("supervisor PID mismatch")
+if not isinstance(payload.get("updated_at"), str) or not payload["updated_at"]:
+    fail("updated_at is missing")
+state = payload.get("state")
+workload_pid = payload.get("workload_pid")
+if state == "exited":
+    if not isinstance(workload_pid, int) or isinstance(workload_pid, bool) or workload_pid <= 0:
+        fail("invalid workload PID")
+    exit_code = payload.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or not 0 <= exit_code <= 255:
+        fail("invalid exited component exit code")
+    fail("component exited", exit_code or 1)
+if state != "running":
+    fail("component is not running")
+if not isinstance(workload_pid, int) or isinstance(workload_pid, bool) or workload_pid <= 0:
+    fail("invalid workload PID")
+if payload.get("exit_code") is not None:
+    fail("running component has an exit code")
+PY
+}
+
+validate_managed_statuses() {
+  local component pid status_file error status
+  for component in es api worker ui; do
+    pid="${PROCESS_PIDS[$component]:-}"
+    [[ -z "$pid" ]] && continue
+    status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"
+    if error="$(validate_component_status "$component" "$status_file" "$pid" 2>&1)"; then
+      :
+    else
+      status=$?
+      log_stack_error "$error"
+      return "$status"
+    fi
+  done
+  return 0
+}
+
+wait_component_status_running() {
+  local component="$1" pid="${PROCESS_PIDS[$1]:-}" status_file deadline error status process_status
+  status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"
+  deadline=$((SECONDS + TIMEOUT_SEC))
+  while (( SECONDS < deadline )); do
+    if error="$(validate_component_status "$component" "$status_file" "$pid" 2>&1)"; then
+      return 0
+    else
+      status=$?
+    fi
+    if [[ "$error" == *" state=exited "* ]]; then
+      log_stack_error "$error"
+      return "$status"
+    fi
+    if fail_if_managed_process_exited; then
+      :
+    else
+      process_status=$?
+      if error="$(validate_component_status "$component" "$status_file" "$pid" 2>&1)"; then
+        return 0
+      else
+        status=$?
+      fi
+      if [[ "$error" == *" state=exited "* ]]; then
+        log_stack_error "$error"
+        return "$status"
+      fi
+      return "$process_status"
+    fi
+    sleep 0.05
+  done
+  error="$(validate_component_status "$component" "$status_file" "$pid" 2>&1 || true)"
+  log_stack_error "$error"
+  return 1
+}
+
+fail_if_managed_process_exited() {
+  local status
+  if observe_managed_processes; then
+    return 0
+  else
+    status=$?
+  fi
+  log_stack_error "$MANAGED_EXIT_COMPONENT exited with status $MANAGED_EXIT_STATUS"
+  return "$status"
 }
 
 wait_http_health() {
   local deadline=$((SECONDS + TIMEOUT_SEC)) health_payload
   while (( SECONDS < deadline )); do
-    if [[ -n "$API_PID" ]] && ! kill -0 "$API_PID" >/dev/null 2>&1; then
-      log_stack_error "FastAPI process exited before health check succeeded"
-      return 1
-    fi
+    fail_if_managed_process_exited || return $?
+    validate_managed_statuses || return $?
     health_payload="$(curl -fsS "$API_HEALTH_URL" 2>/dev/null || true)"
     if [[ -n "$health_payload" ]] && printf '%s' "$health_payload" | python -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "ok" else 1)'; then
       return 0
@@ -414,10 +685,8 @@ wait_http_health() {
 wait_worker_ready() {
   local deadline=$((SECONDS + TIMEOUT_SEC))
   while (( SECONDS < deadline )); do
-    if [[ -n "$WORKER_PID" ]] && ! kill -0 "$WORKER_PID" >/dev/null 2>&1; then
-      log_stack_error "recorded-video Worker exited before readiness"
-      return 1
-    fi
+    fail_if_managed_process_exited || return $?
+    validate_managed_statuses || return $?
     if python - "$WORKER_LOG_PATH" <<'PY'
 import json
 import sys
@@ -444,10 +713,8 @@ PY
 wait_ui_health() {
   local deadline=$((SECONDS + TIMEOUT_SEC))
   while (( SECONDS < deadline )); do
-    if [[ -n "$UI_PID" ]] && ! kill -0 "$UI_PID" >/dev/null 2>&1; then
-      log_stack_error "Original UI process exited before readiness"
-      return 1
-    fi
+    fail_if_managed_process_exited || return $?
+    validate_managed_statuses || return $?
     if curl -fsS "$UI_URL" >/dev/null 2>&1; then
       return 0
     fi
@@ -460,6 +727,8 @@ wait_ui_health() {
 wait_same_origin_proxy() {
   local deadline=$((SECONDS + TIMEOUT_SEC)) status
   while (( SECONDS < deadline )); do
+    fail_if_managed_process_exited || return $?
+    validate_managed_statuses || return $?
     status="$(curl -sS -o /dev/null -w '%{http_code}' "$UI_URL/api/v1/search" 2>/dev/null || true)"
     if [[ "$status" == "405" ]]; then
       return 0
@@ -471,20 +740,9 @@ wait_same_origin_proxy() {
 }
 
 wait_runtime_processes() {
-  local component pid status
   while true; do
-    for component in api worker ui; do
-      pid="${PROCESS_PIDS[$component]:-}"
-      [[ -z "$pid" ]] && continue
-      if ! pid_is_running "$pid"; then
-        status=0
-        wait "$pid" >/dev/null 2>&1 || status=$?
-        record_process_exit "$component" "$status"
-        log_stack_error "$component exited after readiness with status $status"
-        [[ "$status" == "0" ]] && return 1
-        return "$status"
-      fi
-    done
+    fail_if_managed_process_exited || return $?
+    validate_managed_statuses || return $?
     sleep 0.25
   done
 }
@@ -492,6 +750,9 @@ wait_runtime_processes() {
 pid_is_running() {
   local pid="$1" state
   kill -0 "$pid" >/dev/null 2>&1 || return 1
+  if [[ -n "${MSYSTEM:-}" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+    return 0
+  fi
   state="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
   [[ -z "$state" || "$state" != Z* ]]
 }
@@ -508,26 +769,56 @@ signal_process_tree() {
 }
 
 stop_pid_bounded() {
-  local pid="$1" tick status=0
+  local pid="$1" tick=0
+  local grace_ticks="${PROCESS_SHUTDOWN_GRACE_TICKS:-10}"
+  local deadline=$((grace_ticks * 2))
+  STOPPED_PROCESS_STATUS=0
   if pid_is_running "$pid"; then
     signal_process_tree TERM "$pid"
-    for ((tick = 0; tick < ${PROCESS_SHUTDOWN_GRACE_TICKS:-10}; tick++)); do
+    for ((; tick < grace_ticks; tick++)); do
       pid_is_running "$pid" || break
       sleep 0.1
     done
   fi
   if pid_is_running "$pid"; then
     signal_process_tree KILL "$pid"
+    for ((; tick < deadline; tick++)); do
+      pid_is_running "$pid" || break
+      sleep 0.1
+    done
   fi
-  wait "$pid" >/dev/null 2>&1 || status=$?
-  return "$status"
+  pid_is_running "$pid" && return 1
+  wait "$pid" >/dev/null 2>&1 || STOPPED_PROCESS_STATUS=$?
+  return 0
+}
+
+request_managed_process_stop() {
+  local component="$1" pid="${PROCESS_PIDS[$1]:-}"
+  [[ -z "$pid" ]] && return 0
+  [[ -n "${PROCESS_PENDING_EXIT_STATUS[$component]:-}" ]] && return 0
+  kill -TERM "$pid" >/dev/null 2>&1 || true
 }
 
 stop_managed_process() {
-  local component="$1" pid="${PROCESS_PIDS[$1]:-}" status=0
+  local component="$1" pid="${PROCESS_PIDS[$1]:-}" pending_status
   [[ -z "$pid" ]] && return 0
-  stop_pid_bounded "$pid" || status=$?
-  record_process_exit "$component" "$status"
+  pending_status="${PROCESS_PENDING_EXIT_STATUS[$component]:-}"
+  if [[ -n "$pending_status" ]]; then
+    record_process_exit "$component" "$pending_status" || return $?
+    PROCESS_PENDING_EXIT_STATUS["$component"]=""
+    PROCESS_PIDS["$component"]=""
+    return 0
+  fi
+  stop_pid_bounded "$pid" || return 1
+  record_process_exit "$component" "$STOPPED_PROCESS_STATUS" || return $?
+  PROCESS_PIDS["$component"]=""
+  return 0
+}
+
+stop_sync_supervisor() {
+  [[ -z "$SYNC_SUPERVISOR_PID" ]] && return 0
+  stop_pid_bounded "$SYNC_SUPERVISOR_PID" || return 1
+  SYNC_SUPERVISOR_PID=""
 }
 
 delete_validation_resources() {
@@ -535,52 +826,91 @@ delete_validation_resources() {
   local failed=0 validation_resource
   for validation_resource in "$VALIDATION_SMOKE_INDEX" "$VALIDATION_INDEX"; do
     if ! curl -fsS -X DELETE --get --data-urlencode "ignore_unavailable=true" "$ES_ENDPOINT/$validation_resource" >/dev/null 2>&1; then
-      log_stack_error "failed to remove validation index $validation_resource"
+      cleanup_log_error "failed to remove validation index $validation_resource"
       failed=1
     fi
   done
   rm -rf -- "$VALIDATION_DATA_ROOT" || failed=1
   rm -f -- "$VALIDATION_CONFIG_PATH" "$CONFIG_PATH" || failed=1
   if [[ "$failed" == "0" ]]; then
-    log_stack "removed isolated validation namespace $VALIDATION_INDEX"
+    cleanup_log_line "removed isolated validation namespace $VALIDATION_INDEX"
     return 0
   fi
   return 1
 }
 
 cleanup() {
-  local status=$? cleanup_failed=0
-  trap - EXIT INT TERM
-  stop_managed_process ui
-  stop_managed_process worker
-  stop_managed_process api
-  stop_managed_process es
-  delete_validation_resources || cleanup_failed=1
+  local status="${1:-$?}" cleanup_failed=0
+  trap - EXIT
+  trap '' INT TERM
+  CLEANUP_ACTIVE=1
+  set +e
+  if [[ -n "$SYNC_SUPERVISOR_PID" ]]; then
+    if ! run_cleanup_stage "stop sync supervisor" stop_sync_supervisor; then cleanup_failed=1; fi
+  fi
+  request_managed_process_stop ui
+  request_managed_process_stop worker
+  request_managed_process_stop api
+  request_managed_process_stop es
+  if ! run_cleanup_stage "stop ui" stop_managed_process ui; then cleanup_failed=1; fi
+  if ! run_cleanup_stage "stop worker" stop_managed_process worker; then cleanup_failed=1; fi
+  if ! run_cleanup_stage "stop api" stop_managed_process api; then cleanup_failed=1; fi
+  if ! run_cleanup_stage "stop es" stop_managed_process es; then cleanup_failed=1; fi
+  if ! run_cleanup_stage "delete validation resources" delete_validation_resources; then cleanup_failed=1; fi
   if [[ "$ES_STARTED_BY_RUN" == "1" && "$STOP_ELASTICSEARCH" == "1" ]]; then
-    if run_stack_command docker compose -f docker-compose.es.yml down; then
-      :
-    else
+    if ! run_cleanup_stage "stop Elasticsearch compose" run_stack_command docker compose -f docker-compose.es.yml down; then
       cleanup_failed=1
     fi
   fi
   if [[ "$VALIDATE" != "1" && -f "$CONFIG_PATH" ]]; then
-    log_stack "Temporary config retained: $CONFIG_PATH"
+    if ! run_cleanup_stage "log temporary config notice" cleanup_log_line "Temporary config retained: $CONFIG_PATH"; then
+      cleanup_failed=1
+    fi
   fi
-  log_stack "process manifest: $PROCESS_MANIFEST_PATH"
-  log_stack "stack log: $STACK_LOG_PATH"
+  if ! run_cleanup_stage "log process manifest path" cleanup_log_line "process manifest: $PROCESS_MANIFEST_PATH"; then
+    cleanup_failed=1
+  fi
+  if ! run_cleanup_stage "log stack log path" cleanup_log_line "stack log: $STACK_LOG_PATH"; then cleanup_failed=1; fi
   if [[ "$cleanup_failed" == "1" && "$status" == "0" ]]; then
     status=1
   fi
+  if [[ "$INTERRUPT_PENDING" == "1" ]]; then
+    status=130
+  fi
+  if [[ -n "$INTERRUPTED_SIGNAL" ]]; then
+    if ! run_cleanup_stage "log interruption status" cleanup_log_line \
+      "interruption signal=$INTERRUPTED_SIGNAL final_status=$status"; then
+      [[ "$status" == "0" ]] && status=1
+    fi
+  fi
   exit "$status"
 }
-trap cleanup EXIT
-trap 'exit 130' INT TERM
+
+run_cleanup_stage() {
+  local label="$1"
+  shift
+  if "$@"; then
+    return 0
+  fi
+  printf '[stack] ERROR: cleanup stage failed: %s\n' "$label" >>"$STACK_LOG_PATH"
+  printf '[stack] ERROR: cleanup stage failed: %s\n' "$label" >&2
+  return 1
+}
+
+trap 'status=$?; trap "" INT TERM; cleanup "$status"' EXIT
+trap 'handle_interrupt INT' INT
+trap 'handle_interrupt TERM' TERM
+
+init_process_manifest
+log_stack "run_id=$RUN_ID evidence=$RUN_DIR"
+log_stack "launcher_pid=$BASHPID"
 
 require_command docker
 require_command curl
-require_command setsid
+require_command python
 if [[ -n "$CONDA_ENV" ]]; then
   require_command conda
+  require_command bash
 fi
 
 cd "$REPO_ROOT"
@@ -599,6 +929,7 @@ if [[ "$VALIDATE" == "1" ]]; then
   write_search_config "$VALIDATION_CONFIG_PATH" "$VALIDATION_INDEX" "$VALIDATION_DATA_ROOT" validation
   API_CONFIG_PATH="$VALIDATION_CONFIG_PATH"
 fi
+export VSA_CONFIG="$API_CONFIG_PATH"
 
 export PYTHONPATH="$REPO_ROOT/src"
 if [[ "$SMOKE_ONLY" == "0" ]]; then
@@ -615,7 +946,7 @@ if [[ -n "$CONDA_ENV" ]]; then
   doctor_args+=(--conda-env "$CONDA_ENV")
 fi
 log_stack "running static runtime doctor"
-run_stack_command python_cmd "${doctor_args[@]}"
+run_python_stack_command "${doctor_args[@]}"
 
 export VSA_ES_PORT="$ES_PORT"
 export VSA_ES_CONTAINER_NAME="vsa-agent-es"
@@ -628,9 +959,15 @@ if ! run_stack_command docker compose -f docker-compose.es.yml up -d; then
   exit 1
 fi
 start_es_log_stream
+wait_component_status_running es
 
 deadline=$((SECONDS + TIMEOUT_SEC))
-until curl -fsS "$ES_ENDPOINT" >/dev/null 2>&1; do
+while true; do
+  fail_if_managed_process_exited
+  validate_managed_statuses
+  if curl -fsS "$ES_ENDPOINT" >/dev/null 2>&1; then
+    break
+  fi
   if (( SECONDS >= deadline )); then
     log_stack_error "Elasticsearch did not become reachable at $ES_ENDPOINT within $TIMEOUT_SEC seconds"
     exit 1
@@ -643,57 +980,55 @@ if [[ -n "$CONDA_ENV" ]]; then
   doctor_args+=(--conda-env "$CONDA_ENV")
 fi
 log_stack "validating production alias and mapping without writes"
-run_stack_command python_cmd "${doctor_args[@]}"
+run_python_stack_command "${doctor_args[@]}"
 
 if [[ -n "$CONDA_ENV" ]]; then
-  VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" > >(redact_component_output api "$API_LOG_PATH") 2>&1 &
+  start_supervised_process api "$API_LOG_PATH" "conda run --no-capture-output -n $CONDA_ENV python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT" \
+    env VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 bash -c 'conda "$@"' vsa-conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT"
 else
-  VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 setsid python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT" > >(redact_component_output api "$API_LOG_PATH") 2>&1 &
+  start_supervised_process api "$API_LOG_PATH" "python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT" \
+    env VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT"
 fi
-API_PID=$!
-if [[ -n "$CONDA_ENV" ]]; then
-  API_SAFE_COMMAND="conda run --no-capture-output -n $CONDA_ENV python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT"
-else
-  API_SAFE_COMMAND="python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT"
-fi
-record_process api "$API_PID" "$API_SAFE_COMMAND"
+API_PID="$STARTED_SUPERVISOR_PID"
+wait_component_status_running api
 wait_http_health # readiness: api health
 
 if [[ -n "$CONDA_ENV" ]]; then
-  PYTHONUNBUFFERED=1 setsid conda run --no-capture-output -n "$CONDA_ENV" python scripts/recorded-video-worker.py --config "$API_CONFIG_PATH" > >(redact_component_output worker "$WORKER_LOG_PATH") 2>&1 &
+  start_supervised_process worker "$WORKER_LOG_PATH" "conda run --no-capture-output -n $CONDA_ENV python scripts/recorded-video-worker.py --config <runtime-config>" \
+    env PYTHONUNBUFFERED=1 bash -c 'conda "$@"' vsa-conda run --no-capture-output -n "$CONDA_ENV" python scripts/recorded-video-worker.py --config "$API_CONFIG_PATH"
 else
-  PYTHONUNBUFFERED=1 setsid python scripts/recorded-video-worker.py --config "$API_CONFIG_PATH" > >(redact_component_output worker "$WORKER_LOG_PATH") 2>&1 &
+  start_supervised_process worker "$WORKER_LOG_PATH" "python scripts/recorded-video-worker.py --config <runtime-config>" \
+    env PYTHONUNBUFFERED=1 python scripts/recorded-video-worker.py --config "$API_CONFIG_PATH"
 fi
-WORKER_PID=$!
-if [[ -n "$CONDA_ENV" ]]; then
-  WORKER_SAFE_COMMAND="conda run --no-capture-output -n $CONDA_ENV python scripts/recorded-video-worker.py --config <runtime-config>"
-else
-  WORKER_SAFE_COMMAND="python scripts/recorded-video-worker.py --config <runtime-config>"
-fi
-record_process worker "$WORKER_PID" "$WORKER_SAFE_COMMAND"
+WORKER_PID="$STARTED_SUPERVISOR_PID"
+wait_component_status_running worker
 wait_worker_ready # readiness: recorded-video Worker
 
 if [[ "$SMOKE_ONLY" == "0" ]]; then
-  NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" NEXT_PUBLIC_VST_API_URL="/api/v1/vst" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" setsid bash "$SCRIPT_DIR/run_original_ui_vss.sh" > >(redact_component_output ui "$UI_LOG_PATH") 2>&1 &
-  UI_PID=$!
-  record_process ui "$UI_PID" "bash scripts/run_original_ui_vss.sh"
+  start_supervised_process ui "$UI_LOG_PATH" "bash scripts/run_original_ui_vss.sh" \
+    env NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" NEXT_PUBLIC_VST_API_URL="/api/v1/vst" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" bash "$SCRIPT_DIR/run_original_ui_vss.sh"
+  UI_PID="$STARTED_SUPERVISOR_PID"
+  wait_component_status_running ui
   wait_ui_health # readiness: original UI
   wait_same_origin_proxy # readiness: same-origin proxy
 fi
 
 if [[ "$VALIDATE" == "1" ]]; then # validation
   if [[ "$KEEP_RUNNING" == "1" ]]; then
-    log_stack "READY: isolated validation runtime api=$API_URL ui=$UI_URL es=$ES_ENDPOINT index=$VALIDATION_INDEX"
+    validate_managed_statuses
+    publish_status "READY: isolated validation runtime api=$API_URL ui=$UI_URL es=$ES_ENDPOINT index=$VALIDATION_INDEX"
     wait_runtime_processes
   else
     log_stack "running isolated validation against $VALIDATION_INDEX"
     smoke_args=(scripts/es_ingest_smoke.py --api-url "$API_URL" --es-endpoint "$ES_ENDPOINT" --index "$VALIDATION_SMOKE_INDEX" --video-id "runtime-validation-$RUN_ID" --insecure)
-    run_stack_command python_cmd "${smoke_args[@]}"
-    log_stack "PASS: ES runtime stack validation succeeded"
+    run_python_stack_command "${smoke_args[@]}"
+    validate_managed_statuses
+    publish_status "PASS: ES runtime stack validation succeeded"
     exit 0
   fi
 fi # validation
 
-log_stack "PASS: ES recorded-video runtime stack is ready"
+validate_managed_statuses
+publish_status "PASS: ES recorded-video runtime stack is ready"
 log_stack "api=$API_URL es=$ES_ENDPOINT ui=$UI_URL index=$INDEX data_root=$DATA_ROOT"
 wait_runtime_processes

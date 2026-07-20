@@ -155,8 +155,21 @@ function Start-LoggedProcess {
     $startInfo.RedirectStandardError = $true
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
-    if (-not $process.Start()) { throw "Failed to start $Component" }
+    $logPump = $null
     try {
+        if (-not $process.Start()) { throw "Failed to start $Component" }
+        $launchStartTicks = $process.StartTime.ToUniversalTime().Ticks
+        $launchTicks = $launchStartTicks - ($launchStartTicks % 10)
+        $process | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{
+            ProcessId = $process.Id
+            StartTicks = $launchStartTicks
+            CreationKey = $launchTicks.ToString([Globalization.CultureInfo]::InvariantCulture)
+            CreationTicks = $launchTicks
+        })
+        $process | Add-Member -NotePropertyName VsaProcessTracker -NotePropertyValue ([pscustomobject]@{
+            Component = $Component
+            OwnedByPid = @{}
+        })
         $logPump = [VsaRuntimeLogPump]::new(
             $process.StandardOutput,
             $process.StandardError,
@@ -165,15 +178,26 @@ function Start-LoggedProcess {
             "[$Component]"
         )
         $process | Add-Member -NotePropertyName VsaLogPump -NotePropertyValue $logPump
+        if ($Record) {
+            Add-ManagedProcess -Component $Component -ProcessId $process.Id -SafeCommand $SafeCommand
+        }
+        return $process
     } catch {
-        if (-not $process.HasExited) { $process.Kill() }
-        $process.Dispose()
+        try {
+            if (-not $process.HasExited) {
+                $process.Kill()
+                $process.WaitForExit()
+            }
+        } catch { }
+        try {
+            if ($null -ne $logPump) { $logPump.Complete(5000) }
+        } catch { }
+        try {
+            if ($null -ne $logPump) { $logPump.Dispose() }
+        } catch { }
+        try { $process.Dispose() } catch { }
         throw
     }
-    if ($Record) {
-        Add-ManagedProcess -Component $Component -ProcessId $process.Id -SafeCommand $SafeCommand
-    }
-    return $process
 }
 
 function Invoke-StackCommand {
@@ -185,7 +209,12 @@ function Invoke-StackCommand {
 }
 
 function Assert-CurrentUserProcess {
-    param([int]$ProcessId, [object]$ExpectedCreationDate = $null)
+    param(
+        [int]$ProcessId,
+        [object]$ExpectedCreationDate = $null,
+        [object]$ExpectedExecutablePath = $null,
+        [object]$ExpectedCommandLine = $null
+    )
     $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
     if ($null -eq $processInfo) {
         throw "FOREIGN_LISTENER: refusing to terminate PID $ProcessId because process lookup failed"
@@ -211,6 +240,12 @@ function Assert-CurrentUserProcess {
     if ($null -ne $ExpectedCreationDate -and $processInfo.CreationDate -ne $ExpectedCreationDate) {
         throw "PID_REUSED: refusing to terminate PID $ProcessId because its identity changed"
     }
+    if (
+        ($PSBoundParameters.ContainsKey('ExpectedExecutablePath') -and $processInfo.ExecutablePath -ne $ExpectedExecutablePath) -or
+        ($PSBoundParameters.ContainsKey('ExpectedCommandLine') -and $processInfo.CommandLine -ne $ExpectedCommandLine)
+    ) {
+        throw "PID_REUSED: refusing to terminate PID $ProcessId because its identity changed"
+    }
     return $processInfo
 }
 
@@ -228,17 +263,192 @@ function Reclaim-Port {
     $owners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
     foreach ($ownerPid in $owners) {
         $ownedProcess = Assert-CurrentUserProcess -ProcessId $ownerPid
-        Write-Stack "reclaiming port $Port from current-user PID $ownerPid"
-        Assert-CurrentUserProcess -ProcessId $ownerPid -ExpectedCreationDate $ownedProcess.CreationDate | Out-Null
-        & taskkill.exe /PID $ownerPid /T /F | Out-Null
+        $process = $null
+        try {
+            $process = Get-Process -Id $ownerPid -ErrorAction Stop
+            $process.Refresh()
+            if ($process.HasExited) {
+                throw "PID_REUSED: refusing to terminate PID $ownerPid because its process handle exited"
+            }
+            $startTicks = $process.StartTime.ToUniversalTime().Ticks
+            Assert-CurrentUserProcess -ProcessId $ownerPid `
+                -ExpectedCreationDate $ownedProcess.CreationDate `
+                -ExpectedExecutablePath $ownedProcess.ExecutablePath `
+                -ExpectedCommandLine $ownedProcess.CommandLine | Out-Null
+            $process.Refresh()
+            if ($process.HasExited -or $process.StartTime.ToUniversalTime().Ticks -ne $startTicks) {
+                throw "PID_REUSED: refusing to terminate PID $ownerPid because its process handle identity changed"
+            }
+            Write-Stack "reclaiming port $Port from current-user PID $ownerPid"
+            $process.Kill()
+            $process.WaitForExit()
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+        }
     }
     Wait-PortFree -Port $Port -TimeoutSec $TimeoutSec
+}
+
+function ConvertTo-TrackedProcessIdentity {
+    param([object]$ProcessInfo, [int]$Depth)
+    if ($null -eq $ProcessInfo -or $null -eq $ProcessInfo.CreationDate) { return $null }
+    try {
+        $creationTicks = ([datetime]$ProcessInfo.CreationDate).ToUniversalTime().Ticks
+    } catch {
+        return $null
+    }
+    $executablePath = [string]$ProcessInfo.ExecutablePath
+    $commandLine = [string]$ProcessInfo.CommandLine
+    if (
+        [string]::IsNullOrWhiteSpace($executablePath) -or
+        [string]::IsNullOrWhiteSpace($commandLine)
+    ) {
+        return $null
+    }
+    $creationTicks -= $creationTicks % 10
+    return [pscustomobject]@{
+        ProcessId = [int]$ProcessInfo.ProcessId
+        ParentProcessId = [int]$ProcessInfo.ParentProcessId
+        CreationKey = $creationTicks.ToString([Globalization.CultureInfo]::InvariantCulture)
+        CreationTicks = $creationTicks
+        ExecutablePath = $executablePath
+        CommandLine = $commandLine
+        Depth = $Depth
+    }
+}
+
+function Test-TrackedProcessIdentity {
+    param([object]$Expected, [object]$Current)
+    if ($null -eq $Expected -or $null -eq $Current) { return $false }
+    $currentIdentity = ConvertTo-TrackedProcessIdentity -ProcessInfo $Current -Depth ([int]$Expected.Depth)
+    if ($null -eq $currentIdentity) { return $false }
+    return (
+        [int]$Expected.ProcessId -eq [int]$currentIdentity.ProcessId -and
+        [int]$Expected.ParentProcessId -eq [int]$currentIdentity.ParentProcessId -and
+        [string]$Expected.CreationKey -ceq [string]$currentIdentity.CreationKey -and
+        [string]$Expected.ExecutablePath -ceq [string]$currentIdentity.ExecutablePath -and
+        [string]$Expected.CommandLine -ceq [string]$currentIdentity.CommandLine
+    )
+}
+
+function Update-ProcessTracker {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [AllowEmptyCollection()][object[]]$Snapshot
+    )
+    if ($null -eq $Process) { return }
+    $trackerProperty = $Process.PSObject.Properties["VsaProcessTracker"]
+    if ($null -eq $trackerProperty -or $null -eq $trackerProperty.Value) { return }
+    $launchProperty = $Process.PSObject.Properties["VsaLaunchIdentity"]
+    if ($null -eq $launchProperty -or $null -eq $launchProperty.Value) {
+        throw "Process tracker root launch identity is unavailable"
+    }
+
+    $tracker = $trackerProperty.Value
+    $ownedByPid = $tracker.OwnedByPid
+    $snapshot = if ($PSBoundParameters.ContainsKey("Snapshot")) {
+        @($Snapshot)
+    } else {
+        @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    }
+    if ($snapshot.Count -eq 0) {
+        throw "Process tracker snapshot is empty"
+    }
+    $snapshotByPid = @{}
+    foreach ($processInfo in $snapshot) {
+        if ($null -ne $processInfo) {
+            $snapshotByPid["$([int]$processInfo.ProcessId)"] = $processInfo
+        }
+    }
+
+    if ($ownedByPid.Count -eq 0) {
+        $rootInfo = $snapshotByPid["$($Process.Id)"]
+        $rootIdentity = ConvertTo-TrackedProcessIdentity -ProcessInfo $rootInfo -Depth 0
+        $launchIdentity = $launchProperty.Value
+        if (
+            $null -eq $rootIdentity -or
+            [int]$launchIdentity.ProcessId -ne [int]$rootIdentity.ProcessId -or
+            $null -eq $launchIdentity.StartTicks
+        ) {
+            throw "Process tracker root identity could not be verified"
+        }
+        try {
+            $null = $Process.Handle
+            $Process.Refresh()
+            if ($Process.HasExited) { throw "root exited" }
+            $rootStartTicks = $Process.StartTime.ToUniversalTime().Ticks
+        } catch {
+            throw "Process tracker root identity could not be verified"
+        }
+        $normalizedRootTicks = $rootStartTicks - ($rootStartTicks % 10)
+        if (
+            [long]$launchIdentity.StartTicks -ne [long]$rootStartTicks -or
+            [long]$rootIdentity.CreationTicks -ne [long]$normalizedRootTicks
+        ) {
+            throw "Process tracker root identity could not be verified"
+        }
+        $rootIdentity | Add-Member -NotePropertyName StartTicks -NotePropertyValue ([long]$rootStartTicks)
+        $rootIdentity | Add-Member -NotePropertyName BoundProcess -NotePropertyValue $Process
+        $ownedByPid["$($Process.Id)"] = $rootIdentity
+    }
+
+    $added = $true
+    while ($added) {
+        $added = $false
+        foreach ($candidate in $snapshot) {
+            if ($null -eq $candidate) { continue }
+            $candidatePid = [int]$candidate.ProcessId
+            if ($ownedByPid.ContainsKey("$candidatePid")) { continue }
+            $parent = $ownedByPid["$([int]$candidate.ParentProcessId)"]
+            if ($null -eq $parent) { continue }
+            $currentParent = $snapshotByPid["$([int]$candidate.ParentProcessId)"]
+            if (-not (Test-TrackedProcessIdentity -Expected $parent -Current $currentParent)) { continue }
+            $candidateIdentity = ConvertTo-TrackedProcessIdentity -ProcessInfo $candidate -Depth ([int]$parent.Depth + 1)
+            if (
+                $null -eq $candidateIdentity -or
+                [long]$candidateIdentity.CreationTicks -lt [long]$parent.CreationTicks
+            ) {
+                continue
+            }
+
+            $boundCandidate = $null
+            $accepted = $false
+            try {
+                $boundCandidate = Get-Process -Id $candidatePid -ErrorAction Stop
+                $null = $boundCandidate.Handle
+                $candidateStartTicks = $boundCandidate.StartTime.ToUniversalTime().Ticks
+                if (($candidateStartTicks - ($candidateStartTicks % 10)) -ne [long]$candidateIdentity.CreationTicks) {
+                    continue
+                }
+                $currentCandidate = Get-CimInstance Win32_Process -Filter "ProcessId=$candidatePid" -ErrorAction SilentlyContinue
+                if (-not (Test-TrackedProcessIdentity -Expected $candidateIdentity -Current $currentCandidate)) {
+                    continue
+                }
+                $boundCandidate.Refresh()
+                if ($boundCandidate.HasExited) { continue }
+                $candidateIdentity | Add-Member -NotePropertyName StartTicks -NotePropertyValue ([long]$candidateStartTicks)
+                $candidateIdentity | Add-Member -NotePropertyName BoundProcess -NotePropertyValue $boundCandidate
+                $ownedByPid["$candidatePid"] = $candidateIdentity
+                $accepted = $true
+                $added = $true
+                $createdAt = ([datetime]$candidate.CreationDate).ToUniversalTime().ToString("o")
+                Write-Stack "process tracker registered component=$($tracker.Component) pid=$candidatePid parent_pid=$([int]$candidate.ParentProcessId) creation=$createdAt"
+            } catch {
+                continue
+            } finally {
+                if (-not $accepted -and $null -ne $boundCandidate) {
+                    try { $boundCandidate.Dispose() } catch { }
+                }
+            }
+        }
+    }
 }
 
 function Wait-HttpHealth {
     param([string]$Url, [int]$TimeoutSec, [System.Diagnostics.Process]$Process)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {
+        Update-ProcessTracker -Process $Process
         if ($Process.HasExited) { throw "FastAPI process exited before health check succeeded. ExitCode=$($Process.ExitCode)" }
         try {
             $response = Invoke-RestMethod -Uri $Url -TimeoutSec 5
@@ -252,6 +462,7 @@ function Wait-WorkerReady {
     param([string]$LogPath, [int]$TimeoutSec, [System.Diagnostics.Process]$Process)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {
+        Update-ProcessTracker -Process $Process
         if ($Process.HasExited) { throw "Recorded-video Worker exited before readiness. ExitCode=$($Process.ExitCode)" }
         foreach ($line in @(Get-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue)) {
             try { $payload = $line | ConvertFrom-Json } catch { continue }
@@ -266,6 +477,7 @@ function Wait-UiReady {
     param([string]$Url, [int]$TimeoutSec, [System.Diagnostics.Process]$Process)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {
+        Update-ProcessTracker -Process $Process
         if ($Process.HasExited) { throw "Original UI process exited before readiness. ExitCode=$($Process.ExitCode)" }
         try {
             $response = Invoke-WebRequest -Uri $Url -TimeoutSec 5 -UseBasicParsing
@@ -348,14 +560,213 @@ function Stop-OwnedProcessTree {
     $exitStatus = "shutdown-failed"
     $terminationError = $null
     $finalizationErrors = [System.Collections.Generic.List[string]]::new()
+    $trackerProperty = $Process.PSObject.Properties["VsaProcessTracker"]
+    $ownedByPid = if ($null -ne $trackerProperty -and $null -ne $trackerProperty.Value) {
+        $trackerProperty.Value.OwnedByPid
+    } else {
+        @{}
+    }
+    $launchIdentity = $null
+    $launchIdentityProperty = $Process.PSObject.Properties["VsaLaunchIdentity"]
+    if ($null -ne $launchIdentityProperty) {
+        $launchIdentity = $launchIdentityProperty.Value
+    } else {
+        try {
+            $launchStartTicks = $Process.StartTime.ToUniversalTime().Ticks
+            $launchTicks = $launchStartTicks - ($launchStartTicks % 10)
+            $launchIdentity = [pscustomobject]@{
+                ProcessId = $Process.Id
+                StartTicks = $launchStartTicks
+                CreationKey = $launchTicks.ToString([Globalization.CultureInfo]::InvariantCulture)
+                CreationTicks = $launchTicks
+            }
+        } catch {
+            $launchIdentity = $null
+        }
+    }
+    $registerOwnedLineage = {
+        param([object[]]$Snapshot)
+        $snapshotByPid = @{}
+        foreach ($processInfo in @($Snapshot)) {
+            if ($null -eq $processInfo) { continue }
+            $snapshotByPid["$([int]$processInfo.ProcessId)"] = $processInfo
+        }
+        if ($ownedByPid.Count -eq 0) {
+            $rootInfo = $snapshotByPid["$($Process.Id)"]
+            if ($null -ne $rootInfo) {
+                $rootIdentity = ConvertTo-TrackedProcessIdentity -ProcessInfo $rootInfo -Depth 0
+                if (
+                    $null -eq $launchIdentity -or
+                    $null -eq $rootIdentity -or
+                    [int]$launchIdentity.ProcessId -ne [int]$rootIdentity.ProcessId
+                ) {
+                    throw "Root process identity for $Component could not be verified"
+                }
+                if ($null -eq $launchIdentity.StartTicks) {
+                    throw "Root .NET launch identity for $Component could not be verified"
+                }
+                try {
+                    $null = $Process.Handle
+                    $Process.Refresh()
+                    if ($Process.HasExited) {
+                        throw "Root process identity for $Component could not be verified"
+                    }
+                    $boundRootStartTicks = $Process.StartTime.ToUniversalTime().Ticks
+                } catch {
+                    throw "Root process identity for $Component could not be verified"
+                }
+                if ([long]$launchIdentity.StartTicks -ne [long]$boundRootStartTicks) {
+                    throw "Root process identity for $Component could not be verified"
+                }
+                $launchKey = [string]$launchIdentity.CreationKey
+                if ([string]::IsNullOrWhiteSpace($launchKey)) {
+                    $launchTicks = [long]$launchIdentity.StartTicks
+                    $launchKey = ($launchTicks - ($launchTicks % 10)).ToString(
+                        [Globalization.CultureInfo]::InvariantCulture
+                    )
+                }
+                if ($launchKey -cne [string]$rootIdentity.CreationKey) {
+                    throw "Root process identity for $Component could not be verified"
+                }
+                $rootIdentity | Add-Member -NotePropertyName StartTicks -NotePropertyValue ([long]$boundRootStartTicks)
+                $rootIdentity | Add-Member -NotePropertyName BoundProcess -NotePropertyValue $Process
+                $ownedByPid["$($Process.Id)"] = $rootIdentity
+            }
+        }
+        $added = $true
+        while ($added) {
+            $added = $false
+            foreach ($candidate in @($Snapshot)) {
+                if ($null -eq $candidate) { continue }
+                $candidatePid = [int]$candidate.ProcessId
+                $candidateKey = "$candidatePid"
+                if ($ownedByPid.ContainsKey($candidateKey)) { continue }
+                $parentPid = [int]$candidate.ParentProcessId
+                $parent = $ownedByPid["$parentPid"]
+                if ($null -eq $parent) { continue }
+                $currentParent = $snapshotByPid["$parentPid"]
+                if ($null -eq $currentParent -or -not (Test-TrackedProcessIdentity -Expected $parent -Current $currentParent)) {
+                    continue
+                }
+                $candidateIdentity = ConvertTo-TrackedProcessIdentity -ProcessInfo $candidate -Depth ([int]$parent.Depth + 1)
+                if ($null -eq $candidateIdentity) { continue }
+                if ([long]$candidateIdentity.CreationTicks -lt [long]$parent.CreationTicks) {
+                    continue
+                }
+                $boundCandidate = $null
+                $accepted = $false
+                try {
+                    $boundCandidate = Get-Process -Id $candidatePid -ErrorAction Stop
+                    $null = $boundCandidate.Handle
+                    $candidateStartTicks = $boundCandidate.StartTime.ToUniversalTime().Ticks
+                    if (($candidateStartTicks - ($candidateStartTicks % 10)) -ne [long]$candidateIdentity.CreationTicks) {
+                        continue
+                    }
+                    $currentCandidate = Get-CimInstance Win32_Process -Filter "ProcessId=$candidatePid" -ErrorAction SilentlyContinue
+                    if (-not (Test-TrackedProcessIdentity -Expected $candidateIdentity -Current $currentCandidate)) {
+                        continue
+                    }
+                    $boundCandidate.Refresh()
+                    if ($boundCandidate.HasExited) {
+                        continue
+                    }
+                    $candidateIdentity | Add-Member -NotePropertyName StartTicks -NotePropertyValue ([long]$candidateStartTicks)
+                    $candidateIdentity | Add-Member -NotePropertyName BoundProcess -NotePropertyValue $boundCandidate
+                    $ownedByPid[$candidateKey] = $candidateIdentity
+                    $accepted = $true
+                    $added = $true
+                } catch {
+                    continue
+                } finally {
+                    if (-not $accepted -and $null -ne $boundCandidate) {
+                        try { $boundCandidate.Dispose() } catch { }
+                    }
+                }
+            }
+        }
+    }
+    $stopExactOwnedProcess = {
+        param([object]$Expected)
+        $candidatePid = [int]$Expected.ProcessId
+        $boundProcessProperty = $Expected.PSObject.Properties["BoundProcess"]
+        if ($null -eq $boundProcessProperty -or $null -eq $boundProcessProperty.Value) { return $false }
+        $boundProcess = $boundProcessProperty.Value
+        try {
+            $null = $boundProcess.Handle
+            $boundTicks = $boundProcess.StartTime.ToUniversalTime().Ticks
+            if ($null -eq $Expected.StartTicks -or [long]$Expected.StartTicks -ne [long]$boundTicks) { return $false }
+            $current = Get-CimInstance Win32_Process -Filter "ProcessId=$candidatePid" -ErrorAction SilentlyContinue
+            if (-not (Test-TrackedProcessIdentity -Expected $Expected -Current $current)) { return $false }
+            $boundProcess.Refresh()
+            if (-not $boundProcess.HasExited) { $boundProcess.Kill() }
+            return $true
+        } catch {
+            return $false
+        }
+    }
+    $disposeOwnedHandles = {
+        foreach ($expected in @($ownedByPid.Values)) {
+            if ([int]$expected.Depth -eq 0) { continue }
+            $boundProperty = $expected.PSObject.Properties["BoundProcess"]
+            if ($null -eq $boundProperty -or $null -eq $boundProperty.Value) { continue }
+            try { $boundProperty.Value.Dispose() } catch { $finalizationErrors.Add($_.Exception.Message) }
+        }
+    }
+    $stopRemainingOwnedDescendants = {
+        if ($ownedByPid.Count -eq 0) { return }
+        $forceWatch = [Diagnostics.Stopwatch]::StartNew()
+        while ($true) {
+            $snapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+            & $registerOwnedLineage $snapshot
+            $active = [System.Collections.Generic.List[object]]::new()
+            foreach ($processInfo in $snapshot) {
+                $candidatePid = [int]$processInfo.ProcessId
+                $expected = $ownedByPid["$candidatePid"]
+                if (
+                    $null -ne $expected -and
+                    [int]$expected.Depth -gt 0 -and
+                    (Test-TrackedProcessIdentity -Expected $expected -Current $processInfo)
+                ) {
+                    $active.Add($expected) | Out-Null
+                }
+            }
+            if ($active.Count -eq 0) { return }
+            $ordered = @($active | Sort-Object -Property @{ Expression = { [int]$_.Depth }; Descending = $true }, @{ Expression = { [int]$_.ProcessId }; Descending = $true })
+            foreach ($expected in $ordered) {
+                & $stopExactOwnedProcess $expected | Out-Null
+            }
+            if ($forceWatch.ElapsedMilliseconds -ge [Math]::Max(0, $ForceTimeoutMs)) { break }
+            $remainingBudget = [Math]::Max(0, $ForceTimeoutMs - $forceWatch.ElapsedMilliseconds)
+            if ($remainingBudget -gt 0) {
+                Start-Sleep -Milliseconds ([Math]::Min(200, $remainingBudget))
+            }
+        }
+        $remainingSnapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        & $registerOwnedLineage $remainingSnapshot
+        $remaining = @($remainingSnapshot | Where-Object {
+            $expected = $ownedByPid["$([int]$_.ProcessId)"]
+            $null -ne $expected -and [int]$expected.Depth -gt 0 -and (Test-TrackedProcessIdentity -Expected $expected -Current $_)
+        })
+        if ($remaining.Count -gt 0) {
+            $remainingPids = @($remaining | ForEach-Object { [int]$_.ProcessId }) -join ","
+            throw "Owned descendants for $Component did not exit within $ForceTimeoutMs ms: $remainingPids"
+        }
+    }
+    try {
+        $initialSnapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        & $registerOwnedLineage $initialSnapshot
+    } catch {
+        $finalizationErrors.Add("process lineage snapshot failed: $($_.Exception.Message)")
+    }
     try {
         $Process.Refresh()
         if (-not $Process.HasExited) {
-            & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T >nul 2>nul"
-            if (-not $Process.WaitForExit($GraceTimeoutMs)) {
+            $closedMainWindow = $false
+            try { $closedMainWindow = $Process.CloseMainWindow() } catch { $closedMainWindow = $false }
+            if (-not $closedMainWindow -or -not $Process.WaitForExit($GraceTimeoutMs)) {
                 $Process.Refresh()
                 if (-not $Process.HasExited) {
-                    & cmd.exe /d /s /c "taskkill.exe /PID $($Process.Id) /T /F >nul 2>nul"
+                    try { $Process.Kill() } catch { }
                 }
                 if (-not $Process.WaitForExit($ForceTimeoutMs)) {
                     $exitStatus = "shutdown-timeout"
@@ -367,6 +778,8 @@ function Stop-OwnedProcessTree {
     } catch {
         $terminationError = $_.Exception
     } finally {
+        try { & $stopRemainingOwnedDescendants } catch { $finalizationErrors.Add($_.Exception.Message) }
+        try { & $disposeOwnedHandles } catch { $finalizationErrors.Add($_.Exception.Message) }
         if ($null -ne $Process.VsaLogPump) {
             try { $Process.VsaLogPump.Complete($LogDrainTimeoutMs) } catch { $finalizationErrors.Add($_.Exception.Message) }
         }
@@ -419,9 +832,11 @@ function DeleteValidationResources {
 function Wait-RuntimeProcesses {
     param([hashtable]$Processes, [int]$PollMilliseconds = 250)
     while ($true) {
+        $snapshot = @(Get-CimInstance Win32_Process -ErrorAction Stop)
         foreach ($component in $Processes.Keys) {
             $managed = $Processes[$component]
             if ($null -eq $managed) { continue }
+            Update-ProcessTracker -Process $managed -Snapshot $snapshot
             $managed.Refresh()
             if ($managed.HasExited) {
                 Set-ProcessExit -Component $component -ExitStatus $managed.ExitCode

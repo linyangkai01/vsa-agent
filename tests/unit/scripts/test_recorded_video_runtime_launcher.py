@@ -20,6 +20,7 @@ POWERSHELL_SCRIPT = Path("scripts/es-runtime-stack.ps1")
 POWERSHELL_LOG_PUMP = Path("scripts/lib/RuntimeLogPump.cs")
 BASH_RUNTIME_READINESS_TIMEOUT_SEC = 90
 BASH_SMOKE_COMPLETION_BOUNDARY_TIMEOUT_SEC = 180
+RUNTIME_TREE_OBSERVATION_INTERVAL_SEC = 2.0
 
 
 def _bash() -> str:
@@ -86,17 +87,400 @@ def _powershell_function(name: str) -> str:
     return completed.stdout
 
 
+def _powershell_shutdown_functions() -> str:
+    return "\n\n".join(
+        _powershell_function(name)
+        for name in (
+            "ConvertTo-TrackedProcessIdentity",
+            "Test-TrackedProcessIdentity",
+            "Update-ProcessTracker",
+            "Stop-OwnedProcessTree",
+        )
+    )
+
+
+def _create_windows_kill_on_close_job() -> tuple[object, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class _BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimitInformation),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    job_handle = kernel32.CreateJobObjectW(None, None)
+    if not job_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    limits = _ExtendedLimitInformation()
+    limits.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(job_handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+        primary_error = ctypes.WinError(ctypes.get_last_error())
+        if not kernel32.CloseHandle(job_handle):
+            primary_error.add_note(f"CloseHandle failed: {ctypes.WinError(ctypes.get_last_error())!r}")
+        raise primary_error
+    return kernel32, int(job_handle)
+
+
+def _run_job_owned_command(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    if os.name != "nt":
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    import ctypes
+
+    shim = (
+        "import subprocess,sys\n"
+        "if sys.stdin.buffer.read(1) != b'1': raise SystemExit(125)\n"
+        "raise SystemExit(subprocess.call(sys.argv[1:], creationflags=0x200))\n"
+    )
+    shim_command = [sys.executable, "-S", "-c", shim, *command]
+    job_api, job_handle = _create_windows_kill_on_close_job()
+    process: subprocess.Popen[str] | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    primary_error: BaseException | None = None
+    cleanup_errors: list[str] = []
+
+    def remember_timeout_output(error: subprocess.TimeoutExpired) -> None:
+        nonlocal stdout, stderr
+        if error.output is not None:
+            stdout = error.output
+        if error.stderr is not None:
+            stderr = error.stderr
+
+    try:
+        process = subprocess.Popen(
+            shim_command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            text=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        if not job_api.AssignProcessToJobObject(job_handle, int(process._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assert process.stdin is not None
+        process.stdin.write("1")
+        process.stdin.flush()
+        process.stdin.close()
+        process.stdin = None
+
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired as error:
+                remember_timeout_output(error)
+            else:
+                break
+    except BaseException as error:
+        primary_error = error
+    finally:
+
+        def cleanup_stage(name: str, action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                cleanup_errors.append(f"{name}: {error!r}")
+
+        def close_gate() -> None:
+            if process is None or process.stdin is None:
+                return
+            stream = process.stdin
+            process.stdin = None
+            stream.close()
+
+        def windows_call_error(operation: str) -> RuntimeError:
+            return RuntimeError(f"{operation} failed: {ctypes.WinError(ctypes.get_last_error())!r}")
+
+        def close_job() -> None:
+            nonlocal job_handle
+            if job_handle is None:
+                return
+            if not job_api.CloseHandle(job_handle):
+                raise windows_call_error("CloseHandle")
+            job_handle = None
+
+        def terminate_job_fallback() -> None:
+            nonlocal job_handle
+            if job_handle is None:
+                return
+            handle = job_handle
+            job_handle = None
+            errors: list[Exception] = []
+            try:
+                if not job_api.TerminateJobObject(handle, 1):
+                    errors.append(windows_call_error("TerminateJobObject"))
+            finally:
+                if not job_api.CloseHandle(handle):
+                    errors.append(windows_call_error("CloseHandle"))
+            if len(errors) == 1:
+                raise errors[0]
+            if errors:
+                raise ExceptionGroup("Windows Job termination and handle close failed", errors)
+
+        def kill_root_fallback() -> None:
+            if process is not None and process.poll() is None:
+                process.kill()
+
+        def drain_pipes() -> None:
+            nonlocal stdout, stderr
+            if process is None:
+                return
+            try:
+                final_stdout, final_stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as error:
+                remember_timeout_output(error)
+                raise
+            else:
+                stdout = final_stdout if final_stdout is not None else stdout
+                stderr = final_stderr if final_stderr is not None else stderr
+
+        cleanup_stage("release-gate close", close_gate)
+        cleanup_stage("kill-on-close job release", close_job)
+        cleanup_stage("explicit job termination fallback", terminate_job_fallback)
+        cleanup_stage("root process-handle fallback", kill_root_fallback)
+        cleanup_stage("stdout/stderr drain", drain_pipes)
+
+    if isinstance(primary_error, subprocess.TimeoutExpired):
+        primary_error.cmd = command
+        primary_error.output = stdout
+        primary_error.stderr = stderr
+    if primary_error is not None:
+        if cleanup_errors:
+            primary_error.add_note("Bash probe cleanup failed: " + "; ".join(cleanup_errors))
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_errors:
+        raise AssertionError("Bash probe cleanup failed: " + "; ".join(cleanup_errors))
+    assert process is not None
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _run_runtime_command(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    if os.name != "nt":
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    shim = (
+        "import subprocess,sys\n"
+        "if sys.stdin.buffer.read(1) != b'1': raise SystemExit(125)\n"
+        "raise SystemExit(subprocess.call(sys.argv[1:], creationflags=0x200))\n"
+    )
+    shim_command = [sys.executable, "-S", "-c", shim, *command]
+    process: subprocess.Popen[str] | None = None
+    registry: dict[str, dict[str, object]] = {}
+    stdout: str | None = None
+    stderr: str | None = None
+    primary_error: BaseException | None = None
+    cleanup_errors: list[str] = []
+    next_observation = 0.0
+
+    def remember_timeout_output(error: subprocess.TimeoutExpired) -> None:
+        nonlocal stdout, stderr
+        if error.output is not None:
+            stdout = error.output
+        if error.stderr is not None:
+            stderr = error.stderr
+
+    def observe_owned_tree(*, force: bool = False) -> list[dict[str, object]] | None:
+        nonlocal next_observation
+        assert process is not None
+        now = time.monotonic()
+        if not force and now < next_observation:
+            return None
+        snapshot = _powershell_process_snapshot()
+        if not registry:
+            root = next((item for item in snapshot if int(item["pid"]) == process.pid), None)
+            if root is not None:
+                _register_powershell_root_identity(registry, root)
+            elif process.poll() is None:
+                raise AssertionError(f"Could not capture runtime shim identity for PID {process.pid}")
+        _record_owned_powershell_descendants(registry, snapshot)
+        next_observation = time.monotonic() + RUNTIME_TREE_OBSERVATION_INTERVAL_SEC
+        return snapshot
+
+    try:
+        process = subprocess.Popen(
+            shim_command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            text=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        observe_owned_tree(force=True)
+        assert process.stdin is not None
+        process.stdin.write("1")
+        process.stdin.flush()
+        process.stdin.close()
+        process.stdin = None
+        observe_owned_tree(force=True)
+
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            observe_owned_tree()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired as error:
+                remember_timeout_output(error)
+            else:
+                break
+    except BaseException as error:
+        primary_error = error
+    finally:
+
+        def cleanup_stage(name: str, action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                cleanup_errors.append(f"{name}: {error!r}")
+
+        def close_gate() -> None:
+            if process is None or process.stdin is None:
+                return
+            stream = process.stdin
+            process.stdin = None
+            stream.close()
+
+        def terminate_registered_tree() -> None:
+            snapshot = observe_owned_tree(force=True)
+            assert snapshot is not None
+            if _current_registered_powershell_processes(registry, snapshot):
+                _terminate_exact_powershell_processes(list(registry.values()))
+
+        def kill_root_fallback() -> None:
+            if process is not None and process.poll() is None:
+                process.kill()
+
+        def drain_pipes() -> None:
+            nonlocal stdout, stderr
+            if process is None:
+                return
+            try:
+                final_stdout, final_stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as error:
+                remember_timeout_output(error)
+                raise
+            else:
+                stdout = final_stdout if final_stdout is not None else stdout
+                stderr = final_stderr if final_stderr is not None else stderr
+
+        def verify_cleanup() -> None:
+            snapshot = _powershell_process_snapshot()
+            _record_owned_powershell_descendants(registry, snapshot)
+            remaining = _current_registered_powershell_processes(registry, snapshot)
+            if remaining:
+                raise AssertionError(f"Runtime runner left owned processes: {remaining}")
+
+        cleanup_stage("release-gate close", close_gate)
+        cleanup_stage("exact registered-tree termination", terminate_registered_tree)
+        cleanup_stage("root process-handle fallback", kill_root_fallback)
+        cleanup_stage("stdout/stderr drain", drain_pipes)
+        cleanup_stage("final residual verification", verify_cleanup)
+
+    if isinstance(primary_error, subprocess.TimeoutExpired):
+        primary_error.cmd = command
+        primary_error.output = stdout
+        primary_error.stderr = stderr
+    if primary_error is not None:
+        if cleanup_errors:
+            primary_error.add_note("Runtime runner cleanup failed: " + "; ".join(cleanup_errors))
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_errors:
+        raise AssertionError("Runtime runner cleanup failed: " + "; ".join(cleanup_errors))
+    assert process is not None
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _real_bash_path(bash: str) -> str:
+    bash_path = Path(bash).resolve()
+    real_bash = bash_path.parent.parent / "usr" / "bin" / "bash.exe"
+    if os.name == "nt" and bash_path.parent.name.casefold() == "bin" and real_bash.exists():
+        return str(real_bash)
+    return str(bash_path)
+
+
 def _run_bash_probe(body: str, *, timeout: float = 5) -> subprocess.CompletedProcess[str]:
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is unavailable")
-    return subprocess.run(
-        [bash, "-c", body],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    return _run_job_owned_command([_real_bash_path(bash), "-c", body], timeout=timeout)
 
 
 def _bash_launcher_creationflags() -> int:
@@ -108,12 +492,49 @@ def test_bash_runtime_helper_uses_shared_readiness_timeout():
     tree = ast.parse(source)
     helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_run_bash_runtime")
     run_call = next(
-        node for node in ast.walk(helper) if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"
+        node
+        for node in ast.walk(helper)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "_run_runtime_command"
     )
     timeout_values = [keyword.value for keyword in run_call.keywords if keyword.arg == "timeout"]
 
     assert len(timeout_values) == 1
     assert ast.unparse(timeout_values[0]) == "BASH_RUNTIME_READINESS_TIMEOUT_SEC"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="regression covers Git for Windows Bash resolution")
+def test_bash_runtime_resolves_git_wrapper_to_real_bash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    wrapper = tmp_path / "Git/bin/bash.exe"
+    real_bash = tmp_path / "Git/usr/bin/bash.exe"
+    wrapper.parent.mkdir(parents=True)
+    real_bash.parent.mkdir(parents=True)
+    wrapper.touch()
+    real_bash.touch()
+    captured: dict[str, object] = {}
+    real_which = shutil.which
+    env = {"HARNESS_ENV": "preserved"}
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(shutil, "which", lambda name: str(wrapper) if name == "bash" else real_which(name))
+    monkeypatch.setattr(sys.modules[__name__], "_run_runtime_command", fake_runner)
+
+    completed = _run_bash_runtime(tmp_path, env, "--validate")
+
+    assert completed.returncode == 0
+    assert captured["command"] == [
+        str(real_bash.resolve()),
+        (tmp_path / "scripts/es-runtime-stack.sh").as_posix(),
+        "--validate",
+    ]
+    assert captured["kwargs"] == {
+        "cwd": tmp_path,
+        "env": env,
+        "timeout": BASH_RUNTIME_READINESS_TIMEOUT_SEC,
+    }
 
 
 def test_bash_runtime_launcher_processes_use_windows_process_group_isolation():
@@ -176,16 +597,55 @@ def test_bash_cleanup_internal_status_lines_do_not_start_new_supervisors():
     assert "cleanup_log_error " in delete_validation_resources
 
 
-def test_bash_pass_publication_guards_all_registered_status_sidecars():
-    publisher = _bash_function("publish_pass")
+def test_bash_status_publication_guards_all_registered_status_sidecars():
+    publisher = _bash_function("publish_status")
     script = _bash()
 
     assert 'pid="${PROCESS_PIDS[$component]:-}"' in publisher
     assert 'status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"' in publisher
     assert 'status_guards+=(--require-running-status "$component" "$pid" "$status_file")' in publisher
-    assert 'publish_pass "PASS: ES runtime stack validation succeeded"' in script
-    assert 'publish_pass "PASS: ES recorded-video runtime stack is ready"' in script
+    assert 'publish_status "READY: isolated validation runtime' in script
+    assert 'publish_status "PASS: ES runtime stack validation succeeded"' in script
+    assert 'publish_status "PASS: ES recorded-video runtime stack is ready"' in script
+    assert 'log_stack "READY:' not in script
     assert 'log_stack "PASS:' not in script
+
+
+def test_bash_keep_running_ready_fails_closed_when_component_exits_after_preliminary_check():
+    keep_running = _conditional_block(
+        _bash(),
+        '  if [[ "$KEEP_RUNNING" == "1" ]]; then',
+        "    wait_runtime_processes",
+    )
+    publication_actions = [
+        line.strip()
+        for line in keep_running.splitlines()
+        if line.strip() == "validate_managed_statuses"
+        or line.strip().startswith(('log_stack "READY:', 'publish_status "READY:'))
+    ]
+    assert len(publication_actions) == 2
+    probe = f"""
+    set -Eeuo pipefail
+    component_state=running
+    API_URL=api
+    UI_URL=ui
+    ES_ENDPOINT=es
+    VALIDATION_INDEX=index
+    validate_managed_statuses() {{ [[ "$component_state" == "running" ]]; }}
+    log_stack() {{ component_state=exited; printf '%s\n' "$*"; }}
+    publish_status() {{
+      component_state=exited
+      [[ "$component_state" == "running" ]] || return 17
+      printf '%s\n' "$*"
+    }}
+    {chr(10).join(publication_actions)}
+    """
+
+    completed = _run_bash_probe(probe)
+
+    assert completed.returncode == 17
+    assert "READY:" not in completed.stdout
+    assert "READY:" not in completed.stderr
 
 
 def test_bash_pid_running_uses_kill_probe_without_msys_ps_polling():
@@ -622,15 +1082,208 @@ def _run_bash_runtime(repo: Path, env: dict[str, str], *args: str) -> subprocess
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is unavailable")
-    return subprocess.run(
-        [bash, (repo / "scripts/es-runtime-stack.sh").as_posix(), *args],
+    return _run_runtime_command(
+        [_real_bash_path(bash), (repo / "scripts/es-runtime-stack.sh").as_posix(), *args],
         cwd=repo,
         env=env,
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=BASH_RUNTIME_READINESS_TIMEOUT_SEC,
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="regression covers Windows runtime tree cleanup")
+def test_bash_runtime_reclaims_pipe_holding_descendant_after_root_exit(tmp_path: Path):
+    repo = tmp_path / "runtime-job-root-exit"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    result = tmp_path / "runtime-job-result.json"
+    ready = tmp_path / "runtime-job-runner.ready"
+    release = tmp_path / "runtime-job-runner.release"
+    runner = tmp_path / "runtime-job-runner.py"
+    token = f"bash-runtime-job-owned-descendant-{tmp_path.name}"
+    python = shlex.quote(Path(sys.executable).as_posix())
+    child_code = (
+        'from pathlib import Path; import time; Path("runtime-child.ready").write_text("ready"); time.sleep(30)'
+    )
+    child_command = f"{python} -c {shlex.quote(child_code)} {shlex.quote(token)} &"
+    _write_executable(
+        scripts / "es-runtime-stack.sh",
+        textwrap.dedent(
+            f"""
+            #!/usr/bin/env bash
+            printf '%s' "$HARNESS_JOB_VALUE" > runtime-job-contract.txt
+            printf 'runtime-job-stdout\n'
+            printf 'runtime-job-stderr\n' >&2
+            {child_command}
+            for _ in {{1..20}}; do
+              [[ -f runtime-child.ready ]] && break
+              sleep 0.01
+            done
+            [[ -f runtime-child.ready ]] || exit 91
+            for _ in {{1..120}}; do
+              [[ -f runtime-child.observed ]] && break
+              sleep 0.05
+            done
+            [[ -f runtime-child.observed ]] || exit 92
+            exit 0
+            """
+        ).lstrip(),
+    )
+    runner.write_text(
+        textwrap.dedent(
+            """
+            import json
+            import os
+            from pathlib import Path
+            import runpy
+            import subprocess
+            import sys
+            import time
+
+            test_path, repo_path, result_path, ready_path, release_path, _token = sys.argv[1:]
+            namespace = runpy.run_path(test_path)
+            helper = namespace["_run_bash_runtime"]
+            real_snapshot = namespace["_powershell_process_snapshot"]
+            observed_path = Path(repo_path) / "runtime-child.observed"
+
+            def observing_snapshot():
+                snapshot = real_snapshot()
+                if any(
+                    _token in str(item["command_line"] or "")
+                    and "time.sleep(30)" in str(item["command_line"] or "")
+                    for item in snapshot
+                ):
+                    observed_path.write_text("observed", encoding="utf-8")
+                return snapshot
+
+            helper.__globals__["_powershell_process_snapshot"] = observing_snapshot
+            helper.__globals__["BASH_RUNTIME_READINESS_TIMEOUT_SEC"] = 8.0
+            helper.__globals__["RUNTIME_TREE_OBSERVATION_INTERVAL_SEC"] = 0.05
+            Path(ready_path).write_text("ready", encoding="utf-8")
+            while not Path(release_path).exists():
+                time.sleep(0.01)
+            env = os.environ.copy()
+            env["HARNESS_JOB_VALUE"] = "cwd-and-env-preserved"
+            try:
+                completed = helper(Path(repo_path), env)
+            except subprocess.TimeoutExpired:
+                payload = {"kind": "timeout"}
+            except BaseException as error:
+                payload = {"kind": "error", "error": repr(error)}
+            else:
+                payload = {
+                    "kind": "completed",
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                }
+            Path(result_path).write_text(json.dumps(payload), encoding="utf-8")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        str(runner),
+        str(Path(__file__).resolve()),
+        str(repo),
+        str(result),
+        str(ready),
+        str(release),
+        token,
+    ]
+    registry: dict[str, dict[str, object]] = {}
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+    def observe_owned_tree() -> list[dict[str, object]]:
+        snapshot = _powershell_process_snapshot()
+        if not registry:
+            root = next((item for item in snapshot if int(item["pid"]) == process.pid), None)
+            if root is not None:
+                _register_powershell_root_identity(registry, root)
+        _record_owned_powershell_descendants(registry, snapshot)
+        return snapshot
+
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            observe_owned_tree()
+            time.sleep(0.02)
+        assert ready.exists()
+        assert registry
+        release.touch()
+
+        deadline = time.monotonic() + 12
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        snapshot = observe_owned_tree()
+
+        assert process.poll() is not None, "_run_bash_runtime remained blocked on descendant pipe EOF"
+        payload = json.loads(result.read_text(encoding="utf-8"))
+        assert payload == {
+            "kind": "completed",
+            "returncode": 0,
+            "stdout": "runtime-job-stdout\n",
+            "stderr": "runtime-job-stderr\n",
+        }
+        assert (repo / "runtime-job-contract.txt").read_text(encoding="utf-8") == "cwd-and-env-preserved"
+        assert (repo / "runtime-child.ready").read_text(encoding="utf-8") == "ready"
+        assert (repo / "runtime-child.observed").read_text(encoding="utf-8") == "observed"
+        assert _current_registered_powershell_processes(registry, snapshot) == []
+        assert [item for item in snapshot if token in str(item["command_line"] or "")] == []
+    finally:
+        active_error = sys.exception()
+        cleanup_errors: list[str] = []
+
+        def cleanup_stage(name: str, action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                cleanup_errors.append(f"{name}: {error!r}")
+
+        def refresh_registry() -> None:
+            observe_owned_tree()
+
+        def terminate_registered_tree() -> None:
+            _terminate_exact_powershell_processes(list(registry.values()))
+
+        def terminate_token_fallback() -> None:
+            snapshot = _powershell_process_snapshot()
+            token_processes = [item for item in snapshot if token in str(item["command_line"] or "")]
+            _terminate_exact_powershell_processes(token_processes)
+
+        def kill_runner_fallback() -> None:
+            if process.poll() is None:
+                process.kill()
+
+        def verify_no_residuals() -> None:
+            snapshot = _powershell_process_snapshot()
+            _record_owned_powershell_descendants(registry, snapshot)
+            remaining = _current_registered_powershell_processes(registry, snapshot)
+            token_processes = [item for item in snapshot if token in str(item["command_line"] or "")]
+            if remaining or token_processes:
+                raise AssertionError(
+                    f"Bash runtime regression left processes: registered={remaining}, token={token_processes}"
+                )
+
+        cleanup_stage("final registry refresh", refresh_registry)
+        cleanup_stage("registered tree termination", terminate_registered_tree)
+        cleanup_stage("token fallback termination", terminate_token_fallback)
+        cleanup_stage("runner process-handle fallback", kill_runner_fallback)
+        cleanup_stage("runner wait", lambda: process.wait(timeout=5))
+        cleanup_stage("final residual verification", verify_no_residuals)
+        if cleanup_errors:
+            details = "Bash runtime regression cleanup failed: " + "; ".join(cleanup_errors)
+            if active_error is not None:
+                active_error.add_note(details)
+            else:
+                raise AssertionError(details)
 
 
 def _wait_for_bash_pids_gone(
@@ -744,7 +1397,28 @@ if os.environ.get("HARNESS_DETACHED_CHILD") == "1":
     )
     with trace.open("a", encoding="utf-8") as stream:
         stream.write(f"detached_child_pid={child.pid}\\n")
-    time.sleep(0.75)
+    registration_deadline = time.monotonic() + 10
+    while time.monotonic() < registration_deadline:
+        stack_logs = list((trace.parent / ".runtime/es-stack/runs").glob("*/stack.log"))
+        if os.environ.get("HARNESS_FORCE_TRACKER_TIMEOUT") != "1" and any(
+            f"process tracker registered component=api pid={child.pid} "
+            in stack_log.read_text(encoding="utf-8", errors="replace")
+            for stack_log in stack_logs
+        ):
+            with trace.open("a", encoding="utf-8") as stream:
+                stream.write(f"detached_child_registered_by_launcher={child.pid}\\n")
+            break
+        time.sleep(0.05)
+    else:
+        with trace.open("a", encoding="utf-8") as stream:
+            stream.write(f"detached_child_launcher_registration_timeout={child.pid}\\n")
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
+        raise SystemExit(18)
     raise SystemExit(17)
 delay = int(os.environ.get("HARNESS_API_EXIT_AFTER_MS", "0"))
 if delay:
@@ -813,15 +1487,15 @@ def _powershell_process_snapshot() -> list[dict[str, object]]:
     if powershell is None:
         pytest.skip("PowerShell is unavailable")
     probe = """
-    @(Get-CimInstance Win32_Process | ForEach-Object {
+    Get-CimInstance Win32_Process | ForEach-Object {
         [pscustomobject]@{
             pid = [int]$_.ProcessId
             parent_pid = [int]$_.ParentProcessId
             creation = $_.CreationDate.ToUniversalTime().ToString('o')
             executable_path = [string]$_.ExecutablePath
             command_line = [string]$_.CommandLine
-        }
-    }) | ConvertTo-Json -Compress
+        } | ConvertTo-Json -Compress
+    }
     """
     completed = subprocess.run(
         [powershell, "-NoProfile", "-NonInteractive", "-Command", probe],
@@ -831,8 +1505,7 @@ def _powershell_process_snapshot() -> list[dict[str, object]]:
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr
-    snapshot = json.loads(completed.stdout)
-    return snapshot if isinstance(snapshot, list) else [snapshot]
+    return [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
 
 
 def _powershell_identity_key(item: dict[str, object]) -> str:
@@ -967,7 +1640,7 @@ def _terminate_exact_powershell_processes(processes: list[dict[str, object]]) ->
         Stop-Process -Id $record.pid -Force -ErrorAction SilentlyContinue
     }
     """
-    subprocess.run(
+    completed = subprocess.run(
         [powershell, "-NoProfile", "-NonInteractive", "-Command", probe],
         input=json.dumps(deepest_first),
         check=False,
@@ -975,6 +1648,371 @@ def _terminate_exact_powershell_processes(processes: list[dict[str, object]]) ->
         text=True,
         timeout=10,
     )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_powershell_process_snapshot_parses_one_json_record_per_nonempty_line(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    records = [
+        {
+            "pid": 101,
+            "parent_pid": 1,
+            "creation": "2026-07-19T00:00:00.0000000Z",
+            "executable_path": r"C:\fake\root.exe",
+            "command_line": "root --serve",
+        },
+        {
+            "pid": 202,
+            "parent_pid": 101,
+            "creation": "2026-07-19T00:00:01.0000000Z",
+            "executable_path": r"C:\fake\bash.exe",
+            "command_line": "bash child.sh",
+        },
+    ]
+    stdout = "\n".join((json.dumps(records[0]), "", json.dumps(records[1]), ""))
+    completed = subprocess.CompletedProcess(["powershell"], 0, stdout, "")
+
+    monkeypatch.setattr(shutil, "which", lambda name: "powershell" if name == "powershell" else None)
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    assert _powershell_process_snapshot() == records
+
+
+class _FakeBashProbeStdin:
+    def write(self, _value: str) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="regression covers Windows runtime snapshot throttling")
+def test_runtime_runner_throttles_active_process_snapshots(monkeypatch: pytest.MonkeyPatch):
+    class FakeProcess:
+        pid = 901
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin: _FakeBashProbeStdin | None = _FakeBashProbeStdin()
+            self.communicate_calls = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            self.communicate_calls += 1
+            if self.communicate_calls <= 5:
+                raise subprocess.TimeoutExpired(["fake-runtime"], timeout)
+            self.returncode = 0
+            return "runtime-stdout", "runtime-stderr"
+
+        def kill(self) -> None:
+            raise AssertionError("completed fake runtime must not be killed")
+
+    process = FakeProcess()
+    root_identity = {
+        "pid": process.pid,
+        "parent_pid": 1,
+        "creation": "2026-07-19T06:00:00.0000000Z",
+        "executable_path": "C:\\fake\\python.exe",
+        "command_line": "fake-runtime-shim",
+    }
+    snapshot_calls = 0
+    clock = 0.0
+
+    def fake_snapshot() -> list[dict[str, object]]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return [root_identity] if process.returncode is None else []
+
+    def fake_monotonic() -> float:
+        nonlocal clock
+        clock += 0.1
+        return clock
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(sys.modules[__name__], "_powershell_process_snapshot", fake_snapshot)
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+    completed = _run_runtime_command(["fake-runtime"], timeout=10)
+
+    assert completed.args == ["fake-runtime"]
+    assert completed.returncode == 0
+    assert completed.stdout == "runtime-stdout"
+    assert completed.stderr == "runtime-stderr"
+    assert snapshot_calls == 4
+
+
+@pytest.mark.skipif(os.name != "nt", reason="regression covers Windows Job cleanup")
+def test_bash_probe_job_fallback_closes_handle_after_terminate_failure(monkeypatch: pytest.MonkeyPatch):
+    class FakeJobApi:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def AssignProcessToJobObject(self, job_handle: int, process_handle: int) -> bool:  # noqa: N802
+            self.calls.append(("assign", job_handle, process_handle))
+            return True
+
+        def CloseHandle(self, job_handle: int) -> bool:  # noqa: N802
+            self.calls.append(("close", job_handle))
+            return False
+
+        def TerminateJobObject(self, job_handle: int, status: int) -> bool:  # noqa: N802
+            self.calls.append(("terminate", job_handle, status))
+            return False
+
+    class FakeProcess:
+        _handle = 101
+        returncode = 0
+        stdin: _FakeBashProbeStdin | None = _FakeBashProbeStdin()
+
+        def poll(self) -> int:
+            return 0
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            return "", ""
+
+        def kill(self) -> None:
+            raise AssertionError("completed fake process must not be killed")
+
+    job_api = FakeJobApi()
+    process = FakeProcess()
+    monkeypatch.setattr(sys.modules[__name__], "_create_windows_kill_on_close_job", lambda: (job_api, 77))
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(AssertionError) as caught:
+        _run_bash_probe("exit 0")
+
+    assert job_api.calls == [
+        ("assign", 77, 101),
+        ("close", 77),
+        ("terminate", 77, 1),
+        ("close", 77),
+    ]
+    assert "TerminateJobObject failed" in str(caught.value)
+    assert "CloseHandle failed" in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="regression covers Windows timeout output")
+@pytest.mark.parametrize(
+    ("drain_stdout", "drain_stderr", "expected_stdout", "expected_stderr"),
+    [
+        pytest.param(
+            "drain-partial-stdout",
+            "drain-partial-stderr",
+            "drain-partial-stdout",
+            "drain-partial-stderr",
+            id="final-drain-overrides-polling",
+        ),
+        pytest.param(
+            None,
+            None,
+            "poll-partial-stdout",
+            "poll-partial-stderr",
+            id="polling-retained-with-empty-final-drain",
+        ),
+    ],
+)
+def test_bash_probe_timeout_preserves_latest_partial_output_when_final_drain_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    drain_stdout: str | None,
+    drain_stderr: str | None,
+    expected_stdout: str,
+    expected_stderr: str,
+):
+    class FakeJobApi:
+        def AssignProcessToJobObject(self, _job_handle: int, _process_handle: int) -> bool:  # noqa: N802
+            return True
+
+        def CloseHandle(self, _job_handle: int) -> bool:  # noqa: N802
+            return True
+
+        def TerminateJobObject(self, _job_handle: int, _status: int) -> bool:  # noqa: N802
+            raise AssertionError("successful close must not use termination fallback")
+
+    class FakeProcess:
+        _handle = 102
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin: _FakeBashProbeStdin | None = _FakeBashProbeStdin()
+            self.communicate_calls = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired(
+                    ["fake-shim"],
+                    timeout,
+                    output="poll-partial-stdout",
+                    stderr="poll-partial-stderr",
+                )
+            raise subprocess.TimeoutExpired(
+                ["fake-shim"],
+                timeout,
+                output=drain_stdout,
+                stderr=drain_stderr,
+            )
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    process = FakeProcess()
+    times = iter((0.0, 0.1, 1.0))
+    monkeypatch.setattr(sys.modules[__name__], "_create_windows_kill_on_close_job", lambda: (FakeJobApi(), 78))
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(time, "monotonic", lambda: next(times))
+
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        _run_bash_probe("while :; do sleep 0.1; done", timeout=0.5)
+
+    assert caught.value.output == expected_stdout
+    assert caught.value.stderr == expected_stderr
+    assert any("stdout/stderr drain" in note for note in caught.value.__notes__)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="regression covers Windows timeout cleanup")
+def test_bash_probe_timeout_reclaims_its_owned_descendant(tmp_path: Path):
+    runner = tmp_path / "probe-runner.py"
+    ready = tmp_path / "runner.ready"
+    release = tmp_path / "runner.release"
+    result = tmp_path / "runner.result"
+    probe_token = f"bash-probe-owned-descendant-{tmp_path.name}"
+    runner.write_text(
+        textwrap.dedent(
+            """
+            from pathlib import Path
+            import runpy
+            import subprocess
+            import sys
+            import time
+
+            test_path, body, ready_path, release_path, result_path, _token = sys.argv[1:]
+            Path(ready_path).write_text("ready", encoding="utf-8")
+            while not Path(release_path).exists():
+                time.sleep(0.01)
+            helper = runpy.run_path(test_path)["_run_bash_probe"]
+            try:
+                helper(body, timeout=0.5)
+            except subprocess.TimeoutExpired:
+                Path(result_path).write_text("timeout", encoding="utf-8")
+            else:
+                Path(result_path).write_text("returned", encoding="utf-8")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    probe = textwrap.dedent(
+        f"""
+        owned_probe_token={shlex.quote(probe_token)}
+        {shlex.quote(Path(sys.executable).as_posix())} -c 'import time; time.sleep(30)' \
+          {shlex.quote(probe_token)} &
+        while :; do sleep 0.1; done
+        """
+    )
+    command = [
+        sys.executable,
+        str(runner),
+        str(Path(__file__).resolve()),
+        probe,
+        str(ready),
+        str(release),
+        str(result),
+        probe_token,
+    ]
+    registry: dict[str, dict[str, object]] = {}
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+    def observe_owned_tree() -> list[dict[str, object]]:
+        snapshot = _powershell_process_snapshot()
+        if not registry:
+            root = next((item for item in snapshot if int(item["pid"]) == process.pid), None)
+            if root is not None:
+                _register_powershell_root_identity(registry, root)
+        _record_owned_powershell_descendants(registry, snapshot)
+        return snapshot
+
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            observe_owned_tree()
+            time.sleep(0.02)
+        assert ready.exists()
+        assert registry
+        release.touch()
+
+        deadline = time.monotonic() + 4
+        snapshot: list[dict[str, object]] = []
+        while process.poll() is None and time.monotonic() < deadline:
+            snapshot = observe_owned_tree()
+            time.sleep(0.05)
+        snapshot = observe_owned_tree()
+
+        assert process.poll() is not None, "_run_bash_probe remained blocked after its timeout"
+        assert result.read_text(encoding="utf-8") == "timeout"
+        assert _current_registered_powershell_processes(registry, snapshot) == []
+        assert [item for item in snapshot if probe_token in str(item["command_line"] or "")] == []
+    finally:
+        active_error = sys.exception()
+        cleanup_errors: list[str] = []
+
+        def cleanup_stage(name: str, action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                cleanup_errors.append(f"{name}: {error!r}")
+
+        def refresh_registry() -> None:
+            observe_owned_tree()
+
+        def terminate_registered_tree() -> None:
+            _terminate_exact_powershell_processes(list(registry.values()))
+
+        def terminate_token_fallback() -> None:
+            snapshot = _powershell_process_snapshot()
+            token_processes = [item for item in snapshot if probe_token in str(item["command_line"] or "")]
+            _terminate_exact_powershell_processes(token_processes)
+
+        def kill_runner_fallback() -> None:
+            if process.poll() is None:
+                process.kill()
+
+        def verify_no_residuals() -> None:
+            snapshot = _powershell_process_snapshot()
+            _record_owned_powershell_descendants(registry, snapshot)
+            remaining = _current_registered_powershell_processes(registry, snapshot)
+            token_processes = [item for item in snapshot if probe_token in str(item["command_line"] or "")]
+            if remaining or token_processes:
+                raise AssertionError(
+                    f"Bash probe regression left owned processes: registered={remaining}, token={token_processes}"
+                )
+
+        cleanup_stage("final registry refresh", refresh_registry)
+        cleanup_stage("registered tree termination", terminate_registered_tree)
+        cleanup_stage("token fallback termination", terminate_token_fallback)
+        cleanup_stage("runner process-handle fallback", kill_runner_fallback)
+        cleanup_stage("runner wait", lambda: process.wait(timeout=5))
+        cleanup_stage("final residual verification", verify_no_residuals)
+        if cleanup_errors:
+            details = "Bash probe regression cleanup failed: " + "; ".join(cleanup_errors)
+            if active_error is not None:
+                active_error.add_note(details)
+            else:
+                raise AssertionError(details)
 
 
 def _powershell_runtime_diagnostics(repo: Path) -> str:
@@ -2361,8 +3399,8 @@ def test_bash_runtime_monitor_detects_api_exit_while_worker_and_ui_continue():
     validate_managed_statuses() {{ return 0; }}
     {functions}
     bash -c 'exit 7' & PROCESS_PIDS[api]=$!
-    bash -c 'while :; do :; done' & PROCESS_PIDS[worker]=$!
-    bash -c 'while :; do :; done' & PROCESS_PIDS[ui]=$!
+    bash -c 'while :; do sleep 0.1; done' & PROCESS_PIDS[worker]=$!
+    bash -c 'while :; do sleep 0.1; done' & PROCESS_PIDS[ui]=$!
     trap 'kill -KILL "${{PROCESS_PIDS[worker]}}" "${{PROCESS_PIDS[ui]}}" 2>/dev/null || true' EXIT
     wait_runtime_processes
     """
@@ -2743,39 +3781,67 @@ def test_powershell_helper_cleanup_diagnostics_failure_is_aggregated_once_withou
         _terminate_exact_powershell_processes(_powershell_repo_processes(repo))
 
 
-def test_powershell_helper_reclaims_recorded_descendant_after_its_parent_exits(tmp_path: Path):
+def test_powershell_launcher_persistently_tracks_descendant_before_parent_exit(tmp_path: Path):
     repo, env = _powershell_runtime_harness(tmp_path)
     env["HARNESS_DETACHED_CHILD"] = "1"
+
+    completed = _run_powershell_runtime(
+        repo,
+        env,
+        "-Validate",
+        "-KeepRunning",
+        "-TimeoutSec",
+        "3",
+    )
+
+    assert completed.returncode != 0
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    detached_pid = int(re.search(r"^detached_child_pid=(\d+)$", trace, re.MULTILINE).group(1))  # type: ignore[union-attr]
+    assert f"detached_child_registered_by_launcher={detached_pid}" in trace
+    assert "harness=forced-cleanup" not in trace
+    stack_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in (repo / ".runtime/es-stack/runs").glob("*/stack.log")
+    )
+    registration = re.search(
+        rf"process tracker registered component=api pid={detached_pid} .* creation=(\S+)",
+        stack_text,
+    )
+    assert registration is not None
+    assert not any(
+        int(item["pid"]) == detached_pid and item["creation"] == registration.group(1)
+        for item in _powershell_process_snapshot()
+    )
+
+
+def test_powershell_helper_registration_timeout_reclaims_unrecorded_detached_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    env["HARNESS_DETACHED_CHILD"] = "1"
+    env["HARNESS_FORCE_TRACKER_TIMEOUT"] = "1"
     detached_identity: dict[str, object] | None = None
 
     try:
-        completed = _run_powershell_runtime(
-            repo,
-            env,
-            "-Validate",
-            "-KeepRunning",
-            "-TimeoutSec",
-            "3",
-        )
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                sys.modules[__name__],
+                "_record_owned_powershell_descendants",
+                lambda registry, snapshot: None,
+            )
+            completed = _run_powershell_runtime(
+                repo,
+                env,
+                "-Validate",
+                "-KeepRunning",
+                "-TimeoutSec",
+                "3",
+            )
 
         assert completed.returncode != 0
         trace = (repo / "trace.log").read_text(encoding="utf-8")
         detached_pid = int(re.search(r"^detached_child_pid=(\d+)$", trace, re.MULTILINE).group(1))  # type: ignore[union-attr]
-        registry = _load_powershell_process_registry(repo)
-        detached_record = next(item for item in registry.values() if int(item["pid"]) == detached_pid)
-        assert {
-            "pid",
-            "parent_pid",
-            "creation",
-            "executable_path",
-            "command_line",
-            "lineage",
-        } <= detached_record.keys()
-        assert detached_record["lineage"][-1] == {
-            "pid": detached_pid,
-            "creation": detached_record["creation"],
-        }
-        assert len(detached_record["lineage"]) >= 3
+        assert f"detached_child_launcher_registration_timeout={detached_pid}" in trace
         detached_identity = next(
             (item for item in _powershell_process_snapshot() if int(item["pid"]) == detached_pid),
             None,
@@ -2831,6 +3897,716 @@ def test_powershell_registry_rejects_first_seen_child_when_recorded_parent_is_ab
         {"pid": 15, "creation": grandchild["creation"]},
     ]
     assert _current_registered_powershell_processes(registry, [grandchild]) == [grandchild]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_refuses_reused_root_and_unverifiable_orphan():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System.Diagnostics;
+public sealed class VsaExitedIdentityProcess : Process
+{{
+    public new bool HasExited {{ get {{ return true; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    $script:stage = 0
+    function New-SnapshotProcess($pid, $parentPid, $created, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$pid
+            ParentProcessId = [int]$parentPid
+            CreationDate = [datetime]$created
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $pid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $records = @(
+            (New-SnapshotProcess 4242 100 '2026-07-19T01:00:00Z' 'reused-root'),
+            (New-SnapshotProcess 5001 4242 '2026-07-19T01:00:01Z' 'unrelated-child')
+        )
+        if ("$Filter" -match 'ProcessId=(\\d+)') {{
+            $lookupPid = [int]$Matches[1]
+            return @($records | Where-Object {{ [int]$_.ProcessId -eq $lookupPid }}) | Select-Object -First 1
+        }}
+        return $records
+    }}
+    function Stop-Process {{ param([int]$Id, [switch]$Force, $ErrorAction) $script:killed.Add($Id) | Out-Null }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    function cmd.exe {{
+        param([Parameter(ValueFromRemainingArguments = $true)][object[]]$NativeArgs)
+        if (($NativeArgs -join ' ') -match '/PID (\\d+)') {{ $script:killed.Add([int]$Matches[1]) | Out-Null }}
+    }}
+    {function}
+    $root = [VsaExitedIdentityProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+        CreationKey = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks.ToString()
+        CreationTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    }})
+    try {{ Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0 }} catch {{ }}
+    if ($script:killed.Count -ne 0) {{
+        Write-Error "reused root or orphan was terminated: $($script:killed -join ',')"
+        exit 41
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_refuses_child_when_root_retained_start_ticks_mismatch():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+public sealed class VsaRootStartTicksMismatchProcess : Process
+{{
+    public static long StartTicks {{ get; set; }}
+    public new IntPtr Handle {{ get {{ return (IntPtr)123; }} }}
+    public new bool HasExited {{ get {{ return false; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new DateTime StartTime {{ get {{ return new DateTime(StartTicks, DateTimeKind.Utc); }} }}
+    public new void Refresh() {{ }}
+    public new bool CloseMainWindow() {{ return true; }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:childAlive = $true
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    $rootCimTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    [VsaRootStartTicksMismatchProcess]::StartTicks = $rootCimTicks + 8
+    function New-SnapshotProcess($snapshotPid, $snapshotParentPid, $ticks, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$snapshotPid
+            ParentProcessId = [int]$snapshotParentPid
+            CreationDate = [datetime]::new([long]$ticks, [DateTimeKind]::Utc)
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $snapshotPid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $records = @(
+            (New-SnapshotProcess 4242 100 $rootCimTicks 'ui-root')
+        )
+        if ($script:childAlive) {{
+            $records += New-SnapshotProcess 5001 4242 ($rootCimTicks + 10000000) 'bash-child'
+        }}
+        if ("$Filter" -match 'ProcessId=(\\d+)') {{
+            $lookupPid = [int]$Matches[1]
+            return @($records | Where-Object {{ [int]$_.ProcessId -eq $lookupPid }}) |
+                Select-Object -First 1
+        }}
+        return $records
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        $target = [pscustomobject]@{{
+            Id = $Id
+            Handle = [intptr]123
+            StartTime = [datetime]::new($rootCimTicks + 10000000, [DateTimeKind]::Utc)
+            HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{
+            $this.HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+            $script:killed.Add($this.Id) | Out-Null
+            $script:childAlive = $false
+            $this.HasExited = $true
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
+        return $target
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {function}
+    $root = [VsaRootStartTicksMismatchProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = $rootCimTicks + 7
+        CreationKey = $rootCimTicks.ToString()
+        CreationTicks = $rootCimTicks
+    }})
+    try {{ Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0 }} catch {{ }}
+    if ($script:killed.Count -ne 0) {{
+        Write-Error "child was terminated after root .NET StartTime mismatch: $($script:killed -join ',')"
+        exit 45
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_refuses_child_when_retained_root_has_exited():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+public sealed class VsaExitedRootProcess : Process
+{{
+    public static long StartTicks {{ get; set; }}
+    public new IntPtr Handle {{ get {{ return (IntPtr)123; }} }}
+    public new bool HasExited {{ get {{ return true; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new DateTime StartTime {{ get {{ return new DateTime(StartTicks, DateTimeKind.Utc); }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:childAlive = $true
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    $rootCimTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    [VsaExitedRootProcess]::StartTicks = $rootCimTicks
+    function New-SnapshotProcess($snapshotPid, $snapshotParentPid, $ticks, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$snapshotPid
+            ParentProcessId = [int]$snapshotParentPid
+            CreationDate = [datetime]::new([long]$ticks, [DateTimeKind]::Utc)
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $snapshotPid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $records = @(
+            (New-SnapshotProcess 4242 100 $rootCimTicks 'ui-root')
+        )
+        if ($script:childAlive) {{
+            $records += New-SnapshotProcess 5001 4242 ($rootCimTicks + 10000000) 'bash-child'
+        }}
+        if ("$Filter" -match 'ProcessId=(\\d+)') {{
+            $lookupPid = [int]$Matches[1]
+            return @($records | Where-Object {{ [int]$_.ProcessId -eq $lookupPid }}) |
+                Select-Object -First 1
+        }}
+        return $records
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        $target = [pscustomobject]@{{
+            Id = $Id
+            Handle = [intptr]123
+            StartTime = [datetime]::new($rootCimTicks + 10000000, [DateTimeKind]::Utc)
+            HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{
+            $this.HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+            $script:killed.Add($this.Id) | Out-Null
+            $script:childAlive = $false
+            $this.HasExited = $true
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
+        return $target
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {function}
+    $root = [VsaExitedRootProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = $rootCimTicks
+        CreationKey = $rootCimTicks.ToString()
+        CreationTicks = $rootCimTicks
+    }})
+    try {{ Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0 }} catch {{ }}
+    if ($script:killed.Count -ne 0) {{
+        Write-Error "child was terminated after root process had exited: $($script:killed -join ',')"
+        exit 46
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_does_not_expand_orphan_when_parent_identity_is_unavailable():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System.Diagnostics;
+public sealed class VsaExitedParentProcess : Process
+{{
+    public new bool HasExited {{ get {{ return true; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:stage = 0
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    function New-SnapshotProcess($pid, $parentPid, $created, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$pid
+            ParentProcessId = [int]$parentPid
+            CreationDate = [datetime]$created
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $pid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        if ($script:stage -eq 0) {{
+            $script:stage = 1
+            return @(New-SnapshotProcess 4242 100 '2026-07-19T00:00:00Z' 'ui-root')
+        }}
+        return @(New-SnapshotProcess 5001 4242 '2026-07-19T00:00:01Z' 'orphan-pipe-holder')
+    }}
+    function Stop-Process {{ param([int]$Id, [switch]$Force, $ErrorAction) $script:killed.Add($Id) | Out-Null }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    function cmd.exe {{
+        param([Parameter(ValueFromRemainingArguments = $true)][object[]]$NativeArgs)
+        if (($NativeArgs -join ' ') -match '/PID (\\d+)') {{ $script:killed.Add([int]$Matches[1]) | Out-Null }}
+    }}
+    {function}
+    $root = [VsaExitedParentProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+        CreationKey = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks.ToString()
+        CreationTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    }})
+    try {{ Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0 }} catch {{ }}
+    if ($script:killed.Count -ne 0) {{
+        Write-Error "unverifiable orphan was terminated: $($script:killed -join ',')"
+        exit 42
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_fails_closed_when_descendant_identity_changes_before_kill():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System.Diagnostics;
+public sealed class VsaExitedToctouProcess : Process
+{{
+    public new bool HasExited {{ get {{ return true; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    function New-SnapshotProcess($pid, $parentPid, $created, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$pid
+            ParentProcessId = [int]$parentPid
+            CreationDate = [datetime]$created
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $pid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        return @(
+            (New-SnapshotProcess 4242 100 '2026-07-19T00:00:00Z' 'ui-root'),
+            (New-SnapshotProcess 5001 4242 '2026-07-19T00:00:01Z' 'child')
+        )
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        [pscustomobject]@{{ Id = $Id; StartTime = [datetime]'2026-07-19T02:00:00Z' }}
+    }}
+    function Stop-Process {{ param([int]$Id, [switch]$Force, $ErrorAction) $script:killed.Add($Id) | Out-Null }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    function cmd.exe {{
+        param([Parameter(ValueFromRemainingArguments = $true)][object[]]$NativeArgs)
+        if (($NativeArgs -join ' ') -match '/PID (\\d+)') {{ $script:killed.Add([int]$Matches[1]) | Out-Null }}
+    }}
+    {function}
+    $root = [VsaExitedToctouProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+        CreationKey = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks.ToString()
+        CreationTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    }})
+    try {{ Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0 }} catch {{ }}
+    if ($script:killed.Count -ne 0) {{
+        Write-Error "TOCTOU replacement was terminated: $($script:killed -join ',')"
+        exit 43
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_normalizes_cim_precision_without_weakening_handle_identity():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+public sealed class VsaPrecisionRootProcess : Process
+{{
+    public static long StartTicks {{ get; set; }}
+    public new IntPtr Handle {{ get {{ return (IntPtr)123; }} }}
+    public new bool HasExited {{ get {{ return false; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new DateTime StartTime {{ get {{ return new DateTime(StartTicks, DateTimeKind.Utc); }} }}
+    public new void Refresh() {{ }}
+    public new bool CloseMainWindow() {{ return true; }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:childAlive = $true
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    $rootCimTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    $childCimTicks = ([datetime]'2026-07-19T00:00:01Z').ToUniversalTime().Ticks
+    [VsaPrecisionRootProcess]::StartTicks = $rootCimTicks + 7
+    function New-SnapshotProcess($snapshotPid, $snapshotParentPid, $ticks, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$snapshotPid
+            ParentProcessId = [int]$snapshotParentPid
+            CreationDate = [datetime]::new([long]$ticks, [DateTimeKind]::Utc)
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $snapshotPid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $records = @(
+            (New-SnapshotProcess 4242 100 $rootCimTicks 'ui-root')
+        )
+        if ($script:childAlive) {{
+            $records += New-SnapshotProcess 5001 4242 $childCimTicks 'bash-child'
+        }}
+        if ("$Filter" -match 'ProcessId=(\\d+)') {{
+            $lookupPid = [int]$Matches[1]
+            return @($records | Where-Object {{ [int]$_.ProcessId -eq $lookupPid }}) |
+                Select-Object -First 1
+        }}
+        return $records
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        $target = [pscustomobject]@{{
+            Id = $Id
+            Handle = [intptr]123
+            StartTime = [datetime]::new($childCimTicks + 7, [DateTimeKind]::Utc)
+            HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{
+            $this.HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+            $script:killed.Add($this.Id) | Out-Null
+            $script:childAlive = $false
+            $this.HasExited = $true
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
+        return $target
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {function}
+    $root = [VsaPrecisionRootProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = $rootCimTicks + 7
+        CreationKey = $rootCimTicks.ToString()
+        CreationTicks = $rootCimTicks
+    }})
+    try {{ Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 50 }} catch {{ }}
+    if ($script:childAlive -or -not $script:killed.Contains(5001)) {{
+        Write-Error 'CIM precision normalization rejected the retained child process handle'
+        exit 44
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+@pytest.mark.parametrize(
+    ("child_path", "child_command"),
+    (("", "bash-child"), ("C:\\fake\\5001.exe", "")),
+    ids=("empty-executable-path", "empty-command-line"),
+)
+def test_powershell_runtime_tracker_and_shutdown_reject_incomplete_descendant_identity(
+    child_path: str, child_command: str
+):
+    functions = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+public sealed class VsaIncompleteIdentityRootProcess : Process
+{{
+    public static long StartTicks {{ get; set; }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new bool HasExited {{ get {{ return true; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new DateTime StartTime {{ get {{ return new DateTime(StartTicks, DateTimeKind.Utc); }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:childAlive = $true
+    $script:getProcessCalls = 0
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    $rootTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    $childTicks = ([datetime]'2026-07-19T00:00:01Z').ToUniversalTime().Ticks
+    [VsaIncompleteIdentityRootProcess]::StartTicks = $rootTicks
+    function New-SnapshotProcess($snapshotPid, $parentPid, $ticks, $path, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$snapshotPid
+            ParentProcessId = [int]$parentPid
+            CreationDate = [datetime]::new([long]$ticks, [DateTimeKind]::Utc)
+            ExecutablePath = [string]$path
+            CommandLine = [string]$command
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $records = @(
+            (New-SnapshotProcess 4242 100 $rootTicks 'C:\\fake\\root.exe' 'ui-root')
+        )
+        if ($script:childAlive) {{
+            $records += New-SnapshotProcess 5001 4242 $childTicks {child_path!r} {child_command!r}
+        }}
+        if ("$Filter" -match 'ProcessId=(\\d+)') {{
+            $lookupPid = [int]$Matches[1]
+            return @($records | Where-Object {{ [int]$_.ProcessId -eq $lookupPid }}) |
+                Select-Object -First 1
+        }}
+        return $records
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        $script:getProcessCalls += 1
+        $target = [pscustomobject]@{{
+            Id = $Id
+            Handle = [intptr]123
+            StartTime = [datetime]::new($childTicks, [DateTimeKind]::Utc)
+            HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{
+            $this.HasExited = -not $script:childAlive
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+            $script:killed.Add($this.Id) | Out-Null
+            $script:childAlive = $false
+            $this.HasExited = $true
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
+        return $target
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {functions}
+    $root = [VsaIncompleteIdentityRootProcess]::new()
+    $rootIdentity = [pscustomobject]@{{
+        ProcessId = 4242
+        ParentProcessId = 100
+        CreationKey = $rootTicks.ToString()
+        CreationTicks = $rootTicks
+        ExecutablePath = 'C:\\fake\\root.exe'
+        CommandLine = 'ui-root'
+        Depth = 0
+        StartTicks = $rootTicks
+        BoundProcess = $root
+    }}
+    $owned = @{{ '4242' = $rootIdentity }}
+    $root | Add-Member -NotePropertyName VsaProcessTracker -NotePropertyValue ([pscustomobject]@{{
+        Component = 'ui'
+        OwnedByPid = $owned
+    }})
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = $rootTicks
+        CreationKey = $rootTicks.ToString()
+        CreationTicks = $rootTicks
+    }})
+    Update-ProcessTracker -Process $root
+    if ($owned.Count -ne 1 -or $script:getProcessCalls -ne 0) {{
+        $detail = "runtime tracker accepted incomplete child identity: " +
+            "owned=$($owned.Count) handles=$script:getProcessCalls"
+        Write-Error $detail
+        exit 46
+    }}
+    Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0
+    if ($owned.Count -ne 1 -or $script:killed.Count -ne 0 -or $script:getProcessCalls -ne 0) {{
+        $detail = "shutdown accepted incomplete child identity: " +
+            "owned=$($owned.Count) killed=$($script:killed.Count) " +
+            "handles=$script:getProcessCalls"
+        Write-Error $detail
+        exit 47
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, "\n".join(completed.stderr.splitlines()[-12:])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process identity contract")
+def test_powershell_shutdown_disposes_rejected_handle_once_when_dispose_throws():
+    functions = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+public sealed class VsaDisposeFailureRootProcess : Process
+{{
+    public static long StartTicks {{ get; set; }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new bool HasExited {{ get {{ return true; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new DateTime StartTime {{ get {{ return new DateTime(StartTicks, DateTimeKind.Utc); }} }}
+    public new void Refresh() {{ }}
+    public new bool WaitForExit(int milliseconds) {{ return true; }}
+}}
+'@
+    $script:snapshotCalls = 0
+    $script:disposeCalls = 0
+    $script:killed = [System.Collections.Generic.List[int]]::new()
+    $rootTicks = ([datetime]'2026-07-19T00:00:00Z').ToUniversalTime().Ticks
+    $childTicks = ([datetime]'2026-07-19T00:00:01Z').ToUniversalTime().Ticks
+    [VsaDisposeFailureRootProcess]::StartTicks = $rootTicks
+    function New-SnapshotProcess($snapshotPid, $parentPid, $ticks, $path, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$snapshotPid
+            ParentProcessId = [int]$parentPid
+            CreationDate = [datetime]::new([long]$ticks, [DateTimeKind]::Utc)
+            ExecutablePath = [string]$path
+            CommandLine = [string]$command
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $script:snapshotCalls += 1
+        $records = @(
+            (New-SnapshotProcess 4242 100 $rootTicks 'C:\\fake\\root.exe' 'ui-root')
+        )
+        if ($script:snapshotCalls -eq 1) {{
+            $records += New-SnapshotProcess 5001 4242 $childTicks 'C:\\fake\\child.exe' 'bash-child'
+        }}
+        return $records
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        $target = [pscustomobject]@{{
+            Id = $Id
+            Handle = [intptr]123
+            StartTime = [datetime]::new($childTicks + 10000000, [DateTimeKind]::Utc)
+            HasExited = $false
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{ }}
+        $target | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+            $script:killed.Add($this.Id) | Out-Null
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{
+            $script:disposeCalls += 1
+            throw 'intentional dispose failure'
+        }}
+        return $target
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {functions}
+    $root = [VsaDisposeFailureRootProcess]::new()
+    $rootIdentity = [pscustomobject]@{{
+        ProcessId = 4242
+        ParentProcessId = 100
+        CreationKey = $rootTicks.ToString()
+        CreationTicks = $rootTicks
+        ExecutablePath = 'C:\\fake\\root.exe'
+        CommandLine = 'ui-root'
+        Depth = 0
+        StartTicks = $rootTicks
+        BoundProcess = $root
+    }}
+    $owned = @{{ '4242' = $rootIdentity }}
+    $root | Add-Member -NotePropertyName VsaProcessTracker -NotePropertyValue ([pscustomobject]@{{
+        Component = 'ui'
+        OwnedByPid = $owned
+    }})
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = $rootTicks
+        CreationKey = $rootTicks.ToString()
+        CreationTicks = $rootTicks
+    }})
+    $caught = $null
+    try {{
+        Stop-OwnedProcessTree -Component 'ui' -Process $root -ForceTimeoutMs 0
+    }} catch {{
+        $caught = $_.Exception
+    }}
+    if ($null -ne $caught) {{
+        Write-Error "rejected handle disposal escaped: $($caught.Message)"
+        exit 48
+    }}
+    if ($script:disposeCalls -ne 1) {{
+        Write-Error "rejected handle disposed $script:disposeCalls times"
+        exit 49
+    }}
+    if ($owned.Count -ne 1 -or $script:killed.Count -ne 0) {{
+        Write-Error "rejected handle was registered or killed: owned=$($owned.Count) killed=$($script:killed.Count)"
+        exit 50
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, "\n".join(completed.stderr.splitlines()[-12:])
+
+
+def test_powershell_shutdown_contract_binds_launch_identity_and_uses_monotonic_sampling():
+    launcher = Path("scripts/es-runtime-stack.ps1").read_text(encoding="utf-8")
+
+    assert "VsaLaunchIdentity" in launcher
+    assert "[Diagnostics.Stopwatch]::StartNew()" in launcher
+    assert "Start-Sleep -Milliseconds 25" not in launcher
+    assert "StartTicks" in launcher
+    assert "CreationTicks" in launcher
 
 
 def test_powershell_external_pipeline_stop_runs_launcher_finally_and_cleans_owned_runtime(tmp_path: Path):
@@ -3164,9 +4940,10 @@ def test_bash_managed_process_shutdown_is_bounded_and_forces_a_stubborn_child():
     set -u
     PROCESS_SHUTDOWN_GRACE_TICKS=3
     declare -A PROCESS_PIDS=()
+    declare -A PROCESS_PENDING_EXIT_STATUS=()
     record_process_exit() {{ :; }}
     {functions}
-    bash -c 'trap "" TERM; while :; do :; done' &
+    bash -c 'trap "" TERM; exec sleep 30' &
     PROCESS_PIDS[worker]=$!
     stop_managed_process worker
     """
@@ -3259,7 +5036,7 @@ def test_runtime_redactor_covers_quoted_json_secrets_and_multiline_image_payload
 
 
 def test_powershell_shutdown_does_not_block_on_a_stubborn_process():
-    function = _powershell_function("Stop-OwnedProcessTree")
+    function = _powershell_shutdown_functions()
     probe = f"""
     $ErrorActionPreference = 'Stop'
     function Set-ProcessExit {{ param($Component, $ExitStatus) }}
@@ -3280,8 +5057,158 @@ def test_powershell_shutdown_does_not_block_on_a_stubborn_process():
     assert completed.returncode == 0, completed.stderr
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows process lineage contract")
+def test_powershell_shutdown_rescans_late_owned_descendant_before_log_pump_complete():
+    function = _powershell_shutdown_functions()
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+
+public sealed class VsaRescanRootProcess : Process
+{{
+    public static bool RootExited {{ get; set; }}
+    public static long StartTicks {{ get; set; }}
+    public new IntPtr Handle {{ get {{ return (IntPtr)123; }} }}
+    public new bool HasExited {{ get {{ return RootExited; }} }}
+    public new int Id {{ get {{ return 4242; }} }}
+    public new int ExitCode {{ get {{ return 0; }} }}
+    public new DateTime StartTime {{ get {{ return new DateTime(StartTicks, DateTimeKind.Utc); }} }}
+    public new void Refresh() {{ }}
+    public new bool CloseMainWindow() {{ return false; }}
+    public new void Kill() {{ RootExited = true; }}
+    public new bool WaitForExit(int milliseconds) {{ return RootExited; }}
+}}
+'@
+    [VsaRescanRootProcess]::RootExited = $false
+    $script:stage = 0
+    $script:lateDescendantAlive = $true
+    $script:ownedParentAlive = $true
+    $script:rescanKilled = [System.Collections.Generic.List[int]]::new()
+    [VsaRescanRootProcess]::StartTicks = ([datetime]'2026-01-01T00:00:00Z').ToUniversalTime().Ticks
+    function New-SnapshotProcess($snapshotPid, $snapshotParentPid, $created, $command) {{
+        [pscustomobject]@{{
+            ProcessId = [int]$snapshotPid
+            ParentProcessId = [int]$snapshotParentPid
+            CreationDate = [datetime]$created
+            CommandLine = [string]$command
+            ExecutablePath = 'C:\\fake\\' + $snapshotPid + '.exe'
+        }}
+    }}
+    function Get-CimInstance {{
+        param($ClassName, $Filter, $ErrorAction)
+        $records = if ($script:stage -eq 0) {{
+            @(
+                (New-SnapshotProcess 4242 100 '2026-01-01T00:00:00Z' 'ui-root'),
+                (New-SnapshotProcess 5001 4242 '2026-01-01T00:00:01Z' 'bash-old')
+            )
+        }} elseif ($script:lateDescendantAlive -or $script:ownedParentAlive) {{
+            $lateRecords = @()
+            if ($script:ownedParentAlive) {{
+                $lateRecords += New-SnapshotProcess 5001 4242 '2026-01-01T00:00:01Z' 'bash-old'
+            }}
+            if ($script:lateDescendantAlive) {{
+                $lateRecords += New-SnapshotProcess 5002 5001 '2026-01-01T00:00:02Z' 'bash-new-pipe-holder'
+            }}
+            $lateRecords += New-SnapshotProcess 4242 999 '2026-01-01T00:01:00Z' 'reused-unrelated-root'
+            $lateRecords += New-SnapshotProcess 6000 4242 '2026-01-01T00:01:01Z' 'unrelated-child'
+            $lateRecords
+        }} else {{
+            @(
+                (New-SnapshotProcess 4242 999 '2026-01-01T00:01:00Z' 'reused-unrelated-root'),
+                (New-SnapshotProcess 6000 4242 '2026-01-01T00:01:01Z' 'unrelated-child')
+            )
+        }}
+        if ("$Filter" -match 'ProcessId=(\\d+)') {{
+            $lookupPid = [int]$Matches[1]
+            return @($records | Where-Object {{ [int]$_.ProcessId -eq $lookupPid }}) | Select-Object -First 1
+        }}
+        if ($script:stage -eq 0) {{ $script:stage = 1 }}
+        return $records
+    }}
+    function cmd.exe {{
+        param([Parameter(ValueFromRemainingArguments = $true)][object[]]$NativeArgs)
+        $line = $NativeArgs -join ' '
+        if ($script:stage -eq 0 -and $line -match '/PID 4242(?:\\s|$)') {{
+            [VsaRescanRootProcess]::RootExited = $true
+            $script:stage = 1
+            return
+        }}
+        if ($line -match '/PID (\\d+)') {{
+            $killedPid = [int]$Matches[1]
+            $script:rescanKilled.Add($killedPid) | Out-Null
+            if ($killedPid -eq 5002) {{ $script:lateDescendantAlive = $false }}
+        }}
+    }}
+    function Stop-Process {{
+        param([int]$Id, [switch]$Force, $ErrorAction)
+        $script:rescanKilled.Add($Id) | Out-Null
+        if ($Id -eq 5002) {{ $script:lateDescendantAlive = $false }}
+    }}
+    function Get-Process {{
+        param([int]$Id, $ErrorAction)
+        $startTime = if ($Id -eq 5002) {{
+            [datetime]'2026-01-01T00:00:02Z'
+        }} else {{
+            [datetime]'2026-01-01T00:00:01Z'
+        }}
+        $target = [pscustomobject]@{{ Id = $Id; Handle = [intptr]123; StartTime = $startTime; HasExited = $false }}
+        $target | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{ }}
+        $target | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+            $script:rescanKilled.Add($this.Id) | Out-Null
+            if ($this.Id -eq 5002) {{ $script:lateDescendantAlive = $false }}
+            if ($this.Id -eq 5001) {{ $script:ownedParentAlive = $false }}
+            $this.HasExited = $true
+        }}
+        $target | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
+        return $target
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    {function}
+    $pump = [pscustomobject]@{{ CompleteCalled = $false; DisposeCalled = $false }}
+    $pump | Add-Member -MemberType ScriptMethod -Name Complete -Value {{
+        param($milliseconds)
+        if ($script:lateDescendantAlive) {{ throw 'log pump drain timed out while owned descendant holds pipe' }}
+        $this.CompleteCalled = $true
+    }}
+    $pump | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ $this.DisposeCalled = $true }}
+    $root = [VsaRescanRootProcess]::new()
+    $root | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+        ProcessId = 4242
+        StartTicks = ([datetime]'2026-01-01T00:00:00Z').ToUniversalTime().Ticks
+        CreationKey = ([datetime]'2026-01-01T00:00:00Z').ToUniversalTime().Ticks.ToString()
+        CreationTicks = ([datetime]'2026-01-01T00:00:00Z').ToUniversalTime().Ticks
+    }})
+    $root | Add-Member -NotePropertyName VsaLogPump -NotePropertyValue $pump
+    $failure = $null
+    $survivedAtComplete = $false
+    try {{
+        $stopArgs = @{{ Component = 'ui'; Process = $root; GraceTimeoutMs = 25; ForceTimeoutMs = 250 }}
+        Stop-OwnedProcessTree @stopArgs -LogDrainTimeoutMs 25
+    }} catch {{
+        $failure = $_.Exception.Message
+        $survivedAtComplete = $script:lateDescendantAlive
+    }} finally {{
+        $script:lateDescendantAlive = $false
+    }}
+    if ($null -ne $failure) {{
+        Write-Error "STOP_ERROR=$failure OWNED_DESCENDANT_SURVIVED=$survivedAtComplete"
+        exit 41
+    }}
+    if (-not $pump.CompleteCalled -or -not $pump.DisposeCalled) {{ exit 42 }}
+    if (-not $script:rescanKilled.Contains(5002)) {{ exit 43 }}
+    if ($script:rescanKilled.Contains(4242) -or $script:rescanKilled.Contains(6000)) {{ exit 44 }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_powershell_forced_shutdown_timeout_still_finalizes_owned_process():
-    function = _powershell_function("Stop-OwnedProcessTree")
+    function = _powershell_shutdown_functions()
     probe = f"""
     $ErrorActionPreference = 'Stop'
     Add-Type -TypeDefinition @'
@@ -3476,18 +5403,142 @@ def test_powershell_rechecks_process_identity_immediately_before_termination():
     probe = f"""
     $ErrorActionPreference = 'Stop'
     $script:checks = 0
+    $script:listener = [pscustomobject]@{{
+        Id = 4321
+        Handle = [intptr]123
+        StartTime = [datetime]'2026-07-19T02:00:00Z'
+        HasExited = $false
+        KillCalled = $false
+    }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{ }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+        $this.KillCalled = $true
+        $this.HasExited = $true
+    }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{ }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
     function Get-NetTCPConnection {{ [pscustomobject]@{{ OwningProcess = 4321 }} }}
     function Assert-CurrentUserProcess {{
         param($ProcessId, $ExpectedCreationDate)
         $script:checks++
         return [pscustomobject]@{{ CreationDate = 'identity-token' }}
     }}
+    function Get-Process {{ param($Id, $ErrorAction) return $script:listener }}
     function Write-Stack {{ }}
-    function taskkill.exe {{ }}
+    function taskkill.exe {{ throw 'PID-only taskkill must not be used' }}
     function Wait-PortFree {{ }}
     {function}
     Reclaim-Port -Port 8000 -TimeoutSec 1
     if ($script:checks -lt 2) {{ exit 6 }}
+    if (-not $script:listener.KillCalled) {{ exit 7 }}
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_powershell_reclaim_port_refuses_start_time_toctou_mismatch():
+    function = _powershell_function("Reclaim-Port")
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    $script:refreshes = 0
+    $script:listener = [pscustomobject]@{{
+        Id = 4321
+        Handle = [intptr]123
+        StartTime = [datetime]'2026-07-19T02:00:00Z'
+        HasExited = $false
+        KillCalled = $false
+    }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name Refresh -Value {{
+        $script:refreshes++
+        if ($script:refreshes -ge 2) {{
+            $this.StartTime = [datetime]'2026-07-19T02:00:01Z'
+        }}
+    }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name Kill -Value {{
+        $this.KillCalled = $true
+        $this.HasExited = $true
+    }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{ }}
+    $script:listener | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{ }}
+    function Get-NetTCPConnection {{ [pscustomobject]@{{ OwningProcess = 4321 }} }}
+    function Get-Process {{ param($Id, $ErrorAction) return $script:listener }}
+    function Assert-CurrentUserProcess {{
+        param($ProcessId, $ExpectedCreationDate, $ExpectedExecutablePath, $ExpectedCommandLine)
+        if ($null -ne $ExpectedCreationDate) {{
+            if ($ExpectedCreationDate -ne 'identity-token' -or
+                $ExpectedExecutablePath -ne 'C:\\runtime\\listener.exe' -or
+                $ExpectedCommandLine -ne 'listener --port 8000') {{
+                throw 'CIM identity fields must be revalidated together'
+            }}
+        }}
+        return [pscustomobject]@{{
+            CreationDate = 'identity-token'
+            ExecutablePath = 'C:\\runtime\\listener.exe'
+            CommandLine = 'listener --port 8000'
+        }}
+    }}
+    function Write-Stack {{ }}
+    function taskkill.exe {{ throw 'PID-only taskkill must not be used' }}
+    function Wait-PortFree {{ }}
+    {function}
+    try {{
+        Reclaim-Port -Port 8000 -TimeoutSec 1
+        exit 5
+    }} catch {{
+        if ($_.Exception.Message -notmatch 'PID_REUSED') {{
+            Write-Output "UNEXPECTED_ERROR=$($_.Exception.Message)"
+            exit 6
+        }}
+    }}
+    if ($script:listener.KillCalled) {{ exit 7 }}
+    Write-Output 'probe completed'
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_powershell_start_logged_process_cleans_up_when_manifest_handoff_fails(tmp_path: Path):
+    functions = "\n".join(
+        _powershell_function(name)
+        for name in ("Protect-RuntimeText", "ConvertTo-NativeArgument", "Start-LoggedProcess")
+    )
+    stack_log = tmp_path / "stack.log"
+    component_log = tmp_path / "component.log"
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    $stackLogPath = '{stack_log}'
+    $script:startedPid = $null
+    function Add-ManagedProcess {{
+        param($Component, $ProcessId, $SafeCommand)
+        $script:startedPid = $ProcessId
+        throw 'manifest handoff failed'
+    }}
+    {functions}
+    $null = Protect-RuntimeText ''
+    try {{
+        Start-LoggedProcess -Component 'probe' -FilePath 'powershell' `
+            -Arguments @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30') `
+            -WorkingDirectory '{tmp_path}' -LogPath '{component_log}' -SafeCommand 'probe' | Out-Null
+        exit 5
+    }} catch {{
+        if ($_.Exception.Message -notmatch 'manifest handoff failed') {{
+            Write-Error $_
+            exit 6
+        }}
+    }} finally {{
+        if ($null -ne $script:startedPid) {{
+            $survivor = Get-Process -Id $script:startedPid -ErrorAction SilentlyContinue
+            if ($null -ne $survivor) {{
+                try {{ $survivor.Kill(); $survivor.WaitForExit(5000) }} finally {{ $survivor.Dispose() }}
+                exit 7
+            }}
+        }}
+    }}
+    Write-Output 'probe completed'
     """
 
     completed = _run_powershell_probe(probe)
@@ -3499,6 +5550,8 @@ def test_powershell_runtime_monitor_detects_api_exit_while_ui_and_worker_continu
     function = _powershell_function("Wait-RuntimeProcesses")
     probe = f"""
     $ErrorActionPreference = 'Stop'
+    function Get-CimInstance {{ return @() }}
+    function Update-ProcessTracker {{ param($Process, $Snapshot) }}
     function Set-ProcessExit {{ param($Component, $ExitStatus) }}
     {function}
     $api = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'exit 7') -PassThru
@@ -3517,3 +5570,100 @@ def test_powershell_runtime_monitor_detects_api_exit_while_ui_and_worker_continu
     completed = _run_powershell_probe(probe)
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_powershell_runtime_monitor_shares_one_cim_snapshot_per_poll():
+    function = _powershell_function("Wait-RuntimeProcesses")
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    $script:snapshotCalls = 0
+    $script:trackerCalls = 0
+    function Get-CimInstance {{
+        param($ClassName, $ErrorAction)
+        $script:snapshotCalls += 1
+        return @([pscustomobject]@{{ ProcessId = 1 }})
+    }}
+    function Update-ProcessTracker {{
+        param($Process, $Snapshot)
+        if (-not $PSBoundParameters.ContainsKey('Snapshot')) {{
+            throw 'runtime tracker did not receive shared snapshot'
+        }}
+        $script:trackerCalls += 1
+    }}
+    function Set-ProcessExit {{ param($Component, $ExitStatus) }}
+    function Start-Sleep {{ throw 'poll-complete' }}
+    {function}
+    $children = @(
+        (Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 10') -PassThru),
+        (Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 10') -PassThru),
+        (Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 10') -PassThru)
+    )
+    try {{
+        Wait-RuntimeProcesses -Processes @{{ api = $children[0]; worker = $children[1]; ui = $children[2] }}
+        exit 5
+    }} catch {{
+        if ($_.Exception.Message -notmatch 'poll-complete') {{
+            Write-Error $_
+            exit 6
+        }}
+    }} finally {{
+        foreach ($child in $children) {{
+            if (-not $child.HasExited) {{ Stop-Process -Id $child.Id -Force }}
+        }}
+    }}
+    if ($script:snapshotCalls -ne 1 -or $script:trackerCalls -ne 3) {{
+        Write-Error "unexpected runtime polling cost: snapshots=$script:snapshotCalls trackers=$script:trackerCalls"
+        exit 7
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, "\n".join(completed.stderr.splitlines()[-12:])
+
+
+def test_powershell_process_tracker_rejects_explicit_empty_snapshot():
+    functions = "\n\n".join(
+        _powershell_function(name)
+        for name in (
+            "ConvertTo-TrackedProcessIdentity",
+            "Test-TrackedProcessIdentity",
+            "Update-ProcessTracker",
+        )
+    )
+    probe = f"""
+    $ErrorActionPreference = 'Stop'
+    {functions}
+    $child = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 10') -PassThru
+    try {{
+        $startTicks = $child.StartTime.ToUniversalTime().Ticks
+        $child | Add-Member -NotePropertyName VsaLaunchIdentity -NotePropertyValue ([pscustomobject]@{{
+            ProcessId = $child.Id
+            StartTicks = $startTicks
+            CreationKey = $startTicks.ToString()
+            CreationTicks = $startTicks
+        }})
+        $child | Add-Member -NotePropertyName VsaProcessTracker -NotePropertyValue ([pscustomobject]@{{
+            Component = 'api'
+            OwnedByPid = @{{ 'seed' = [pscustomobject]@{{ ProcessId = $child.Id; Depth = 0 }} }}
+        }})
+        try {{
+            Update-ProcessTracker -Process $child -Snapshot @()
+            exit 5
+        }} catch {{
+            if ($_.Exception.Message -notmatch 'snapshot.*empty') {{
+                Write-Error $_
+                exit 6
+            }}
+        }}
+    }} finally {{
+        if (-not $child.HasExited) {{ Stop-Process -Id $child.Id -Force }}
+        $child.Dispose()
+    }}
+    exit 0
+    """
+
+    completed = _run_powershell_probe(probe)
+
+    assert completed.returncode == 0, "\n".join(completed.stderr.splitlines()[-12:])
