@@ -11,7 +11,7 @@ SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 ES_COMPOSE = Path("docker-compose.es.yml")
 PYPROJECT = Path("pyproject.toml")
 GITIGNORE = Path(".gitignore")
-RUNTIME_DOC = Path("docs/superpowers/reference/es-video-search-runtime.md")
+RUNTIME_DOC = Path("docs/es-video-search-runtime.md")
 VSS_NEXT_CONFIG = Path("frontend/original-ui/apps/nv-metropolis-bp-vss-ui/next.config.js")
 ORIGINAL_UI_SERVER_DECLARATIONS = (
     Path("frontend/original-ui/packages/nv-metropolis-bp-vss-ui/map/lib-src/server.d.ts"),
@@ -395,16 +395,16 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\map\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\dashboard\\lib-src\\server.d.ts"' in text
     assert '"frontend\\original-ui\\packages\\nv-metropolis-bp-vss-ui\\alerts\\lib-src\\server.d.ts"' in text
-    assert '"docs\\superpowers\\reports\\2026-07-12-interactive-es-ui-validation.md"' in text
+    assert '"docs\\recorded-video-validation.md"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\utils\\data\\throttle.ts"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
 
 
-def test_sync_manifest_does_not_reference_archived_change_as_active():
+def test_sync_manifest_does_not_reference_removed_workflow_metadata():
     text = _sync_script_text()
 
-    assert "openspec\\changes\\script-es-runtime-stack\\" not in text
-    assert "openspec\\changes\\archive\\2026-07-12-script-es-runtime-stack\\" in text
+    assert "openspec\\" not in text
+    assert "docs\\superpowers\\" not in text
 
 
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():

@@ -108,7 +108,7 @@ conda run --no-capture-output -n vsa-agent python scripts/recorded-video-validat
   --video /data/project/lyk/validation/forklift-worker.mp4 \
   --query 'forklift near worker' \
   --minimum-similarity 0.20 \
-  --report docs/superpowers/reports/2026-07-13-production-recorded-video-validation.md
+  --report docs/recorded-video-validation.md
 ```
 
 验证器真实按 `runtime → job_stages → provider → es → search → media → delete` 执行：
@@ -152,6 +152,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-server-files.ps
 - 运行脚本：Bash/PowerShell 单入口、doctor、Worker CLI、验证器、日志泵和已有 ES smoke。
 - 前端：Next 同源代理、公共上传/任务工具、Chat 状态轮询、Video Management 上传/任务/删除及其测试。
 - Python 测试：录播 API、领域、Worker、ES、runtime/validator 脚本测试。
-- 文档与 OpenSpec：本手册、开发状态、验收报告、active change 的 proposal/design/tasks/delta spec。
+- 文档：本手册、开发状态和验收报告；不再同步技能工作流元数据。
 
 脚本会拒绝绝对路径和逃逸目标根目录的相对路径，只创建白名单文件所需的父目录并覆盖对应文件；不要使用 `robocopy /E` 或其他全盘递归同步替代它。

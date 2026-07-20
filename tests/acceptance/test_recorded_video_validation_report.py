@@ -7,7 +7,7 @@ from uuid import UUID
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REPORT_PATH = REPO_ROOT / "docs/superpowers/reports/2026-07-13-production-recorded-video-validation.md"
+REPORT_PATH = REPO_ROOT / "docs/recorded-video-validation.md"
 REPORT_FIELDS = ("runtime", "job_stages", "provider", "es", "search", "media", "delete")
 COMMON_EVIDENCE_FIELDS = ("run_id", "timestamp_utc", "asset_id", "job_id", "segment_id", "provider", "model")
 PRODUCTION_PROVIDERS = {"openai_compatible", "vllm"}

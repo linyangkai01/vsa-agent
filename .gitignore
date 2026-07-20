@@ -31,6 +31,9 @@ tmp/
 /.*-review*.md
 /.*-review*.diff
 /.sync-*
+/docs/superpowers/
+/skills-lock.json
+/openspec/
 
 
 # Contains local API keys and machine-specific overrides

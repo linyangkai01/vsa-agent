@@ -4,9 +4,9 @@ Last updated: 2026-07-21
 
 ## Current State
 
-- Active OpenSpec change: `production-recorded-video-ingest`.
+- Active development track: `production-recorded-video-ingest`.
 - Active branch: `codex/production-recorded-video-ingest`.
-- Phase: build; implementation progress remains tracked in the active OpenSpec tasks.
+- Phase: build; implementation progress is tracked in this document and Git history.
 - Goal: evolve the existing original-UI/Elasticsearch smoke path into a real recorded-video upload, durable analysis, semantic indexing, search, thumbnail and time-range playback flow without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
@@ -45,24 +45,17 @@ python -m pytest tests\unit\api\test_video_search_ingest.py tests\unit\api\test_
 
 Result: `79 passed, 1 warning`.
 
-```powershell
-npx openspec validate wire-es-ingest
-```
-
-Result: valid before archive.
-
 ## Active Change
 
 - `production-recorded-video-ingest`: Task 1-21 和 Task 23 已完成；Task 20A 已完成单进程日志 supervisor、真实 workload sidecar、PASS 线性化、Windows retained-handle 身份跟踪、确定性中断清理与共享 CIM snapshot。原版 UI 已接入任务状态轮询和流式同源代理；当前剩余 Task 22 Playwright 原版 UI 验收与 Task 24 全量质量门/Ubuntu 真实 provider 证据。
-- Design document: `docs/superpowers/specs/2026-07-12-production-recorded-video-ingest-design.md`.
-- Implementation plan: `docs/superpowers/plans/2026-07-13-production-recorded-video-ingest.md`.
+- Workflow-specific Comet, Superpowers, and OpenSpec control metadata was removed on 2026-07-21. Current scope and progress live here; implementation details remain in code, tests, and Git commits.
 - 当前分支：`codex/production-recorded-video-ingest`；Task 20 运行时实现与加固提交为 `473a001`、`71d5d71`、`a7f6f71`、`5252ddb`。启动器 focused tests、脚本语法与生命周期验证由对应任务记录。
 - Task 20A 最终本地证据：三文件串行 aggregate `185 passed, 1 conditional skip`，PowerShell lifecycle `45 passed`，TERM/PASS-lock 高风险 Bash probe 连续三轮通过；PowerShell AST、Bash syntax、compileall、Ruff check/format 和 diff check 全绿。v5 thorough review 为 Critical `0`、Important `0`。候选进程绑定失败仍不写 reason-code 日志，暂作为非阻塞可观测性 Minor 保留，避免 250ms tracker 轮询产生重复日志噪声。
 - Task 23 新增 `scripts/recorded-video-validate.py`：按 `runtime/job_stages/provider/es/search/media/delete` 记录证据，任何依赖或质量失败均写失败报告并返回非零，且在中途失败后仍尝试清理验证资产。中文手册为 `docs/recorded-video-runtime.md`；Ubuntu 真实模型证据仍须由 Task 24 采集，当前报告不得视为服务器通过。
 
 ## Python Quality Program
 
-The repository-wide Python quality work is split into five ordered Comet changes. `frontend/original-ui` is excluded from code-quality refactoring.
+The repository-wide Python quality work was split into five ordered workstreams. `frontend/original-ui` is excluded from code-quality refactoring.
 
 - `stabilize-test-contracts`: implementation and verification complete. The current branch already contains `tests/unit/recorded_video/__init__.py`, which gives `recorded_video/test_models.py` a package-qualified module name while `archive/test_models.py` remains distinct.
 - `enforce-python-quality-baseline`: implementation complete; Ruff lint and format debt is cleared in `src/` and `tests/`.
@@ -136,10 +129,10 @@ Current command for the next validation pass:
 ./scripts/es-runtime-stack.sh --api-port 8000 --es-port 9200 --ui-port 3000 --index vsa-video-embeddings --conda-env vsa-agent
 ```
 
-Operational guide: `docs/superpowers/reference/es-video-search-runtime.md`.
+Operational guide: `docs/es-video-search-runtime.md`.
 
-Server validation status: Ubuntu browser validation has passed. Through the SSH UI tunnel, the original Search UI returned one `runtime-validation.mp4` result for `forklift near worker`; API logs recorded both `original_ui.search.request` and `search_agent.embed_search`, and UI logs contained no stale declaration source-map errors. The evidence is recorded in `docs/superpowers/reports/2026-07-12-interactive-es-ui-validation.md`. The runtime remains a deterministic mock-embedding validation environment, not a production semantic-quality evaluation. `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`. Current Codex sandbox attempts can read `Z:\vsa-agent` but receive `Access denied` on writes; if that happens, run the same script from the normal Windows PowerShell session that owns the `Z:` mapping.
+Server validation status: Ubuntu browser validation has passed. Through the SSH UI tunnel, the original Search UI returned one `runtime-validation.mp4` result for `forklift near worker`; API logs recorded both `original_ui.search.request` and `search_agent.embed_search`, and UI logs contained no stale declaration source-map errors. The runtime remains a deterministic mock-embedding validation environment, not a production semantic-quality evaluation. `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`.
 
 ## Next Recommended Work
 
-完成 Task 22 原版 UI Playwright 上传、搜索、缩略图和 Range 播放验收后进入 Task 24：运行全量 Python/前端/lint/OpenSpec strict，定向同步到 Ubuntu，并采集真实 provider、三并发、Worker 重启恢复、搜索、Range 媒体和生命周期清理证据。
+完成 Task 22 原版 UI Playwright 上传、搜索、缩略图和 Range 播放验收后进入 Task 24：运行全量 Python、前端和 lint 检查，定向同步到 Ubuntu，并采集真实 provider、三并发、Worker 重启恢复、搜索、Range 媒体和生命周期清理证据。

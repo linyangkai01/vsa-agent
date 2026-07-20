@@ -1,4 +1,0 @@
-schema: spec-driven
-created: 2026-07-03
-goal: Verify the Elasticsearch ingest endpoint against a real runtime and
-  document the repeatable validation path.

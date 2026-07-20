@@ -102,4 +102,4 @@ curl -X DELETE "http://127.0.0.1:9200/vsa-video-embeddings"
 - Sync the committed branch to the server only when a server runtime environment is explicitly in use.
 - Keep server credentials and temporary configs out of git.
 - Run the same smoke command against the server API URL and Elasticsearch endpoint.
-- Record the command, PASS output, and cleanup action in the development status or the Comet verification report.
+- Record the command, PASS output, and cleanup action in the development status or a dedicated validation report.

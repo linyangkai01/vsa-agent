@@ -98,5 +98,5 @@ The project SHALL define the next live-run validation step as automatically chec
 
 #### Scenario: Validator is planned as next development task
 
-- WHEN the user reviews the active Comet task list
+- WHEN the user reviews the active development status
 - THEN the next incomplete implementation task is a run-directory validator that checks manifest status, trace events, model/profile selection, output files, and business-flow evidence

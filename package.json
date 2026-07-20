@@ -4,8 +4,5 @@
     "ui:dev:vss": "bash scripts/run_original_ui_vss.sh",
     "ui:stack:vss": "bash scripts/run_original_ui_debug_stack.sh",
     "ui:smoke:vss": "bash scripts/smoke_original_ui_chat.sh"
-  },
-  "dependencies": {
-    "@fission-ai/openspec": "^1.5.0"
   }
 }

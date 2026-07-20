@@ -112,23 +112,8 @@ $ApprovedPaths = @(
         "tests\unit\tools\test_embed_search.py",
         "docs\DEVELOPMENT_STATUS.md",
         "docs\recorded-video-runtime.md",
-        "docs\superpowers\reference\es-video-search-runtime.md",
-        "docs\superpowers\reports\2026-07-09-script-es-runtime-stack-verification.md",
-        "docs\superpowers\reports\2026-07-12-interactive-es-ui-validation.md",
-        "docs\superpowers\reports\2026-07-13-production-recorded-video-validation.md",
-        "docs\superpowers\plans\2026-07-11-interactive-es-ui-validation.md",
-        "docs\superpowers\specs\2026-07-12-production-recorded-video-ingest-design.md",
-        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\.comet.yaml",
-        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\proposal.md",
-        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\design.md",
-        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\tasks.md",
-        "openspec\changes\archive\2026-07-12-script-es-runtime-stack\specs\recorded-video-business-flow\spec.md",
-        "openspec\changes\production-recorded-video-ingest\.comet.yaml",
-        "openspec\changes\production-recorded-video-ingest\.openspec.yaml",
-        "openspec\changes\production-recorded-video-ingest\proposal.md",
-        "openspec\changes\production-recorded-video-ingest\design.md",
-        "openspec\changes\production-recorded-video-ingest\tasks.md",
-        "openspec\changes\production-recorded-video-ingest\specs\recorded-video-business-flow\spec.md"
+        "docs\es-video-search-runtime.md",
+        "docs\recorded-video-validation.md"
 )
 
 $ErrorActionPreference = "Stop"
