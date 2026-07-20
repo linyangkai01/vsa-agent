@@ -16,7 +16,6 @@ pytest-cache-files-*/
 .worktrees/
 .agents/
 .codex/
-.comet/
 .codegraph/
 node_modules/
 .next/
@@ -31,10 +30,6 @@ tmp/
 /.*-review*.md
 /.*-review*.diff
 /.sync-*
-/docs/superpowers/
-/skills-lock.json
-/openspec/
-
 
 # Contains local API keys and machine-specific overrides
 config.local.yaml
@@ -43,4 +38,3 @@ logs/
 data/
 !frontend/original-ui/packages/nemo-agent-toolkit-ui/utils/data/
 !frontend/original-ui/packages/nemo-agent-toolkit-ui/utils/data/*.ts
-.superpowers/

@@ -27,5 +27,4 @@
 - Keep active development status easy to find in `docs/DEVELOPMENT_STATUS.md`.
 - Keep accepted capability requirements under `docs/specs/`.
 - Keep durable design, runtime, and validation documentation under `docs/` with descriptive names.
-- Do not add Comet, Superpowers, OpenSpec workflow metadata, or skill lock files unless the user explicitly re-enables those workflows.
 - Avoid leaving stale plan/design/status documents that make it unclear what is active.
