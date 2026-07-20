@@ -14,6 +14,7 @@ export interface RecordedVideoFixtures {
 }
 
 type RuntimeFixtures = {
+  providerControlUrl: string;
   runtimeBaseUrl: string;
 };
 
@@ -36,7 +37,8 @@ function normalizedRuntimeUrl(value: string): string {
 
 async function runFfmpeg(
   outputPath: string,
-  codecArgs: string[]
+  codecArgs: string[],
+  durationSeconds = 4
 ): Promise<void> {
   const args = [
     "-hide_banner",
@@ -46,7 +48,7 @@ async function runFfmpeg(
     "-f",
     "lavfi",
     "-i",
-    "testsrc2=duration=4:size=320x180:rate=8",
+    `testsrc2=duration=${durationSeconds}:size=320x180:rate=8`,
     "-an",
     ...codecArgs,
     outputPath,
@@ -120,7 +122,25 @@ export async function createRecordedVideoFixtures(
 }
 
 export const test = base.extend<RuntimeFixtures>({
-  runtimeBaseUrl: async ({ baseURL, request }, use) => {
+  providerControlUrl: async ({ request }, provideProviderControlUrl) => {
+    const candidate =
+      process.env.PLAYWRIGHT_PROVIDER_BASE_URL ||
+      (process.env.RUNTIME_BASE_URL ? undefined : "http://127.0.0.1:8399");
+    if (!candidate) {
+      throw new Error(
+        "Deterministic cancellation requires PLAYWRIGHT_PROVIDER_BASE_URL when RUNTIME_BASE_URL is set."
+      );
+    }
+    const providerControlUrl = normalizedRuntimeUrl(candidate);
+    const health = await request.get(`${providerControlUrl}/health`);
+    if (!health.ok()) {
+      throw new Error(
+        `Recorded-video E2E provider returned HTTP ${health.status()} at ${providerControlUrl}`
+      );
+    }
+    await provideProviderControlUrl(providerControlUrl);
+  },
+  runtimeBaseUrl: async ({ baseURL, request }, provideRuntimeBaseUrl) => {
     const candidate = process.env.RUNTIME_BASE_URL || baseURL;
     if (!candidate) {
       throw new Error(
@@ -153,7 +173,7 @@ export const test = base.extend<RuntimeFixtures>({
       );
     }
 
-    await use(runtimeBaseUrl);
+    await provideRuntimeBaseUrl(runtimeBaseUrl);
   },
 });
 

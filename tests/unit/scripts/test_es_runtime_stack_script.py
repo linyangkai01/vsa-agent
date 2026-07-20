@@ -380,8 +380,8 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"scripts\\bootstrap_node.sh"' in text
     assert '"scripts\\run_original_ui_vss.sh"' in text
     assert '"scripts\\runtime-log-supervisor.py"' in text
-    assert '"frontend\\original-ui\\package.json"' in text
-    assert '"frontend\\original-ui\\package-lock.json"' in text
+    assert '"frontend\\original-ui\\package.json"' not in text
+    assert '"frontend\\original-ui\\package-lock.json"' not in text
     assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\package.json"' in text
     assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\next.config.js"' in text
     for task22_server_e2e_path in (
@@ -484,6 +484,14 @@ def test_sync_server_files_default_dry_run_uses_approved_manifest(tmp_path: Path
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "PASS: dry run completed for selected files" in completed.stdout
+
+
+def test_sync_server_files_default_manifest_excludes_unclassified_root_node_manifests(tmp_path: Path) -> None:
+    completed = _run_sync_script(tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "frontend\\original-ui\\package.json" not in completed.stdout
+    assert "frontend\\original-ui\\package-lock.json" not in completed.stdout
 
 
 def test_sync_server_files_dry_run_normalizes_task22_include_path(tmp_path: Path) -> None:

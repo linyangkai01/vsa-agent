@@ -1,0 +1,21 @@
+active_profile: playwright_e2e
+backends:
+  playwright_provider:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:8399/v1
+    api_key_env: PLAYWRIGHT_PROVIDER_API_KEY
+    api_key_required: true
+profiles:
+  playwright_e2e:
+    llm:
+      backend: playwright_provider
+      model: playwright-chat
+    vlm:
+      backend: playwright_provider
+      model: playwright-vision
+    embedding:
+      backend: playwright_provider
+      model: playwright-embedding
+search:
+  allow_mock_fallback: false
+  force_mock_embedding: false

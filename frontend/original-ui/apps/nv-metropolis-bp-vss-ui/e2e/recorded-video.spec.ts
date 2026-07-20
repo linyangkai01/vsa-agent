@@ -157,6 +157,11 @@ if (process.env.JEST_WORKER_ID) {
     expect(thumbnailIdentity).not.toBeNull();
     const assetId = decodeURIComponent(thumbnailIdentity![1]);
     expect(assetId).not.toBe("");
+    const thumbnailResponse = await request.get(
+      new URL(thumbnailSrc!, runtimeBaseUrl).toString()
+    );
+    expect(thumbnailResponse.status()).toBe(200);
+    expect(thumbnailResponse.headers()["content-type"]).toMatch(/^image\//);
 
     const videoResolverPath = `/api/v1/vst/v1/storage/file/${encodeURIComponent(
       assetId
@@ -270,16 +275,35 @@ if (process.env.JEST_WORKER_ID) {
     const media = await createRecordedVideoFixtures(testInfo.outputDir);
 
     await page.goto(runtimeBaseUrl);
-    await chooseRecordedVideos(page, [media.corruptMkv]);
+    const [complete] = await captureCompletedUploads(page, 1, () =>
+      chooseRecordedVideos(page, [media.corruptMkv])
+    );
+    expect(complete.filename).toBe(media.corruptMkvName);
 
     await expect(
       page.getByText("Recorded video processing failed")
     ).toBeVisible({ timeout: 180_000 });
     await expect(page.getByText("1 failed")).toBeVisible();
 
+    const retried = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === `${complete.statusUrl}/retry`
+    );
     await page
       .getByRole("button", { name: `Retry ${media.corruptMkvName}` })
       .click();
+    const retriedResponse = await retried;
+    expect(retriedResponse.request().postData()).toBeNull();
+    expect(retriedResponse.status()).toBe(200);
+    const retryPayload = (await retriedResponse.json()) as {
+      asset_id?: unknown;
+      job_id?: unknown;
+      status?: unknown;
+    };
+    expect(retryPayload.asset_id).toBe(complete.assetId);
+    expect(retryPayload.job_id).toBe(complete.jobId);
+    expect(retryPayload.status).toBe("queued");
     await expect(page.getByText("Processing...")).toBeVisible();
     await expect(
       page.getByText("Recorded video processing failed")
@@ -288,101 +312,70 @@ if (process.env.JEST_WORKER_ID) {
 
   test("cancels a real processing job from the upload progress dialog", async ({
     page,
+    providerControlUrl,
+    request,
     runtimeBaseUrl,
   }, testInfo) => {
     const media = await createRecordedVideoFixtures(testInfo.outputDir);
 
     await page.goto(runtimeBaseUrl);
-    type JobStatusResponseEvidence = {
-      url: string;
-      statusCode: number;
-      body: {
-        asset_id?: unknown;
-        job_id?: unknown;
-        status?: unknown;
-      };
-    };
-    const bufferedJobStatusResponses: JobStatusResponseEvidence[] = [];
-    const pendingJobStatusResponses = new Set<Promise<void>>();
-    const collectJobStatusResponse = (response: Response) => {
-      if (
-        response.request().method() !== "GET" ||
-        !/^\/api\/v1\/jobs\/[^/]+$/.test(new URL(response.url()).pathname)
-      ) {
-        return;
-      }
-
-      const pendingResponse = (async () => {
-        try {
-          bufferedJobStatusResponses.push({
-            url: response.url(),
-            statusCode: response.status(),
-            body: await response.json(),
-          });
-        } catch {
-          // A non-JSON response cannot provide matching job-status evidence.
-        }
-      })();
-      pendingJobStatusResponses.add(pendingResponse);
-      void pendingResponse.then(() =>
-        pendingJobStatusResponses.delete(pendingResponse)
-      );
-    };
-
-    page.on("response", collectJobStatusResponse);
+    const armed = await request.post(
+      `${providerControlUrl}/control/block-next-vision`,
+      { data: {} }
+    );
+    expect(armed.status()).toBe(200);
+    expect(await armed.json()).toEqual({
+      block_next_vision: true,
+      blocked_vision_requests: 0,
+    });
     try {
       const [complete] = await captureCompletedUploads(page, 1, () =>
         chooseRecordedVideos(page, [media.cancelMkv])
       );
       expect(complete.filename).toBe(path.basename(media.cancelMkv));
 
-      let polledResponse: JobStatusResponseEvidence | undefined;
+      await expect(page.getByText("Processing...")).toBeVisible({
+        timeout: 120_000,
+      });
+      const cancelButton = page.getByRole("button", { name: "Cancel All" });
+      await expect(cancelButton).toBeVisible();
+      await expect(cancelButton).toBeEnabled();
+
       await expect
         .poll(
           async () => {
-            await Promise.all(Array.from(pendingJobStatusResponses));
-            const matchingIndex = bufferedJobStatusResponses.findIndex(
-              ({ url, statusCode, body }) =>
-                new URL(url).pathname === complete.statusUrl &&
-                statusCode === 200 &&
-                body.asset_id === complete.assetId &&
-                body.job_id === complete.jobId &&
-                ["queued", "running", "retry_wait"].includes(
-                  body.status as string
-                )
+            const state = await request.get(
+              `${providerControlUrl}/control/state`
             );
-            if (matchingIndex >= 0) {
-              [polledResponse] = bufferedJobStatusResponses.splice(
-                matchingIndex,
-                1
-              );
-            }
-            return polledResponse !== undefined;
+            return (await state.json()).blocked_vision_requests;
           },
           { timeout: 120_000 }
         )
-        .toBe(true);
-      if (!polledResponse) {
-        throw new Error("Matching cancellable job status was not captured");
-      }
-
-      expect(new URL(polledResponse.url).pathname).toBe(complete.statusUrl);
-      expect(polledResponse.statusCode).toBe(200);
-      const pollPayload = polledResponse.body as {
-        asset_id?: unknown;
-        job_id?: unknown;
-        status?: unknown;
-      };
-      expect(pollPayload.asset_id).toBe(complete.assetId);
-      expect(pollPayload.job_id).toBe(complete.jobId);
-      expect(["queued", "running", "retry_wait"]).toContain(pollPayload.status);
+        .toBe(1);
+      const statusEndpoint = new URL(
+        complete.statusUrl,
+        runtimeBaseUrl
+      ).toString();
+      await expect
+        .poll(async () => {
+          const response = await request.get(statusEndpoint);
+          const payload = (await response.json()) as {
+            asset_id?: unknown;
+            job_id?: unknown;
+            status?: unknown;
+          };
+          expect(payload.asset_id).toBe(complete.assetId);
+          expect(payload.job_id).toBe(complete.jobId);
+          return payload.status;
+        })
+        .toBe("running");
 
       const cancelled = page.waitForResponse(
         (response) =>
           response.request().method() === "POST" &&
           new URL(response.url()).pathname === `${complete.statusUrl}/cancel`
       );
-      await page.getByRole("button", { name: "Cancel All" }).click();
+      await cancelButton.click();
       const cancelledResponse = await cancelled;
       expect(cancelledResponse.request().method()).toBe("POST");
       expect(new URL(cancelledResponse.request().url()).pathname).toBe(
@@ -397,11 +390,25 @@ if (process.env.JEST_WORKER_ID) {
       };
       expect(cancelPayload.asset_id).toBe(complete.assetId);
       expect(cancelPayload.job_id).toBe(complete.jobId);
-      expect(["running", "cancelled"]).toContain(cancelPayload.status);
+      expect(cancelPayload.status).toBe("running");
+
+      const released = await request.post(
+        `${providerControlUrl}/control/release`,
+        { data: {} }
+      );
+      expect(released.status()).toBe(200);
+      await expect
+        .poll(async () => {
+          const response = await request.get(statusEndpoint);
+          return ((await response.json()) as { status?: unknown }).status;
+        })
+        .toBe("cancelled");
       await expect(page.getByText("Cancelled")).toBeVisible();
       await expect(page.getByText("1 cancelled")).toBeVisible();
     } finally {
-      page.off("response", collectJobStatusResponse);
+      await request.post(`${providerControlUrl}/control/release`, {
+        data: {},
+      });
     }
   });
 }
