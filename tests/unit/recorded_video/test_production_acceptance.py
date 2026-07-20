@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
 import signal
+import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -503,3 +506,292 @@ def test_controller_restart_reuses_arguments_after_first_launcher_exits(tmp_path
     assert second.run_id != first.run_id
     assert runner.invocations[1]["arguments"] == runner.invocations[0]["arguments"]
     assert runner.invocations[1]["cwd"] == runner.invocations[0]["cwd"]
+
+
+class _FakeHttpResponse:
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _QueuedHttpClient:
+    def __init__(
+        self,
+        *,
+        posts: list[_FakeHttpResponse] | None = None,
+        gets: list[_FakeHttpResponse] | None = None,
+    ) -> None:
+        self.posts = list(posts or [])
+        self.gets = list(gets or [])
+        self.requests: list[tuple[str, str, dict[str, object]]] = []
+
+    def post(self, url: str, **kwargs: object) -> _FakeHttpResponse:
+        self.requests.append(("POST", url, kwargs))
+        return self.posts.pop(0)
+
+    def get(self, url: str, **kwargs: object) -> _FakeHttpResponse:
+        self.requests.append(("GET", url, kwargs))
+        if len(self.gets) > 1:
+            return self.gets.pop(0)
+        return self.gets[0]
+
+
+def _acceptance_case(path: Path, query: str = "forklift"):
+    module = _production_acceptance_module()
+    return module.AcceptanceCase(path=path, query=query, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+def test_production_api_client_rejects_complete_identity_mismatch(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    video = tmp_path / "one.mp4"
+    video.write_bytes(b"video")
+    asset_id = "123e4567-e89b-42d3-a456-426614174011"
+    job_id = "123e4567-e89b-42d3-a456-426614174012"
+    http = _QueuedHttpClient(
+        posts=[
+            _FakeHttpResponse(
+                200,
+                {
+                    "url": "/api/v1/vst/v1/storage/file?upload_session_id=123e4567-e89b-42d3-a456-426614174010",
+                    "asset_id": asset_id,
+                    "upload_session_id": "123e4567-e89b-42d3-a456-426614174010",
+                },
+            ),
+            _FakeHttpResponse(
+                200,
+                {"sensorId": asset_id, "streamId": asset_id, "bytes": 5, "chunkCount": 1},
+            ),
+            _FakeHttpResponse(
+                202,
+                {
+                    "asset_id": "123e4567-e89b-42d3-a456-426614174099",
+                    "job_id": job_id,
+                    "status": "queued",
+                    "status_url": f"/api/v1/jobs/{job_id}",
+                },
+            ),
+        ]
+    )
+    client = module.ProductionApiClient("http://127.0.0.1:8000", client=http)
+
+    with pytest.raises(module.ValidationError, match="asset identity"):
+        client.create_and_complete(_acceptance_case(video))
+
+
+def test_create_jobs_concurrently_uses_three_workers_and_preserves_case_order(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    barrier = threading.Barrier(3)
+    thread_ids: set[int] = set()
+    lock = threading.Lock()
+    cases = []
+    for index in range(3):
+        path = tmp_path / f"case-{index}.mp4"
+        path.write_bytes(bytes([index]))
+        cases.append(_acceptance_case(path, query=f"query-{index}"))
+
+    class ConcurrentClient:
+        def create_and_complete(self, case):
+            with lock:
+                thread_ids.add(threading.get_ident())
+            barrier.wait(timeout=2)
+            index = int(case.path.stem.rsplit("-", 1)[1])
+            return module.JobIdentity(
+                asset_id=f"asset-{index}",
+                job_id=f"job-{index}",
+                status_url=f"/api/v1/jobs/job-{index}",
+            )
+
+    jobs = module.create_jobs_concurrently(ConcurrentClient(), tuple(cases))
+
+    assert [job.job_id for job in jobs] == ["job-0", "job-1", "job-2"]
+    assert len(thread_ids) == 3
+
+
+def test_wait_job_times_out_without_accepting_non_terminal_progress() -> None:
+    module = _production_acceptance_module()
+    job = module.JobIdentity("asset-1", "job-1", "/api/v1/jobs/job-1")
+    http = _QueuedHttpClient(
+        gets=[
+            _FakeHttpResponse(
+                200,
+                {
+                    "asset_id": "asset-1",
+                    "job_id": "job-1",
+                    "status": "running",
+                    "stage": "analyzing",
+                    "attempt": 1,
+                },
+            )
+        ]
+    )
+    clock = {"now": 0.0}
+
+    def monotonic() -> float:
+        return clock["now"]
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    client = module.ProductionApiClient(
+        "http://127.0.0.1:8000",
+        client=http,
+        monotonic=monotonic,
+        sleep=sleep,
+        poll_interval=0.1,
+    )
+
+    with pytest.raises(module.ValidationError, match="timed out"):
+        client.wait_job(job, timeout=0.25)
+
+
+def _checkpoint_database(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                stage TEXT,
+                attempt INTEGER NOT NULL
+            );
+            CREATE TABLE job_steps (
+                job_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                output_manifest TEXT,
+                output_checksum TEXT,
+                model TEXT,
+                elapsed_ms INTEGER
+            );
+            CREATE TABLE segments (
+                segment_id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL
+            );
+            """
+        )
+
+
+def test_read_checkpoint_snapshot_is_ordered_and_uses_current_attempt(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    database = tmp_path / "recorded-video.sqlite3"
+    _checkpoint_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO jobs(job_id, asset_id, status, stage, attempt) VALUES (?, ?, ?, ?, ?)",
+            ("job-1", "asset-1", "running", "analyzing", 2),
+        )
+        connection.executemany(
+            "INSERT INTO job_steps VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("job-1", "segmenting", "completed", "manifest.json", "sha-segment", None, 20),
+                ("job-1", "probing", "completed", "manifest.json", "sha-probe", "ffprobe", 10),
+            ],
+        )
+
+    checkpoints = module.read_checkpoint_snapshot(database, "job-1")
+
+    assert [item.stage for item in checkpoints] == ["probing", "segmenting"]
+    assert {item.attempt for item in checkpoints} == {2}
+    assert checkpoints[0].output_checksum == "sha-probe"
+
+
+def test_read_checkpoint_snapshot_rejects_missing_steps(tmp_path: Path) -> None:
+    module = _production_acceptance_module()
+    database = tmp_path / "recorded-video.sqlite3"
+    _checkpoint_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO jobs(job_id, asset_id, status, stage, attempt) VALUES (?, ?, ?, ?, ?)",
+            ("job-1", "asset-1", "queued", None, 0),
+        )
+
+    with pytest.raises(module.ValidationError, match="checkpoint"):
+        module.read_checkpoint_snapshot(database, "job-1")
+
+
+def _job_snapshot(
+    module,
+    *,
+    job_id: str,
+    asset_id: str,
+    attempt: int,
+    checksum: str,
+    segment_ids: tuple[str, ...],
+    status: str = "completed",
+):
+    checkpoint = module.CheckpointEvidence(
+        job_id=job_id,
+        stage="analyzing",
+        status="completed",
+        output_manifest="derived/v1/attempts/1/manifest.json",
+        output_checksum=checksum,
+        attempt=attempt,
+        elapsed_ms=10,
+    )
+    return module.JobSnapshot(
+        asset_id=asset_id,
+        job_id=job_id,
+        status=status,
+        stage="publish" if status == "completed" else "analyzing",
+        attempt=attempt,
+        checkpoints=(checkpoint,),
+        segment_ids=segment_ids,
+    )
+
+
+def _recovery_state(module, *, checksum: str = "sha-a", attempt: int = 1):
+    snapshots = {
+        f"job-{index}": _job_snapshot(
+            module,
+            job_id=f"job-{index}",
+            asset_id=f"asset-{index}",
+            attempt=attempt,
+            checksum=checksum,
+            segment_ids=(f"segment-{index}",),
+            status="running" if attempt == 1 else "completed",
+        )
+        for index in range(3)
+    }
+    return module.AcceptanceState(jobs=snapshots)
+
+
+def test_assert_recovery_rejects_changed_completed_checkpoint() -> None:
+    module = _production_acceptance_module()
+    before = _recovery_state(module, checksum="sha-before", attempt=1)
+    after = _recovery_state(module, checksum="sha-after", attempt=2)
+
+    with pytest.raises(module.ValidationError, match="checksum"):
+        module.assert_recovery(before, after.jobs)
+
+
+def test_assert_recovery_rejects_duplicate_segments() -> None:
+    module = _production_acceptance_module()
+    before = _recovery_state(module, attempt=1)
+    after = _recovery_state(module, attempt=2)
+    duplicate = _job_snapshot(
+        module,
+        job_id="job-2",
+        asset_id="asset-2",
+        attempt=2,
+        checksum="sha-a",
+        segment_ids=("segment-2", "segment-1"),
+    )
+    after_jobs = dict(after.jobs)
+    after_jobs["job-2"] = duplicate
+
+    with pytest.raises(module.ValidationError, match="duplicate segment"):
+        module.assert_recovery(before, after_jobs)
+
+
+def test_assert_recovery_accepts_three_completed_jobs_with_stable_checkpoints() -> None:
+    module = _production_acceptance_module()
+    before = _recovery_state(module, attempt=1)
+    after = _recovery_state(module, attempt=2)
+
+    module.assert_recovery(before, after.jobs)

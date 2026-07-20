@@ -7,17 +7,35 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import time
 import uuid
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Protocol
+from urllib.parse import urljoin, urlsplit
+
+import httpx
 
 LOGGER = logging.getLogger(__name__)
 _READY_MARKER = "PASS: ES recorded-video runtime stack is ready"
 _MANAGED_COMPONENTS = ("es", "api", "worker", "ui")
+_JOB_STAGE_ORDER = (
+    "probing",
+    "segmenting",
+    "extracting",
+    "analyzing",
+    "embedding",
+    "indexing",
+    "publish",
+)
+_JOB_STAGE_ORDINAL = {stage: ordinal for ordinal, stage in enumerate(_JOB_STAGE_ORDER)}
+_JOB_STATUSES = frozenset({"queued", "running", "retry_wait", "completed", "failed", "cancelled"})
+_UPLOAD_CHUNK_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +72,25 @@ class CheckpointEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class AcceptanceState:
-    cases: tuple[AcceptanceCase, ...] = ()
-    jobs: tuple[JobIdentity, ...] = ()
+class JobSnapshot:
+    asset_id: str
+    job_id: str
+    status: str
+    stage: str | None
+    attempt: int
     checkpoints: tuple[CheckpointEvidence, ...] = ()
     segment_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceState:
+    cases: tuple[AcceptanceCase, ...] = ()
+    jobs: Mapping[str, JobSnapshot] = field(default_factory=dict)
+    checkpoints: tuple[CheckpointEvidence, ...] = ()
+    segment_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "jobs", MappingProxyType(dict(self.jobs)))
 
 
 class ValidationError(RuntimeError):
@@ -643,3 +675,381 @@ class LauncherController:
         if previous.poll() is None:
             raise _launcher_error("cannot restart while the previous launcher is still running")
         return self.start()
+
+
+class HttpResponse(Protocol):
+    status_code: int
+    text: str
+
+    def json(self) -> object: ...
+
+
+class HttpClient(Protocol):
+    def post(self, url: str, **kwargs: object) -> HttpResponse: ...
+
+    def get(self, url: str, **kwargs: object) -> HttpResponse: ...
+
+
+def _api_error(message: str) -> ValidationError:
+    return ValidationError("api", message)
+
+
+def _response_object(response: HttpResponse, operation: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        raise _api_error(f"{operation} returned invalid JSON") from None
+    if not isinstance(payload, dict):
+        raise _api_error(f"{operation} response must be a JSON object")
+    return payload
+
+
+def _expect_status(response: HttpResponse, expected: int, operation: str) -> dict[str, Any]:
+    if response.status_code != expected:
+        detail = response.text[:500].replace("\r", " ").replace("\n", " ")
+        raise _api_error(f"{operation} returned HTTP {response.status_code}, expected {expected}: {detail}")
+    return _response_object(response, operation)
+
+
+def _canonical_response_uuid(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise _api_error(f"{label} is missing from the API response")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        raise _api_error(f"{label} is not a UUID") from None
+    if str(parsed) != value.lower():
+        raise _api_error(f"{label} is not a canonical UUID")
+    return str(parsed)
+
+
+class ProductionApiClient:
+    def __init__(
+        self,
+        api_url: str,
+        *,
+        client: HttpClient | None = None,
+        request_timeout: float = 120.0,
+        poll_interval: float = 1.0,
+        chunk_size: int = _UPLOAD_CHUNK_BYTES,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        parsed = urlsplit(api_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("production API URL must be an HTTP(S) origin without credentials")
+        if request_timeout <= 0 or poll_interval <= 0 or not _positive_integer(chunk_size):
+            raise ValueError("production API timeouts and upload chunk size must be positive")
+        self.api_url = api_url.rstrip("/") + "/"
+        self.request_timeout = request_timeout
+        self.poll_interval = poll_interval
+        self.chunk_size = chunk_size
+        self._client = client or httpx.Client(timeout=request_timeout)
+        self._owns_client = client is None
+        self._monotonic = monotonic
+        self._sleep = sleep
+
+    def close(self) -> None:
+        if self._owns_client:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+
+    def __enter__(self) -> ProductionApiClient:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def _url(self, path: str) -> str:
+        return urljoin(self.api_url, path.lstrip("/"))
+
+    def _post(self, url: str, **kwargs: object) -> HttpResponse:
+        try:
+            return self._client.post(url, timeout=self.request_timeout, **kwargs)
+        except httpx.HTTPError as error:
+            raise _api_error(f"POST {url} failed: {error}") from None
+
+    def _get(self, url: str, **kwargs: object) -> HttpResponse:
+        try:
+            return self._client.get(url, timeout=self.request_timeout, **kwargs)
+        except httpx.HTTPError as error:
+            raise _api_error(f"GET {url} failed: {error}") from None
+
+    def create_and_complete(self, case: AcceptanceCase) -> JobIdentity:
+        if _sha256(case.path) != case.sha256:
+            raise ValidationError("input", f"video changed after acceptance input validation: {case.path}")
+        create = _expect_status(
+            self._post(self._url("/api/v1/videos"), json={"filename": case.path.name}),
+            200,
+            "create upload",
+        )
+        asset_id = _canonical_response_uuid(create.get("asset_id"), "asset_id")
+        upload_session_id = _canonical_response_uuid(create.get("upload_session_id"), "upload_session_id")
+        upload_path = create.get("url")
+        if not isinstance(upload_path, str) or not upload_path.startswith("/"):
+            raise _api_error("create upload did not return a same-origin upload URL")
+        parsed_upload = urlsplit(upload_path)
+        if parsed_upload.scheme or parsed_upload.netloc:
+            raise _api_error("create upload returned a cross-origin upload URL")
+        upload_query = dict(item.split("=", 1) for item in parsed_upload.query.split("&") if "=" in item)
+        if upload_query.get("upload_session_id") != upload_session_id:
+            raise _api_error("create upload URL session identity does not match the response")
+
+        size_bytes = case.path.stat().st_size
+        total_chunks = max(1, (size_bytes + self.chunk_size - 1) // self.chunk_size)
+        mime_type = "video/mp4" if case.path.suffix.lower() == ".mp4" else "video/x-matroska"
+        identifier = f"acceptance-{upload_session_id}"
+        final_upload: dict[str, Any] | None = None
+        with case.path.open("rb") as source:
+            for chunk_number in range(1, total_chunks + 1):
+                content = source.read(self.chunk_size)
+                response = self._post(
+                    self._url(upload_path),
+                    files={"mediaFile": (case.path.name, content, mime_type)},
+                    headers={
+                        "nvstreamer-chunk-number": str(chunk_number),
+                        "nvstreamer-total-chunks": str(total_chunks),
+                        "nvstreamer-is-last-chunk": str(chunk_number == total_chunks).lower(),
+                        "nvstreamer-identifier": identifier,
+                        "nvstreamer-file-name": case.path.name,
+                    },
+                )
+                final_upload = _expect_status(response, 200, f"upload chunk {chunk_number}/{total_chunks}")
+        if final_upload is None:
+            raise _api_error("video upload produced no response")
+        if final_upload.get("sensorId") != asset_id or final_upload.get("streamId") != asset_id:
+            raise _api_error("final upload asset identity does not match the created asset")
+        if final_upload.get("bytes") != size_bytes or final_upload.get("chunkCount") != total_chunks:
+            raise _api_error("final upload size or chunk count does not match the input video")
+
+        completed = _expect_status(
+            self._post(self._url(f"/api/v1/videos/{asset_id}/complete"), json={}),
+            202,
+            "complete upload",
+        )
+        if completed.get("asset_id") != asset_id:
+            raise _api_error("complete upload asset identity does not match the created asset")
+        job_id = _canonical_response_uuid(completed.get("job_id"), "job_id")
+        status_url = completed.get("status_url")
+        if completed.get("status") != "queued" or status_url != f"/api/v1/jobs/{job_id}":
+            raise _api_error("complete upload did not return the expected queued job identity")
+        LOGGER.info(
+            "production_acceptance.upload.completed asset_id=%s job_id=%s file=%s bytes=%d chunks=%d",
+            asset_id,
+            job_id,
+            case.path.name,
+            size_bytes,
+            total_chunks,
+        )
+        return JobIdentity(asset_id=asset_id, job_id=job_id, status_url=status_url)
+
+    def _public_job_snapshot(self, job: JobIdentity, payload: dict[str, Any]) -> JobSnapshot:
+        if payload.get("asset_id") != job.asset_id or payload.get("job_id") != job.job_id:
+            raise _api_error("job status asset or job identity does not match the requested job")
+        status = payload.get("status")
+        stage = payload.get("stage")
+        attempt = payload.get("attempt")
+        if status not in _JOB_STATUSES:
+            raise _api_error("job status response contains an invalid status")
+        if stage is not None and stage not in _JOB_STAGE_ORDINAL:
+            raise _api_error("job status response contains an invalid stage")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+            raise _api_error("job status response contains an invalid attempt")
+        return JobSnapshot(
+            asset_id=job.asset_id,
+            job_id=job.job_id,
+            status=status,
+            stage=stage,
+            attempt=attempt,
+        )
+
+    def get_job(self, job: JobIdentity) -> JobSnapshot:
+        response = self._get(self._url(job.status_url))
+        payload = _expect_status(response, 200, "read job status")
+        return self._public_job_snapshot(job, payload)
+
+    def wait_job(self, job: JobIdentity, timeout: float) -> JobSnapshot:
+        if timeout <= 0:
+            raise ValueError("job timeout must be positive")
+        deadline = self._monotonic() + timeout
+        latest: JobSnapshot | None = None
+        while self._monotonic() < deadline:
+            latest = self.get_job(job)
+            if latest.status == "completed":
+                if latest.stage != "publish":
+                    raise _api_error("completed job did not finish at publish stage")
+                return latest
+            if latest.status in {"failed", "cancelled"}:
+                raise _api_error(
+                    f"job {job.job_id} reached terminal status {latest.status} at stage {latest.stage or 'none'}"
+                )
+            self._sleep(self.poll_interval)
+        detail = "no status" if latest is None else f"status={latest.status} stage={latest.stage or 'none'}"
+        raise _api_error(f"job {job.job_id} timed out after {timeout:g}s ({detail})")
+
+
+def create_jobs_concurrently(
+    client: ProductionApiClient,
+    cases: Sequence[AcceptanceCase],
+) -> tuple[JobIdentity, ...]:
+    if len(cases) != 3:
+        raise ValueError("production acceptance requires exactly three concurrent upload cases")
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="vsa-acceptance-upload") as executor:
+        jobs = tuple(executor.map(client.create_and_complete, cases))
+    if len({job.asset_id for job in jobs}) != 3 or len({job.job_id for job in jobs}) != 3:
+        raise _api_error("concurrent uploads returned duplicate asset or job identities")
+    return jobs
+
+
+def wait_jobs_concurrently(
+    client: ProductionApiClient,
+    jobs: Sequence[JobIdentity],
+    timeout: float,
+) -> dict[str, JobSnapshot]:
+    if len(jobs) != 3:
+        raise ValueError("production acceptance requires exactly three jobs")
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="vsa-acceptance-status") as executor:
+        snapshots = tuple(executor.map(lambda job: client.wait_job(job, timeout), jobs))
+    return {snapshot.job_id: snapshot for snapshot in snapshots}
+
+
+def _checkpoint_error(message: str) -> ValidationError:
+    return ValidationError("checkpoint", message)
+
+
+def _readonly_database(database: Path) -> sqlite3.Connection:
+    try:
+        resolved = Path(database).resolve(strict=True)
+        if not resolved.is_file():
+            raise OSError("database is not a regular file")
+        connection = sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        return connection
+    except (OSError, sqlite3.Error) as error:
+        raise _checkpoint_error(f"recorded-video database is unavailable: {error}") from None
+
+
+def read_checkpoint_snapshot(database: Path, job_id: str) -> tuple[CheckpointEvidence, ...]:
+    try:
+        with _readonly_database(database) as connection:
+            job = connection.execute("SELECT attempt FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if job is None:
+                raise _checkpoint_error(f"job {job_id} is missing from SQLite")
+            attempt = job["attempt"]
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+                raise _checkpoint_error(f"job {job_id} has an invalid attempt")
+            rows = connection.execute(
+                """
+                SELECT stage, status, output_manifest, output_checksum, elapsed_ms
+                FROM job_steps
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise _checkpoint_error(f"failed to read checkpoint rows for job {job_id}: {error}") from None
+    if not rows:
+        raise _checkpoint_error(f"job {job_id} has no durable checkpoint evidence")
+    evidence: list[CheckpointEvidence] = []
+    for row in rows:
+        stage = row["stage"]
+        status = row["status"]
+        if stage not in _JOB_STAGE_ORDINAL or not isinstance(status, str) or not status:
+            raise _checkpoint_error(f"job {job_id} contains an invalid checkpoint row")
+        elapsed_ms = row["elapsed_ms"]
+        if elapsed_ms is not None and (
+            not isinstance(elapsed_ms, int) or isinstance(elapsed_ms, bool) or elapsed_ms < 0
+        ):
+            raise _checkpoint_error(f"job {job_id} contains an invalid checkpoint elapsed time")
+        evidence.append(
+            CheckpointEvidence(
+                job_id=job_id,
+                stage=stage,
+                status=status,
+                output_manifest=row["output_manifest"],
+                output_checksum=row["output_checksum"],
+                attempt=attempt,
+                elapsed_ms=elapsed_ms,
+            )
+        )
+    if len({item.stage for item in evidence}) != len(evidence):
+        raise _checkpoint_error(f"job {job_id} contains duplicate checkpoint stages")
+    evidence.sort(key=lambda item: _JOB_STAGE_ORDINAL[item.stage])
+    return tuple(evidence)
+
+
+def read_job_snapshot(database: Path, identity: JobIdentity) -> JobSnapshot:
+    try:
+        with _readonly_database(database) as connection:
+            job = connection.execute(
+                "SELECT asset_id, status, stage, attempt FROM jobs WHERE job_id = ?",
+                (identity.job_id,),
+            ).fetchone()
+            if job is None:
+                raise _checkpoint_error(f"job {identity.job_id} is missing from SQLite")
+            if job["asset_id"] != identity.asset_id:
+                raise _checkpoint_error(f"job {identity.job_id} asset identity changed in SQLite")
+            segments = connection.execute(
+                "SELECT segment_id FROM segments WHERE asset_id = ? ORDER BY ordinal",
+                (identity.asset_id,),
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise _checkpoint_error(f"failed to read persisted job {identity.job_id}: {error}") from None
+    attempt = job["attempt"]
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+        raise _checkpoint_error(f"job {identity.job_id} has an invalid attempt")
+    return JobSnapshot(
+        asset_id=identity.asset_id,
+        job_id=identity.job_id,
+        status=job["status"],
+        stage=job["stage"],
+        attempt=attempt,
+        checkpoints=read_checkpoint_snapshot(database, identity.job_id),
+        segment_ids=tuple(row["segment_id"] for row in segments),
+    )
+
+
+def assert_recovery(before: AcceptanceState, after: Mapping[str, JobSnapshot]) -> None:
+    if len(before.jobs) != 3 or len(after) != 3 or set(before.jobs) != set(after):
+        raise ValidationError("recovery", "recovery must preserve exactly three job identities")
+    all_segments: list[str] = []
+    asset_ids: set[str] = set()
+    for job_id, previous in before.jobs.items():
+        current = after[job_id]
+        if current.job_id != job_id or current.asset_id != previous.asset_id:
+            raise ValidationError("recovery", f"job {job_id} asset or job identity changed after restart")
+        if current.status != "completed" or current.stage != "publish":
+            raise ValidationError("recovery", f"job {job_id} did not complete publish after restart")
+        if current.attempt < previous.attempt:
+            raise ValidationError("recovery", f"job {job_id} attempt moved backwards after restart")
+        current_checkpoints = {item.stage: item for item in current.checkpoints}
+        if len(current_checkpoints) != len(current.checkpoints):
+            raise ValidationError("recovery", f"job {job_id} has duplicate checkpoint stages after restart")
+        for checkpoint in previous.checkpoints:
+            if checkpoint.status != "completed":
+                continue
+            observed = current_checkpoints.get(checkpoint.stage)
+            if observed is None or observed.status != "completed":
+                raise ValidationError(
+                    "recovery", f"job {job_id} lost completed checkpoint {checkpoint.stage} after restart"
+                )
+            if observed.output_manifest != checkpoint.output_manifest:
+                raise ValidationError(
+                    "recovery", f"job {job_id} checkpoint {checkpoint.stage} manifest changed after restart"
+                )
+            if observed.output_checksum != checkpoint.output_checksum:
+                raise ValidationError(
+                    "recovery", f"job {job_id} checkpoint {checkpoint.stage} checksum changed after restart"
+                )
+        if not current.segment_ids:
+            raise ValidationError("recovery", f"job {job_id} produced no segments after restart")
+        if previous.segment_ids and not set(previous.segment_ids).issubset(current.segment_ids):
+            raise ValidationError("recovery", f"job {job_id} lost persisted segment identity after restart")
+        asset_ids.add(current.asset_id)
+        all_segments.extend(current.segment_ids)
+    if len(asset_ids) != 3:
+        raise ValidationError("recovery", "recovery produced duplicate asset identity")
+    if len(all_segments) != len(set(all_segments)):
+        raise ValidationError("recovery", "recovery produced duplicate segment identity")
