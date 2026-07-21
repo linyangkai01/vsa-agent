@@ -52,6 +52,7 @@ Result: `79 passed, 1 warning`.
 - Task 20A 最终本地证据：三文件串行 aggregate `185 passed, 1 conditional skip`，PowerShell lifecycle `45 passed`，TERM/PASS-lock 高风险 Bash probe 连续三轮通过；PowerShell AST、Bash syntax、compileall、Ruff check/format 和 diff check 全绿。v5 thorough review 为 Critical `0`、Important `0`。候选进程绑定失败仍不写 reason-code 日志，暂作为非阻塞可观测性 Minor 保留，避免 250ms tracker 轮询产生重复日志噪声。
 - Task 23 新增 `scripts/recorded-video-validate.py`：按 `runtime/job_stages/provider/es/search/media/delete` 记录证据，任何依赖或质量失败均写失败报告并返回非零，且在中途失败后仍尝试清理验证资产。中文手册为 `docs/recorded-video-runtime.md`；Ubuntu 真实模型证据仍须由 Task 24 采集，当前报告不得视为服务器通过。
 - 2026-07-21 已补齐搜索结果到视频问答的身份链路：Search API 保留 `asset_id/segment_id/job_id`，原版 UI `+ Chat` 发送片段 context，后端只通过 SQLite 和受控资产目录解析真实路径与相对时间范围，再交给 `video_understanding`。本地证据：相关 Python `136 passed`，Search Jest `165 passed`，Search typecheck 通过。
+- 2026-07-21 新增 `scripts/recorded-video-production-acceptance.py`：一次命令启动两次完整栈，三并发上传真实视频，在持久化 checkpoint 后校验本次 run 的 Worker manifest/UID/cmdline 并中断，随后验证 attempt 恢复、七阶段 checksum、真实 provider identity、ES/SQLite segment、原版 UI 同源搜索/缩略图/Range/选中片段问答和三资产幂等删除。当前仅完成本地 fake-HTTP/SQLite 与生命周期测试；Ubuntu 真实 provider 和浏览器证据仍未采集，`docs/recorded-video-validation.md` 仍不得视为 PASS。
 
 ## Python Quality Program
 

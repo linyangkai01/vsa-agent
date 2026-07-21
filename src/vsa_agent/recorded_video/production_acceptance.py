@@ -69,6 +69,7 @@ class CheckpointEvidence:
     output_checksum: str | None
     attempt: int
     elapsed_ms: int | None
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,6 +481,7 @@ class LauncherController:
         self._processes: dict[str, LauncherProcess] = {}
         self._handles: list[RunHandle] = []
         self._stopped_workers: set[str] = set()
+        self._stopped_launchers: set[str] = set()
 
     def _command(self) -> list[str]:
         command = [
@@ -593,6 +595,9 @@ class LauncherController:
             raise _launcher_error("run handle is not owned by this acceptance controller")
         return process
 
+    def is_running(self, handle: RunHandle) -> bool:
+        return self._process(handle).poll() is None
+
     def wait_ready(self, handle: RunHandle) -> RunHandle:
         process = self._process(handle)
         deadline = self._runner.monotonic() + self._startup_timeout
@@ -668,6 +673,23 @@ class LauncherController:
         )
         return status
 
+    def stop_launcher(self, handle: RunHandle) -> None:
+        if handle.run_id in self._stopped_launchers:
+            return
+        process = self._process(handle)
+        if process.poll() is None:
+            LOGGER.info(
+                "production_acceptance.launcher.term acceptance_id=%s run_id=%s pid=%d",
+                self.acceptance_id,
+                handle.run_id,
+                process.pid,
+            )
+            try:
+                self._runner.send_signal(process.pid, signal.SIGTERM)
+            except OSError as error:
+                raise _launcher_error(f"failed to stop launcher PID {process.pid}: {error}") from None
+        self._stopped_launchers.add(handle.run_id)
+
     def restart(self) -> RunHandle:
         if not self._handles:
             raise _launcher_error("cannot restart before the first launcher run")
@@ -680,6 +702,8 @@ class LauncherController:
 class HttpResponse(Protocol):
     status_code: int
     text: str
+    content: bytes
+    headers: Mapping[str, str]
 
     def json(self) -> object: ...
 
@@ -688,6 +712,8 @@ class HttpClient(Protocol):
     def post(self, url: str, **kwargs: object) -> HttpResponse: ...
 
     def get(self, url: str, **kwargs: object) -> HttpResponse: ...
+
+    def delete(self, url: str, **kwargs: object) -> HttpResponse: ...
 
 
 def _api_error(message: str) -> ValidationError:
@@ -931,7 +957,12 @@ def _readonly_database(database: Path) -> sqlite3.Connection:
         raise _checkpoint_error(f"recorded-video database is unavailable: {error}") from None
 
 
-def read_checkpoint_snapshot(database: Path, job_id: str) -> tuple[CheckpointEvidence, ...]:
+def read_checkpoint_snapshot(
+    database: Path,
+    job_id: str,
+    *,
+    require_evidence: bool = True,
+) -> tuple[CheckpointEvidence, ...]:
     try:
         with _readonly_database(database) as connection:
             job = connection.execute("SELECT attempt FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
@@ -942,7 +973,7 @@ def read_checkpoint_snapshot(database: Path, job_id: str) -> tuple[CheckpointEvi
                 raise _checkpoint_error(f"job {job_id} has an invalid attempt")
             rows = connection.execute(
                 """
-                SELECT stage, status, output_manifest, output_checksum, elapsed_ms
+                SELECT stage, status, output_manifest, output_checksum, elapsed_ms, model
                 FROM job_steps
                 WHERE job_id = ?
                 """,
@@ -950,7 +981,7 @@ def read_checkpoint_snapshot(database: Path, job_id: str) -> tuple[CheckpointEvi
             ).fetchall()
     except sqlite3.Error as error:
         raise _checkpoint_error(f"failed to read checkpoint rows for job {job_id}: {error}") from None
-    if not rows:
+    if not rows and require_evidence:
         raise _checkpoint_error(f"job {job_id} has no durable checkpoint evidence")
     evidence: list[CheckpointEvidence] = []
     for row in rows:
@@ -972,6 +1003,7 @@ def read_checkpoint_snapshot(database: Path, job_id: str) -> tuple[CheckpointEvi
                 output_checksum=row["output_checksum"],
                 attempt=attempt,
                 elapsed_ms=elapsed_ms,
+                model=row["model"],
             )
         )
     if len({item.stage for item in evidence}) != len(evidence):
@@ -980,7 +1012,12 @@ def read_checkpoint_snapshot(database: Path, job_id: str) -> tuple[CheckpointEvi
     return tuple(evidence)
 
 
-def read_job_snapshot(database: Path, identity: JobIdentity) -> JobSnapshot:
+def read_job_snapshot(
+    database: Path,
+    identity: JobIdentity,
+    *,
+    require_checkpoint: bool = True,
+) -> JobSnapshot:
     try:
         with _readonly_database(database) as connection:
             job = connection.execute(
@@ -1006,9 +1043,68 @@ def read_job_snapshot(database: Path, identity: JobIdentity) -> JobSnapshot:
         status=job["status"],
         stage=job["stage"],
         attempt=attempt,
-        checkpoints=read_checkpoint_snapshot(database, identity.job_id),
+        checkpoints=read_checkpoint_snapshot(database, identity.job_id, require_evidence=require_checkpoint),
         segment_ids=tuple(row["segment_id"] for row in segments),
     )
+
+
+def wait_for_recovery_baseline(
+    database: Path,
+    cases: Sequence[AcceptanceCase],
+    jobs: Sequence[JobIdentity],
+    *,
+    timeout: float,
+    poll_interval: float = 0.1,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> AcceptanceState:
+    if len(cases) != 3 or len(jobs) != 3:
+        raise ValueError("recovery baseline requires exactly three cases and jobs")
+    if timeout <= 0 or poll_interval <= 0:
+        raise ValueError("recovery baseline timeouts must be positive")
+    deadline = monotonic() + timeout
+    latest: dict[str, JobSnapshot] = {}
+    while monotonic() < deadline:
+        try:
+            latest = {
+                identity.job_id: read_job_snapshot(database, identity, require_checkpoint=False) for identity in jobs
+            }
+        except ValidationError:
+            sleep(poll_interval)
+            continue
+        terminal_failure = next(
+            (snapshot for snapshot in latest.values() if snapshot.status in {"failed", "cancelled"}),
+            None,
+        )
+        if terminal_failure is not None:
+            raise ValidationError(
+                "recovery",
+                f"job {terminal_failure.job_id} reached {terminal_failure.status} before worker interruption",
+            )
+        completed_checkpoints = [
+            checkpoint
+            for snapshot in latest.values()
+            for checkpoint in snapshot.checkpoints
+            if checkpoint.status == "completed" and checkpoint.output_manifest and checkpoint.output_checksum
+        ]
+        in_flight = [snapshot for snapshot in latest.values() if snapshot.status != "completed"]
+        if completed_checkpoints and in_flight:
+            return AcceptanceState(
+                cases=tuple(cases),
+                jobs=latest,
+                checkpoints=tuple(completed_checkpoints),
+                segment_ids=tuple(segment_id for snapshot in latest.values() for segment_id in snapshot.segment_ids),
+            )
+        if not in_flight:
+            raise ValidationError(
+                "recovery",
+                "all three jobs completed before a recoverable worker interruption could be observed",
+            )
+        sleep(poll_interval)
+    states = ", ".join(
+        f"{snapshot.job_id}:{snapshot.status}/{snapshot.stage or 'none'}" for snapshot in latest.values()
+    )
+    raise ValidationError("recovery", f"timed out waiting for a durable recovery checkpoint ({states})")
 
 
 def assert_recovery(before: AcceptanceState, after: Mapping[str, JobSnapshot]) -> None:
@@ -1016,6 +1112,7 @@ def assert_recovery(before: AcceptanceState, after: Mapping[str, JobSnapshot]) -
         raise ValidationError("recovery", "recovery must preserve exactly three job identities")
     all_segments: list[str] = []
     asset_ids: set[str] = set()
+    resumed_attempts = 0
     for job_id, previous in before.jobs.items():
         current = after[job_id]
         if current.job_id != job_id or current.asset_id != previous.asset_id:
@@ -1024,6 +1121,8 @@ def assert_recovery(before: AcceptanceState, after: Mapping[str, JobSnapshot]) -
             raise ValidationError("recovery", f"job {job_id} did not complete publish after restart")
         if current.attempt < previous.attempt:
             raise ValidationError("recovery", f"job {job_id} attempt moved backwards after restart")
+        if current.attempt > previous.attempt:
+            resumed_attempts += 1
         current_checkpoints = {item.stage: item for item in current.checkpoints}
         if len(current_checkpoints) != len(current.checkpoints):
             raise ValidationError("recovery", f"job {job_id} has duplicate checkpoint stages after restart")
@@ -1053,3 +1152,5 @@ def assert_recovery(before: AcceptanceState, after: Mapping[str, JobSnapshot]) -
         raise ValidationError("recovery", "recovery produced duplicate asset identity")
     if len(all_segments) != len(set(all_segments)):
         raise ValidationError("recovery", "recovery produced duplicate segment identity")
+    if resumed_attempts == 0:
+        raise ValidationError("recovery", "Worker restart did not reclaim any interrupted job attempt")

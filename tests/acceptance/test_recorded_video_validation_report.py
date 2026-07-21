@@ -8,7 +8,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "docs/recorded-video-validation.md"
-REPORT_FIELDS = ("runtime", "job_stages", "provider", "es", "search", "media", "delete")
+REPORT_FIELDS = ("runtime", "job_stages", "provider", "es", "search", "media", "qa", "delete")
 COMMON_EVIDENCE_FIELDS = ("run_id", "timestamp_utc", "asset_id", "job_id", "segment_id", "provider", "model")
 PRODUCTION_PROVIDERS = {"openai_compatible", "vllm"}
 INCOMPLETE_MARKERS = (
@@ -91,10 +91,20 @@ def _assert_complete_server_evidence(report: str) -> None:
     assert common["run_id"] in log_contents
     manifest = json.loads((log_path.parent / "processes.json").read_text(encoding="utf-8"))
     assert manifest["run_id"] == common["run_id"]
+    launcher_runs = _field(sections["runtime"], "launcher_runs").split(",")
+    assert len(launcher_runs) == len(set(launcher_runs)) == 2
+    assert launcher_runs[-1] == common["run_id"]
+    assert all(str(UUID(run_id)) == run_id.lower() for run_id in launcher_runs)
     assert not re.search(r"(?i)(authorization\s*:\s*bearer|api[_ -]?key\s*[:=]\s*\S+)", log_contents)
     assert _field(sections["runtime"], "secret_scan") == "PASS (无密钥)"
     assert "三并发" in sections["job_stages"]
     assert "Worker 重启" in sections["job_stages"]
+    assert _field(sections["job_stages"], "concurrency") == "3"
+    assert _field(sections["job_stages"], "worker_restart") == "PASS"
+    asset_ids = _field(sections["job_stages"], "asset_ids").split(",")
+    job_ids = _field(sections["job_stages"], "job_ids").split(",")
+    assert len(asset_ids) == len(set(asset_ids)) == 3 and common["asset_id"] in asset_ids
+    assert len(job_ids) == len(set(job_ids)) == 3 and common["job_id"] in job_ids
     assert "真实 provider" in sections["provider"]
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,}", _field(sections["es"], "index"))
     segment_ids = _field(sections["es"], "segment_ids").split(",")
@@ -106,20 +116,34 @@ def _assert_complete_server_evidence(report: str) -> None:
     assert _field(sections["search"], "result_asset_id") == common["asset_id"]
     assert _field(sections["search"], "result_job_id") == common["job_id"]
     assert _field(sections["search"], "result_segment_id") in segment_ids
+    case_evidence_ref = Path(_field(sections["search"], "case_evidence_ref"))
+    assert case_evidence_ref.is_file()
+    case_evidence = json.loads(case_evidence_ref.read_text(encoding="utf-8"))
+    assert case_evidence["launcher_runs"] == launcher_runs
+    assert len(case_evidence["cases"]) == 3
+    assert {item["asset_id"] for item in case_evidence["cases"]} == set(asset_ids)
+    assert {item["job_id"] for item in case_evidence["cases"]} == set(job_ids)
     similarity = float(_field(sections["search"], "similarity"))
     assert 0.0 <= similarity <= 1.0
     assert _field(sections["media"], "HTTP 206") == "PASS"
     assert _field(sections["media"], "Accept-Ranges").lower() == "bytes"
     assert re.fullmatch(r"bytes 0-0/[1-9][0-9]*", _field(sections["media"], "Content-Range"))
+    assert _field(sections["media"], "validated_assets") == "3"
+    assert _field(sections["qa"], "understood_assets") == "3"
+    answer_excerpt = _field(sections["qa"], "answer_excerpt")
+    assert len(answer_excerpt) >= 20 and not re.search(r"(?i)(^|\b)error\s*:", answer_excerpt)
+    assert Path(_field(sections["qa"], "case_evidence_ref")) == case_evidence_ref
     cleanup_path = _field(sections["delete"], "cleanup_path")
     assert re.fullmatch(r"/[^\s]+", cleanup_path)
     assert not Path(cleanup_path).exists()
     assert _field(sections["delete"], "cleanup_status") == "PASS"
+    assert _field(sections["delete"], "deleted_assets") == "3"
     assert "删除清理" in sections["delete"]
 
 
 def _complete_contract_report(tmp_path: Path) -> str:
-    run_id = "123e4567-e89b-12d3-a456-426614174000"
+    first_run_id = "123e4567-e89b-12d3-a456-426614174001"
+    run_id = "123e4567-e89b-12d3-a456-426614174002"
     run_dir = tmp_path / run_id
     run_dir.mkdir()
     log_path = run_dir / "stack.log"
@@ -128,7 +152,20 @@ def _complete_contract_report(tmp_path: Path) -> str:
         json.dumps({"run_id": run_id, "processes": []}),
         encoding="utf-8",
     )
-    common = """- run_id: 123e4567-e89b-12d3-a456-426614174000
+    case_evidence_path = tmp_path / "recorded-video-validation.cases.json"
+    case_evidence_path.write_text(
+        json.dumps(
+            {
+                "launcher_runs": [first_run_id, run_id],
+                "cases": [
+                    {"asset_id": f"asset-20260718-000{index}", "job_id": f"job-20260718-000{index}"}
+                    for index in range(1, 4)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    common = """- run_id: 123e4567-e89b-12d3-a456-426614174002
 - timestamp_utc: 2026-07-18T12:34:56Z
 - asset_id: asset-20260718-0001
 - job_id: job-20260718-0001
@@ -143,14 +180,19 @@ def _complete_contract_report(tmp_path: Path) -> str:
 ## runtime
 
 PASS
-{common}- log_ref: {log_path}
+{common}- launcher_runs: {first_run_id},{run_id}
+- log_ref: {log_path}
 - secret_scan: PASS (无密钥)
 无密钥配置摘要与运行日志路径已记录。
 
 ## job_stages
 
 PASS
-{common}- stage_history: 三并发任务已完成，Worker 重启恢复轨迹已记录。
+{common}- concurrency: 3
+- worker_restart: PASS
+- asset_ids: asset-20260718-0001,asset-20260718-0002,asset-20260718-0003
+- job_ids: job-20260718-0001,job-20260718-0002,job-20260718-0003
+- stage_history: 三并发任务已完成，Worker 重启恢复轨迹已记录。
 
 ## provider
 
@@ -176,6 +218,7 @@ PASS
 - result_asset_id: asset-20260718-0001
 - result_job_id: job-20260718-0001
 - result_segment_id: segment-20260718-0001
+- case_evidence_ref: {case_evidence_path}
 搜索 asset/segment identity 与 similarity 已记录。
 
 ## media
@@ -184,13 +227,23 @@ PASS
 {common}- HTTP 206: PASS
 - Accept-Ranges: bytes
 - Content-Range: bytes 0-0/2048
+- validated_assets: 3
 缩略图与 HTTP 206 Range 结果已记录。
+
+## qa
+
+PASS
+{common}- understood_assets: 3
+- answer_excerpt: The selected clip shows a forklift approaching a worker and requires a safe separation distance.
+- case_evidence_ref: {case_evidence_path}
+选中视频片段理解问答和 video_understanding trace 已记录。
 
 ## delete
 
 PASS
 {common}- cleanup_path: /data/project/vsa-data/assets/asset-20260718-0001
 - cleanup_status: PASS
+- deleted_assets: 3
 删除清理结果已记录。
 """
 
@@ -229,6 +282,11 @@ PASS
 
 PASS
 缩略图与 HTTP 206 Range 结果已记录。
+
+## qa
+
+PASS
+选中视频片段理解问答证据已记录。
 
 ## delete
 

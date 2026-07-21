@@ -99,6 +99,58 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@10.157.68.44
 
 ### 真实录播链路验证器
 
+#### 最终生产恢复验收（推荐 gate）
+
+下面的一条命令自行启动完整栈两次，不需要预先运行 normal 栈。三个 `--video` 必须是存在、可读、内容 SHA-256 不同的真实 MP4/MKV；`--query` 可传一次供三个视频共用，也可按视频顺序传三次。生产 profile 必须关闭 mock fallback 和 mock embedding。
+
+```bash
+conda run --no-capture-output -n vsa-agent python scripts/recorded-video-production-acceptance.py \
+  --video /data/project/lyk/validation/forklift-worker.mp4 \
+  --video /data/project/lyk/validation/worker-fall.mp4 \
+  --video /data/project/lyk/validation/smoke-event.mkv \
+  --query 'forklift near worker' \
+  --query 'worker falls to the ground' \
+  --query 'visible smoke event' \
+  --config config.yaml \
+  --index vsa-video-embeddings \
+  --data-root /data/project/lyk/vsa-data \
+  --conda-env vsa-agent \
+  --api-port 8000 \
+  --es-port 9200 \
+  --ui-port 3000 \
+  --report docs/recorded-video-validation.md
+```
+
+执行顺序固定为：第一次完整栈 readiness → 三并发原版分块上传 → 捕获持久化 checkpoint → 校验 manifest/UID/cmdline/run 路径后只向本次 Worker supervisor 发送 TERM → 第一次 launcher 完整退出 → 使用相同端口、索引和数据根目录启动第二次栈 → 至少一个 job 的 `attempt` 增加并完成 publish → 校验七阶段 checkpoint、真实 provider identity、ES 文档 → 通过原版 UI 同源代理执行三次搜索、缩略图、Range 播放和选中片段理解问答 → 幂等删除三资产 → 回收第二次 launcher → 扫描日志并原子写报告。
+
+证据位于：
+
+```text
+.runtime/production-acceptance/{acceptance_id}/
+├── acceptance.log
+├── launcher-1.log
+├── launcher-2.log
+└── state.json
+
+.runtime/es-stack/runs/{run_id}/
+├── stack.log
+├── api.log
+├── worker.log
+├── ui.log
+├── processes.json
+└── chat-traces/{request}/
+    ├── request.json
+    ├── trace.jsonl
+    └── tool-results/
+
+docs/recorded-video-validation.md
+docs/recorded-video-validation.cases.json
+```
+
+只有报告同时包含两个不同 launcher run、`concurrency: 3`、`worker_restart: PASS`、三个唯一 asset/job、ES/SQLite segment 一致、三个 HTTP 206、三个 `video_understanding.result` trace 和三资产删除结果时，才允许写 `总体结果：PASS`。任一步失败都写 FAIL 报告并返回非零；运行栈仍可用时会尝试删除本次资产，无法安全清理的残留保留在数据根目录供排查，不会杀死未验证归属的进程。
+
+#### 单资产快速诊断
+
 保持 normal 栈在第一个服务器终端运行，在第二个服务器终端执行：
 
 ```bash
@@ -113,7 +165,7 @@ conda run --no-capture-output -n vsa-agent python scripts/recorded-video-validat
   --report docs/recorded-video-validation.md
 ```
 
-验证器真实按 `runtime → job_stages → provider → es → search → media → delete` 执行：
+单资产验证器按 `runtime → job_stages → provider → es → search → media → delete` 执行，适合快速定位 provider、索引或媒体问题；它不证明三并发、Worker 中断恢复或选中片段问答，因此不能替代上面的最终 gate：
 
 1. 检查 API、UI、同源代理，并从本次 run 的 active config 读取 profile、provider model/base host、ES endpoint/index 和 mock 开关；报告不读取或记录 key 值，且生产验收要求 mock 关闭。
 2. 上传样例并等待任务完成，从同一数据根目录的 SQLite 读取完整阶段 checkpoint。

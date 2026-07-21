@@ -199,3 +199,56 @@ The project SHALL provide scripts and configuration for starting a single-node E
 - **THEN** the Elasticsearch startup scripts, Compose configuration, and validation instructions are present in the server project
 - **AND** any missing server-side execution dependency is recorded clearly instead of being reported as a successful runtime validation
 
+### Requirement: Production recorded-video upload and recovery
+
+The system SHALL accept real MP4/MKV files through the original UI upload contract, process them in an independent recoverable Worker, persist durable checkpoints in SQLite, and publish only complete segment projections to Elasticsearch.
+
+#### Scenario: Three real uploads survive a Worker restart
+
+- **GIVEN** three readable video files with distinct SHA-256 content and a production profile with mock fallback disabled
+- **WHEN** the production acceptance runner uploads all three concurrently, interrupts the verified Worker after a durable checkpoint, and starts the same stack again
+- **THEN** the second Worker completes all three jobs through `publish`
+- **AND** at least one interrupted job is reclaimed with an increased attempt
+- **AND** every completed pre-interruption manifest and checksum remains unchanged
+- **AND** the seven pipeline checkpoints are complete and segment identities are unique
+
+#### Scenario: Worker interruption is fail-closed
+
+- **WHEN** the acceptance runner prepares to interrupt a Worker
+- **THEN** it requires a current-run `processes.json` with exactly one active Worker entry
+- **AND** it verifies the run ID, launcher-owned PID, current UID, runtime supervisor command, Worker command, config path, status path, and log paths
+- **AND** it sends no signal when any identity evidence is missing or inconsistent
+
+### Requirement: Original UI recorded-video business flow
+
+The system SHALL expose uploaded assets through the original UI same-origin routes for semantic search, thumbnails, byte-range playback, selected-segment chat, and deletion without requiring NVIDIA runtime services.
+
+#### Scenario: Search, playback and selected-segment understanding succeed
+
+- **GIVEN** a recovered job has completed `publish` with real vision and embedding provider checkpoints
+- **WHEN** its case query is submitted through the original UI same-origin search route
+- **THEN** the result binds the expected `asset_id`, `job_id`, and `segment_id`
+- **AND** its thumbnail is non-empty and a one-byte media request returns HTTP 206 with valid Range headers
+- **AND** the original UI `+ Chat` context resolves the same server-owned asset and segment
+- **AND** the chat trace contains `original_ui.chat.request` and `video_understanding.result`
+- **AND** the answer is non-empty and does not contain an error response
+
+#### Scenario: Completed acceptance assets are deleted idempotently
+
+- **WHEN** the acceptance runner deletes each of its three completed assets twice through the original UI same-origin route
+- **THEN** both deletion attempts complete without creating duplicate work
+- **AND** Elasticsearch contains no matching documents
+- **AND** SQLite contains a deletion tombstone but no job, job-step, or segment rows for the asset
+- **AND** source, derived, thumbnail, and media paths are no longer accessible
+
+### Requirement: Auditable production acceptance
+
+The project SHALL provide one no-sudo Ubuntu command that performs the two-run, three-video production business-flow acceptance and writes atomic Chinese evidence.
+
+#### Scenario: Production acceptance reports PASS only with complete evidence
+
+- **WHEN** `scripts/recorded-video-production-acceptance.py` reports PASS
+- **THEN** the report names two distinct launcher run IDs, three unique asset/job identities, concurrency 3, Worker restart PASS, provider models, Elasticsearch segment counts, search identity, HTTP 206, selected-video understanding, and deletion cleanup
+- **AND** a case JSON file records evidence for all three videos
+- **AND** referenced logs contain no API key or Authorization value
+- **AND** any missing dependency, malformed evidence, provider failure, search miss, chat failure, or cleanup failure produces a non-zero exit and a FAIL report

@@ -984,10 +984,10 @@ run_python_stack_command "${doctor_args[@]}"
 
 if [[ -n "$CONDA_ENV" ]]; then
   start_supervised_process api "$API_LOG_PATH" "conda run --no-capture-output -n $CONDA_ENV python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT" \
-    env VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 bash -c 'conda "$@"' vsa-conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT"
+    env VSA_CONFIG="$API_CONFIG_PATH" VSA_ORIGINAL_UI_TRACE_ROOT="$RUN_DIR/chat-traces" PYTHONUNBUFFERED=1 bash -c 'conda "$@"' vsa-conda run --no-capture-output -n "$CONDA_ENV" python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT"
 else
   start_supervised_process api "$API_LOG_PATH" "python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port $API_PORT" \
-    env VSA_CONFIG="$API_CONFIG_PATH" PYTHONUNBUFFERED=1 python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT"
+    env VSA_CONFIG="$API_CONFIG_PATH" VSA_ORIGINAL_UI_TRACE_ROOT="$RUN_DIR/chat-traces" PYTHONUNBUFFERED=1 python -m uvicorn vsa_agent.api.routes:app --host 127.0.0.1 --port "$API_PORT"
 fi
 API_PID="$STARTED_SUPERVISOR_PID"
 wait_component_status_running api

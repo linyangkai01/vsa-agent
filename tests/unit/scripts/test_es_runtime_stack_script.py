@@ -68,6 +68,7 @@ def test_stack_proxies_browser_search_requests_through_the_original_ui():
     next_config = VSS_NEXT_CONFIG.read_text(encoding="utf-8")
 
     assert 'NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1"' in launcher
+    assert 'VSA_ORIGINAL_UI_TRACE_ROOT="$RUN_DIR/chat-traces"' in launcher
     assert 'NEXT_PUBLIC_VST_API_URL="/api/v1/vst"' in launcher
     assert 'VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1"' in launcher
     assert '$env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"' in windows_launcher
@@ -380,6 +381,16 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"scripts\\bootstrap_node.sh"' in text
     assert '"scripts\\run_original_ui_vss.sh"' in text
     assert '"scripts\\runtime-log-supervisor.py"' in text
+    for acceptance_path in (
+        "scripts\\recorded-video-production-acceptance.py",
+        "src\\vsa_agent\\recorded_video\\production_acceptance.py",
+        "src\\vsa_agent\\recorded_video\\production_evidence.py",
+        "src\\vsa_agent\\recorded_video\\production_runner.py",
+        "tests\\unit\\recorded_video\\test_production_acceptance.py",
+        "tests\\unit\\recorded_video\\test_production_evidence.py",
+        "tests\\acceptance\\test_recorded_video_validation_report.py",
+    ):
+        assert f'"{acceptance_path}"' in text
     assert '"frontend\\original-ui\\package.json"' not in text
     assert '"frontend\\original-ui\\package-lock.json"' not in text
     assert '"frontend\\original-ui\\apps\\nv-metropolis-bp-vss-ui\\package.json"' in text
@@ -398,6 +409,7 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"docs\\recorded-video-validation.md"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\utils\\data\\throttle.ts"' in text
     assert '"frontend\\original-ui\\packages\\nemo-agent-toolkit-ui\\__tests__\\utils\\throttle.test.ts"' in text
+
 
 def test_sync_server_files_script_uses_targeted_copy_not_recursive_robocopy():
     text = _sync_script_text()
