@@ -115,6 +115,7 @@ search:
   enabled: false
   es_endpoint: ""
   embed_index: vsa-video-embeddings
+  embedding_dimensions: 1024
   behavior_index: vsa-video-behavior
   frames_index:
   vector_field: vector
@@ -133,5 +134,8 @@ recorded_video:
   segment_duration_sec: 30
   representative_frames: 4
   worker_concurrency: 3
+  provider_concurrency: 1
   lease_sec: 120
   max_attempts: 3
+  ffmpeg_path: ffmpeg
+  ffprobe_path: ffprobe

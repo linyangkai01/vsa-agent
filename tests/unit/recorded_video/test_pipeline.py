@@ -37,9 +37,12 @@ class FakeMediaProcessor:
     def __init__(self) -> None:
         self.probe_calls = 0
         self.extract_calls = 0
+        self.source_paths: dict[str, Path] = {}
 
     async def probe(self, path: str | Path) -> MediaProbe:
         assert Path(path).is_file()
+        source = Path(path)
+        self.source_paths[source.parents[1].name] = source
         self.probe_calls += 1
         return MediaProbe(
             duration_ms=5_000,
@@ -50,6 +53,10 @@ class FakeMediaProcessor:
             pixel_format="yuv420p",
             audio_codec="aac",
         )
+
+    async def ensure_playback_proxy(self, asset: Asset) -> Path:
+        assert asset.asset_id == "asset-1"
+        return self.source_paths[asset.asset_id]
 
     async def extract_representative_frames(
         self,
@@ -371,6 +378,13 @@ async def test_manifest_records_versions_checksums_and_deterministic_projection(
     assert all(document["_id"] == document["segment_id"] for document in documents)
     assert all(document["job_id"] == job.job_id for document in documents)
     assert all(document["job_attempt"] == job.attempt for document in documents)
+    assert all(
+        document["screenshot_url"] == f"/api/v1/videos/{job.asset_id}/segments/{document['segment_id']}/thumbnail"
+        for document in documents
+    )
+    extraction = manifest["stages"]["extracting"]["output"]
+    assert extraction["playback_key"] == "source/original.mp4"
+    assert extraction["playback_key"] in extraction["artifacts"]
     assert all(
         document["readiness"]
         == {

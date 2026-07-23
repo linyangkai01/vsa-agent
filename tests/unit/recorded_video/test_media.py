@@ -89,13 +89,22 @@ def _probe_payload_with_values(*, duration: object = "12.5", width: object = 192
 
 
 class FakeRunner:
-    def __init__(self, payload: str | None = None, generated_payload: str | None = None) -> None:
+    def __init__(
+        self,
+        payload: str | None = None,
+        generated_payload: str | None = None,
+        *,
+        encoders: str = " V..... libx264 H.264 encoder\n",
+    ) -> None:
         self.payload = payload or _probe_payload()
         self.generated_payload = generated_payload or _probe_payload(container="mov,mp4,m4a,3gp,3g2,mj2")
+        self.encoders = encoders
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((args, kwargs))
+        if "-encoders" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=self.encoders, stderr="")
         if args[0] == "ffprobe":
             path = Path(args[-1])
             payload = self.generated_payload if "proxy" in path.name or ".tmp." in path.name else self.payload
@@ -735,6 +744,36 @@ async def test_ffmpeg_nonzero_exit_is_sanitized_configuration_error(tmp_path: Pa
     assert failure.value.code is ErrorCode.CONFIGURATION
     assert str(source) not in str(failure.value)
     assert "encoder failure" not in str(failure.value)
+    assert failure.value.diagnostic is not None
+    assert "ffmpeg_exit=1" in failure.value.diagnostic
+    assert "operation=frame" in failure.value.diagnostic
+    assert "offset_sec=4" in failure.value.diagnostic
+    assert "encoder failure" in failure.value.diagnostic
+    assert str(source) not in failure.value.diagnostic
+    assert source.name in failure.value.diagnostic
+
+
+async def test_ffmpeg_diagnostic_redacts_credentials_and_bounds_stderr(tmp_path: Path) -> None:
+    source = tmp_path / "private-source.mkv"
+    source.write_bytes(b"source")
+
+    def failed_ffmpeg(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        stderr = f"api_key=secret-value failed reading {source} " + ("x" * 2_000)
+        return subprocess.CompletedProcess(args, 7, stdout="", stderr=stderr)
+
+    with pytest.raises(RecordedVideoError) as failure:
+        await MediaProcessor(runner=failed_ffmpeg).extract_representative_frames(
+            source,
+            _segment(),
+            tmp_path / "frames",
+            frame_count=1,
+        )
+
+    diagnostic = failure.value.diagnostic or ""
+    assert "secret-value" not in diagnostic
+    assert str(source) not in diagnostic
+    assert "<redacted>" in diagnostic
+    assert diagnostic.endswith("...<truncated>")
 
 
 async def test_compatible_mp4_reuses_source_without_invoking_ffmpeg(store: LocalAssetStore) -> None:
@@ -765,7 +804,7 @@ async def test_h264_mp4_with_incompatible_pixel_format_is_transcoded(
 
     await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
 
-    command = next(args for args, _kwargs in runner.calls if args[0] == "ffmpeg")
+    command = next(args for args, _kwargs in runner.calls if "-c:v" in args)
     assert command[command.index("-c:v") + 1] == "libx264"
     assert command[command.index("-pix_fmt") + 1] == "yuv420p"
 
@@ -792,9 +831,59 @@ async def test_mkv_remuxes_or_transcodes_then_reuses_a_valid_proxy(store: LocalA
 
     await transcoding_processor.ensure_playback_proxy(asset)
 
-    transcode_call = next(args for args, _kwargs in incompatible.calls if args[0] == "ffmpeg")
+    transcode_call = next(args for args, _kwargs in incompatible.calls if "-c:v" in args)
     assert transcode_call[transcode_call.index("-c:v") + 1] == "libx264"
     assert transcode_call[transcode_call.index("-c:a") + 1] == "aac"
+
+
+async def test_transcode_uses_available_libopenh264_encoder(store: LocalAssetStore) -> None:
+    asset = _asset(extension="mkv")
+    await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
+    runner = FakeRunner(
+        _probe_payload(video_codec="ffv1", audio_codec="pcm_s16le"),
+        encoders=" V....D libopenh264 OpenH264 encoder\n V.S..D mpeg4 MPEG-4 part 2\n",
+    )
+
+    await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
+
+    transcode_call = next(args for args, _kwargs in runner.calls if "-c:v" in args)
+    assert transcode_call[transcode_call.index("-c:v") + 1] == "libopenh264"
+
+
+async def test_transcode_fails_with_diagnostic_when_software_h264_encoder_is_unavailable(
+    store: LocalAssetStore,
+) -> None:
+    asset = _asset(extension="mkv")
+    await store.write_atomic("assets/asset-uuid/source/original.mkv", b"source")
+    runner = FakeRunner(
+        _probe_payload(video_codec="ffv1", audio_codec="pcm_s16le"),
+        encoders=" V.S..D mpeg4 MPEG-4 part 2\n",
+    )
+
+    with pytest.raises(RecordedVideoError) as failure:
+        await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
+
+    assert failure.value.code is ErrorCode.CONFIGURATION
+    assert failure.value.retryable is False
+    assert failure.value.diagnostic == (
+        "playback_encoder_unavailable required=libx264,libopenh264 detected_h264=<none>"
+    )
+    assert not any("-c:v" in args for args, _kwargs in runner.calls)
+
+
+async def test_playback_encoder_discovery_is_cached(store: LocalAssetStore) -> None:
+    first = _asset(asset_id="asset-one", extension="mkv")
+    second = _asset(asset_id="asset-two", extension="mkv")
+    await store.write_atomic("assets/asset-one/source/original.mkv", b"source-one")
+    await store.write_atomic("assets/asset-two/source/original.mkv", b"source-two")
+    runner = FakeRunner(_probe_payload(video_codec="ffv1", audio_codec="pcm_s16le"))
+    processor = MediaProcessor(store=store, runner=runner)
+
+    await processor.ensure_playback_proxy(first)
+    await processor.ensure_playback_proxy(second)
+
+    encoder_probes = [args for args, _kwargs in runner.calls if "-encoders" in args]
+    assert len(encoder_probes) == 1
 
 
 async def test_generated_proxy_with_mkv_container_is_rejected_and_cleaned(store: LocalAssetStore) -> None:
@@ -903,7 +992,7 @@ async def test_proxy_maps_only_first_video_and_optional_first_audio(store: Local
 
     await MediaProcessor(store=store, runner=runner).ensure_playback_proxy(asset)
 
-    command = next(args for args, _kwargs in runner.calls if args[0] == "ffmpeg")
+    command = next(args for args, _kwargs in runner.calls if "-map" in args)
     mapped_streams = [command[index + 1] for index, argument in enumerate(command) if argument == "-map"]
     assert mapped_streams == ["0:v:0", "0:a:0?"]
     assert "-sn" in command

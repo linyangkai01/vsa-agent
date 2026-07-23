@@ -529,7 +529,13 @@ export default function Home({ alertsData, searchData, dashboardData, mapData, v
           onSubmitMessageReady={handleSidebarSubmitMessageReady}
           onMessageSubmitted={handleSidebarMessageSubmitted}
           onAddQueryContextReady={(addItem) => {
-            appSidebarAddQueryContextRef.current = addItem;
+            appSidebarAddQueryContextRef.current = (item) =>
+              addItem({
+                id: item.id,
+                label: item.label,
+                type: item.contextType,
+                data: item.data,
+              });
           }}
           onChatVideoUploadComplete={handleSidebarChatVideoUploadComplete}
         />

@@ -182,6 +182,7 @@ class SearchBackendConfig(BaseModel):
     enabled: bool = False
     es_endpoint: str = ""
     embed_index: str = "vsa-video-embeddings"
+    embedding_dimensions: int = Field(1024, gt=0)
     behavior_index: str = "vsa-video-behavior"
     frames_index: str | None = None
     vector_field: str = "vector"
@@ -207,8 +208,11 @@ class RecordedVideoConfig(BaseModel):
     segment_duration_sec: int = Field(30, gt=0)
     representative_frames: int = Field(4, ge=1, le=16)
     worker_concurrency: int = Field(3, ge=1, le=5)
+    provider_concurrency: int = Field(1, ge=1, le=5)
     lease_sec: int = Field(120, gt=0)
     max_attempts: int = Field(3, ge=1)
+    ffmpeg_path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
 
 
 class AppConfig(BaseModel):

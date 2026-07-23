@@ -581,9 +581,18 @@ def test_bash_windows_cleanup_uses_only_registered_supervisor_pids():
 def test_bash_launcher_records_its_running_msys_pid_in_the_run_directory():
     bash = _bash()
 
+    assert 'LAUNCHER_PID="$BASHPID"' in bash
     assert 'LAUNCHER_PID_PATH="$RUN_DIR/launcher.pid"' in bash
-    assert 'printf \'%s\\n\' "$BASHPID" >"$LAUNCHER_PID_PATH"' in bash
-    assert 'log_stack "launcher_pid=$BASHPID"' in bash
+    assert 'printf \'%s\\n\' "$LAUNCHER_PID" >"$LAUNCHER_PID_PATH"' in bash
+    assert 'log_stack "launcher_pid=$LAUNCHER_PID"' in bash
+
+
+def test_bash_stale_ui_cleanup_protects_launcher_ancestor_chain():
+    function = _bash_function("stale_project_ui_pids")
+
+    assert 'pid="$LAUNCHER_PID"' in function
+    assert 'ps -p "$pid" -o ppid=' in function
+    assert 'index(protected, " " $2 " ") == 0' in function
 
 
 def test_bash_cleanup_internal_status_lines_do_not_start_new_supervisors():
@@ -918,6 +927,19 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
           printf '405'
           exit 0
         fi
+        if [[ "$*" == *"/_alias/validation-"* ]]; then
+          url="${@: -1}"
+          alias="${url##*/}"
+          printf '{"%s-contract-v1":{"aliases":{"%s":{"is_write_index":true}}}}\n' "$alias" "$alias"
+          exit 0
+        fi
+        if [[ "$*" == *"/_cat/indices/validation-"* ]]; then
+          url="${@: -1}"
+          alias="${url##*/indices/}"
+          alias="${alias%-*?h=index}"
+          printf '%s-contract-v1\n' "$alias"
+          exit 0
+        fi
         if [[ "$*" == *"/health"* ]]; then printf '{"status":"ok"}\n'; else printf '{}\n'; fi
         """,
     )
@@ -944,6 +966,11 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         if [[ "$1" == "-c" ]]; then exec "$REAL_PYTHON" "$@"; fi
         if [[ "$1" == "scripts/runtime-doctor.py" ]]; then
           echo 'api_key=doctor-secret'
+          exit 0
+        fi
+        if [[ "$1" == "scripts/recorded-video-bootstrap-index.py" ]]; then
+          printf 'bootstrap=%s\n' "$*" >>"$HARNESS_TRACE"
+          printf '{"alias":"validation-alias","created_alias":true}\n'
           exit 0
         fi
         if [[ "$1" == "-m" && "$2" == "uvicorn" ]]; then
@@ -2568,7 +2595,7 @@ def test_bash_normal_start_never_invokes_validation_smoke(tmp_path: Path):
     assert "smoke=" not in trace
     run_dir = next((repo / ".runtime/es-stack/runs").iterdir())
     manifest = json.loads((run_dir / "processes.json").read_text(encoding="utf-8"))
-    assert {item["component"] for item in manifest["processes"]} == {"es", "api"}
+    assert {item["component"] for item in manifest["processes"]} == {"es", "api", "worker"}
     assert all(item["exit_status"] is not None for item in manifest["processes"])
 
 
@@ -2836,7 +2863,7 @@ def test_bash_interruption_cleans_validation_index_data_and_config(tmp_path: Pat
     assert "PASS:" not in (run_dir / "stack.log").read_text(encoding="utf-8")
     delete_lines = [line for line in trace.splitlines() if "-X DELETE" in line]
     assert any(line.endswith(f"/validation-{run_dir.name}-legacy-smoke") for line in delete_lines)
-    assert any(line.endswith(f"/validation-{run_dir.name}") for line in delete_lines)
+    assert any(line.endswith(f"/validation-{run_dir.name}-contract-v1") for line in delete_lines)
     assert not (run_dir / "validation-config.yaml").exists()
     assert not (run_dir / "config.yaml").exists()
     assert not (run_dir / f"validation-{run_dir.name}").exists()
@@ -4823,7 +4850,9 @@ def test_validation_targets_the_legacy_smoke_index_created_by_the_ingest_api():
 
     assert 'VALIDATION_SMOKE_INDEX="${VALIDATION_INDEX}-legacy-smoke"' in bash
     assert '--index "$VALIDATION_SMOKE_INDEX"' in bash
-    assert 'for validation_resource in "$VALIDATION_SMOKE_INDEX" "$VALIDATION_INDEX"; do' in bash
+    assert 'curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX"' in bash
+    assert 'curl -fsS "$ES_ENDPOINT/_cat/indices/${VALIDATION_INDEX}-*?h=index"' in bash
+    assert 'for validation_resource in "$VALIDATION_SMOKE_INDEX" $validation_indices; do' in bash
     assert '"$ES_ENDPOINT/$validation_resource"' in bash
     assert '$validationSmokeIndex = "$validationIndex-legacy-smoke"' in powershell
     assert '"--index", $validationSmokeIndex' in powershell

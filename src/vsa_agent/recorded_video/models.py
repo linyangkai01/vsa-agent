@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Any
 
@@ -23,7 +23,7 @@ from pydantic import (
 from vsa_agent.recorded_video.errors import InvalidStateTransition
 
 
-class AssetStatus(str, Enum):
+class AssetStatus(StrEnum):
     UPLOADING = "uploading"
     READY = "ready"
     PROCESSING = "processing"
@@ -32,7 +32,7 @@ class AssetStatus(str, Enum):
     DELETED = "deleted"
 
 
-class JobStatus(str, Enum):
+class JobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     RETRY_WAIT = "retry_wait"
@@ -41,7 +41,7 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class JobStage(str, Enum):
+class JobStage(StrEnum):
     PROBING = "probing"
     SEGMENTING = "segmenting"
     EXTRACTING = "extracting"

@@ -171,6 +171,56 @@ def test_job_status_exposes_only_public_fields_and_safe_error(api_context: tuple
     assert client.get("/api/v1/jobs/missing").status_code == 404
 
 
+def test_ready_segment_thumbnail_is_served_without_exposing_internal_path(
+    api_context: tuple[TestClient, Path],
+) -> None:
+    client, database_path = api_context
+    asset_id = _ready_asset(client)
+    completed = client.post(f"/api/v1/videos/{asset_id}/complete", json={}).json()
+    segment_id = "segment-1"
+    thumbnail_key = "derived/v1/thumb.jpg"
+    thumbnail = database_path.parent / "assets" / asset_id / thumbnail_key
+    thumbnail.parent.mkdir(parents=True, exist_ok=True)
+    thumbnail.write_bytes(b"jpeg-thumbnail")
+    now = datetime.now(UTC)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE assets SET status = ?, updated_at = ? WHERE asset_id = ?",
+            ("ready", now.isoformat(), asset_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO segments (
+                segment_id, asset_id, pipeline_version, ordinal, start_offset_ms, end_offset_ms,
+                start_time, end_time, description, thumbnail_key, model, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                segment_id,
+                asset_id,
+                "v1",
+                0,
+                0,
+                1_000,
+                now.isoformat(),
+                (now + timedelta(seconds=1)).isoformat(),
+                "forklift near worker",
+                thumbnail_key,
+                "vision-model",
+                "prompt-v1",
+            ),
+        )
+
+    response = client.get(f"/api/v1/videos/{asset_id}/segments/{segment_id}/thumbnail")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == b"jpeg-thumbnail"
+    assert thumbnail_key not in response.text
+    assert client.get(f"/api/v1/videos/{asset_id}/segments/other/thumbnail").status_code == 404
+    assert completed["asset_id"] == asset_id
+
+
 def test_retry_only_accepts_failed_jobs_and_clears_transient_status(api_context: tuple[TestClient, Path]) -> None:
     client, database_path = api_context
     completed = client.post(f"/api/v1/videos/{_ready_asset(client)}/complete", json={}).json()

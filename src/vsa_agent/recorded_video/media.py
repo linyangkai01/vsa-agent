@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -24,6 +26,11 @@ _MP4_FORMAT_NAMES = frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
 _BROWSER_VIDEO_CODECS = frozenset({"avc1", "h264"})
 _BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3"})
 _BROWSER_PIXEL_FORMATS = frozenset({"yuv420p"})
+_SOFTWARE_H264_ENCODERS = ("libx264", "libopenh264")
+_DIAGNOSTIC_LIMIT = 1_000
+_CREDENTIAL_VALUE = re.compile(r"(?i)(authorization|api[_-]?key|token|password)(\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+")
+
+LOGGER = logging.getLogger(__name__)
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -64,6 +71,8 @@ class MediaProcessor:
         self._timeout_sec = timeout_sec
         self._ffmpeg_timeout_sec = ffmpeg_timeout_sec
         self._runner = runner
+        self._playback_encoder: str | None = None
+        self._playback_encoder_lock = asyncio.Lock()
 
     async def probe(self, path: str | Path) -> MediaProbe:
         """Read trusted metadata from ffprobe's JSON output."""
@@ -157,7 +166,7 @@ class MediaProcessor:
 
         temporary = self._temporary_path(destination)
         try:
-            command = self._proxy_command(source, source_probe, temporary)
+            command = await self._proxy_command(source, source_probe, temporary)
             await self._run_ffmpeg(command)
             proxy_probe = await self.probe(temporary)
             if not self._is_directly_playable(proxy_probe):
@@ -190,7 +199,7 @@ class MediaProcessor:
         self._discard_temporary_file(destination)
         return None
 
-    def _proxy_command(self, source: Path, probe: MediaProbe, temporary: Path) -> list[str]:
+    async def _proxy_command(self, source: Path, probe: MediaProbe, temporary: Path) -> list[str]:
         common = [
             self._ffmpeg_path,
             "-v",
@@ -207,10 +216,11 @@ class MediaProcessor:
         ]
         if self._has_browser_codecs(probe):
             return [*common, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", str(temporary)]
+        video_encoder = await self._select_playback_encoder()
         return [
             *common,
             "-c:v",
-            "libx264",
+            video_encoder,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -222,6 +232,54 @@ class MediaProcessor:
             str(temporary),
         ]
 
+    async def _select_playback_encoder(self) -> str:
+        if self._playback_encoder is not None:
+            return self._playback_encoder
+
+        async with self._playback_encoder_lock:
+            if self._playback_encoder is not None:
+                return self._playback_encoder
+            command = [self._ffmpeg_path, "-hide_banner", "-encoders"]
+            result = await self._run(command, timeout_sec=self._timeout_sec)
+            if result.returncode != 0:
+                raise RecordedVideoError(
+                    ErrorCode.CONFIGURATION,
+                    retryable=False,
+                    message="CONFIGURATION: ffmpeg encoder discovery failed",
+                    diagnostic=self._ffmpeg_failure_diagnostic(command, result),
+                )
+
+            available = self._parse_video_encoders(f"{result.stdout}\n{result.stderr}")
+            encoder = next((candidate for candidate in _SOFTWARE_H264_ENCODERS if candidate in available), None)
+            if encoder is None:
+                detected = ",".join(sorted(name for name in available if "264" in name)) or "<none>"
+                raise RecordedVideoError(
+                    ErrorCode.CONFIGURATION,
+                    retryable=False,
+                    message="CONFIGURATION: no browser-compatible software H.264 encoder is available",
+                    diagnostic=(
+                        "playback_encoder_unavailable "
+                        f"required={','.join(_SOFTWARE_H264_ENCODERS)} detected_h264={detected}"
+                    ),
+                )
+
+            self._playback_encoder = encoder
+            LOGGER.info(
+                "recorded_video.media.playback_encoder_selected encoder=%s ffmpeg=%s",
+                encoder,
+                self._ffmpeg_path,
+            )
+            return encoder
+
+    @staticmethod
+    def _parse_video_encoders(output: str) -> frozenset[str]:
+        encoders: set[str] = set()
+        for line in output.splitlines():
+            columns = line.split(None, 2)
+            if len(columns) >= 2 and columns[0].startswith("V"):
+                encoders.add(columns[1])
+        return frozenset(encoders)
+
     async def _run_ffmpeg(self, command: list[str]) -> None:
         result = await self._run(command, timeout_sec=self._ffmpeg_timeout_sec)
         if result.returncode != 0:
@@ -229,7 +287,44 @@ class MediaProcessor:
                 ErrorCode.CONFIGURATION,
                 retryable=False,
                 message="CONFIGURATION: media processing failed",
+                diagnostic=self._ffmpeg_failure_diagnostic(command, result),
             )
+
+    @classmethod
+    def _ffmpeg_failure_diagnostic(
+        cls,
+        command: list[str],
+        result: subprocess.CompletedProcess[str],
+    ) -> str:
+        if "-encoders" in command:
+            operation = "encoder_probe"
+        else:
+            operation = "frame" if "-frames:v" in command else "playback_proxy"
+        offset = cls._argument_after(command, "-ss")
+        stderr = result.stderr or ""
+        for value in sorted(command, key=len, reverse=True):
+            if cls._looks_like_path(value):
+                stderr = stderr.replace(value, f"<{Path(value).name or 'path'}>")
+        stderr = _CREDENTIAL_VALUE.sub(r"\1\2<redacted>", stderr)
+        stderr = " ".join(stderr.split())
+        if len(stderr) > _DIAGNOSTIC_LIMIT:
+            stderr = f"{stderr[:_DIAGNOSTIC_LIMIT]}...<truncated>"
+        fields = [f"ffmpeg_exit={result.returncode}", f"operation={operation}"]
+        if offset is not None:
+            fields.append(f"offset_sec={offset}")
+        fields.append(f"stderr={stderr or '<empty>'}")
+        return " ".join(fields)
+
+    @staticmethod
+    def _argument_after(command: list[str], option: str) -> str | None:
+        try:
+            return command[command.index(option) + 1]
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _looks_like_path(value: str) -> bool:
+        return "/" in value or "\\" in value
 
     async def _run(self, command: list[str], *, timeout_sec: float) -> subprocess.CompletedProcess[str]:
         if self._runner is None:
@@ -438,6 +533,9 @@ class MediaProcessor:
             ErrorCode.CONFIGURATION,
             retryable=False,
             message="CONFIGURATION: media output could not be stored",
+            diagnostic=(
+                f"media_storage_failure error_type={type(error).__name__} errno={getattr(error, 'errno', None)}"
+            ),
         ) from error
 
     @staticmethod

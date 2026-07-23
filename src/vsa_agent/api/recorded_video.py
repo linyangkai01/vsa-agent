@@ -441,6 +441,26 @@ async def get_recorded_video_job(job_id: str) -> dict[str, object]:
     return _public_job(job)
 
 
+@router.get("/api/v1/videos/{asset_id}/segments/{segment_id}/thumbnail")
+async def get_recorded_video_thumbnail(asset_id: str, segment_id: str) -> Response:
+    repository, store, _ = _repository_and_store()
+    await repository.initialize()
+    try:
+        asset = await repository.get_asset(asset_id)
+        if asset.status is not AssetStatus.READY or asset.deleted_at is not None:
+            raise KeyError("asset is not ready")
+        segment = next(
+            (item for item in await repository.list_segments(asset_id) if item.segment_id == segment_id),
+            None,
+        )
+        if segment is None or not segment.thumbnail_key:
+            raise KeyError("segment has no thumbnail")
+        thumbnail = await store.resolve_thumbnail_path(asset_id, segment.thumbnail_key)
+    except (FileNotFoundError, KeyError, RecordedVideoError):
+        raise HTTPException(status_code=404, detail="thumbnail not found") from None
+    return Response(content=thumbnail.read_bytes(), media_type="image/jpeg")
+
+
 @router.post("/api/v1/jobs/{job_id}/retry")
 async def retry_recorded_video_job(job_id: str) -> dict[str, object]:
     repository, _, _ = _repository_and_store()

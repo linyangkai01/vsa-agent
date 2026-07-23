@@ -211,6 +211,45 @@ async def test_provider_http_transient_failures_are_retryable(status: int, code:
 
     assert caught.value.code is code
     assert caught.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_provider_quota_403_is_classified_permanently_without_leaking_body() -> None:
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            403,
+            json={
+                "error": {
+                    "code": "AllocationQuota.FreeTierOnly",
+                    "message": "secret account details must not be logged",
+                }
+            },
+            headers={"x-request-id": "request-123"},
+        )
+    )
+    async with _client(transport) as client:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://provider.example/v1",
+            api_key="secret",
+            model="embedding-model",
+            client=client,
+        )
+        with pytest.raises(RecordedVideoError) as caught:
+            await provider.embed(
+                "forklift",
+                expected_dims=2,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
+
+    assert caught.value.code is ErrorCode.MODEL_QUOTA
+    assert caught.value.retryable is False
+    assert caught.value.stage == "embedding"
+    assert caught.value.diagnostic == (
+        "provider_http_failure stage=embedding status=403 "
+        "provider_code=AllocationQuota.FreeTierOnly request_id=request-123"
+    )
+    assert "secret account" not in (caught.value.diagnostic or "")
     assert "provider body" not in str(caught.value)
 
 

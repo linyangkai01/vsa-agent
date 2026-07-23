@@ -71,6 +71,7 @@ def _hit(*, attempt: int, score: float = 1.9) -> dict[str, object]:
                 "job_id": "job-1",
                 "pipeline_version": "v1",
                 "attempt": attempt,
+                "authority": "sqlite",
             },
             "pipeline_version": "v1",
             "video_name": "yard.mp4",
@@ -249,6 +250,37 @@ async def test_production_search_filters_every_hit_through_sqlite_readiness(monk
 async def test_production_search_fails_closed_when_hit_readiness_is_malformed(monkeypatch) -> None:
     malformed_hit = _hit(attempt=2)
     malformed_hit["_source"]["readiness"] = {"asset_id": "not-the-top-level-asset"}
+    fake_es = FakeES([malformed_hit])
+
+    class EmbedClient:
+        async def embed_query(self, query: str):
+            assert query == "forklift near worker"
+            return [0.1, 0.2, 0.3]
+
+    config = SearchBackendConfig(
+        enabled=True,
+        es_endpoint="http://es:9200",
+        embed_index="vsa-video-segments",
+        allow_mock_fallback=False,
+    )
+    monkeypatch.setattr(embed_search, "_create_es_client", lambda _config: fake_es)
+    monkeypatch.setattr(embed_search, "_create_default_embed_client", lambda **_: EmbedClient())
+
+    with pytest.raises(embed_search.SearchDependencyError):
+        await embed_search._search_real_es(
+            "forklift near worker",
+            10,
+            config,
+            readiness_repository=ReadyRepository(),
+        )
+
+    assert fake_es.closed is True
+
+
+@pytest.mark.asyncio
+async def test_production_search_rejects_non_sqlite_readiness_authority(monkeypatch) -> None:
+    malformed_hit = _hit(attempt=2)
+    malformed_hit["_source"]["readiness"]["authority"] = "untrusted"
     fake_es = FakeES([malformed_hit])
 
     class EmbedClient:

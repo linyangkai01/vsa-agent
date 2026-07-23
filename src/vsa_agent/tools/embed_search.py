@@ -371,12 +371,18 @@ def _create_readiness_repository():
 def _readiness_identity(hit: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
     source = hit.get("_source")
     readiness = source.get("readiness") if isinstance(source, Mapping) else None
-    if not isinstance(readiness, Mapping) or set(readiness) != {
+    required_fields = {
         "asset_id",
         "job_id",
         "pipeline_version",
         "attempt",
-    }:
+        "authority",
+    }
+    if (
+        not isinstance(readiness, Mapping)
+        or not required_fields.issubset(readiness)
+        or readiness.get("authority") != "sqlite"
+    ):
         return None
     asset_id = readiness.get("asset_id")
     job_id = readiness.get("job_id")

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
+import logging
 import subprocess
 import sys
 from collections import deque
@@ -15,13 +17,37 @@ import vsa_agent.recorded_video.errors as recorded_video_errors
 from vsa_agent.recorded_video.errors import ErrorCode, LeaseLostError, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, AssetStatus, Job, JobStage, JobStatus, UploadSession
 from vsa_agent.recorded_video.repository import JobRepository
-from vsa_agent.recorded_video.worker import RecordedVideoWorker, parse_worker_args
+from vsa_agent.recorded_video.worker import RecordedVideoWorker, _configure_worker_logging, parse_worker_args
 
 NOW = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
 
 
 def test_lease_lost_error_preserves_permission_error_compatibility() -> None:
     assert issubclass(recorded_video_errors.LeaseLostError, PermissionError)
+
+
+def test_worker_runtime_logging_is_visible_and_idempotent() -> None:
+    logger = logging.getLogger("vsa_agent.recorded_video")
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    original_propagate = logger.propagate
+    logger.handlers.clear()
+    stream = io.StringIO()
+    try:
+        handler = _configure_worker_logging(stream)
+        assert _configure_worker_logging(stream) is handler
+
+        logging.getLogger("vsa_agent.recorded_video.media").info(
+            "recorded_video.media.playback_encoder_selected encoder=libopenh264"
+        )
+
+        assert stream.getvalue().count("playback_encoder_selected encoder=libopenh264") == 1
+    finally:
+        for handler in logger.handlers:
+            handler.close()
+        logger.handlers[:] = original_handlers
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
 
 
 def _job(name: str, *, attempt: int = 0) -> Job:
@@ -502,6 +528,67 @@ async def test_worker_emits_json_readiness_and_redacted_error_codes() -> None:
     assert failed_event["error_code"] == "MODEL_TIMEOUT"
     assert failed_event["stage"] == "analyzing"
     assert "secret-value" not in "\n".join(lines)
+
+
+@pytest.mark.asyncio
+async def test_worker_emits_safe_media_diagnostic_without_persisting_it() -> None:
+    lines: list[str] = []
+    repository = MemoryRepository([_job("media-failed")])
+    error = RecordedVideoError(
+        ErrorCode.CONFIGURATION,
+        retryable=False,
+        message="CONFIGURATION: media processing failed",
+        diagnostic="ffmpeg_exit=1 operation=frame offset_sec=4 stderr=decoder failed",
+    )
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=CountingPipeline(error),
+        worker_concurrency=1,
+        lease_sec=90,
+        max_attempts=1,
+        clock=lambda: NOW,
+        output=lines.append,
+    )
+
+    await worker.run_once()
+
+    failed_event = next(event for event in map(json.loads, lines) if event["event"] == "job.failed")
+    assert failed_event["error_detail"] == error.diagnostic
+    assert repository.failures == [("media-failed", 1, "CONFIGURATION")]
+
+
+@pytest.mark.asyncio
+async def test_worker_emits_active_stage_separately_from_checkpoint_stage() -> None:
+    lines: list[str] = []
+    checkpointed = _job("provider-failed").model_copy(update={"stage": JobStage.PROBING})
+
+    class CheckpointRepository(MemoryRepository):
+        async def get_job(self, job_id: str) -> Job:
+            return _job(job_id).model_copy(update={"stage": JobStage.PROBING})
+
+    repository = CheckpointRepository([checkpointed])
+    error = RecordedVideoError(
+        ErrorCode.MODEL_QUOTA,
+        retryable=False,
+        message="MODEL_QUOTA: provider allocation quota is unavailable",
+        diagnostic="provider_http_failure stage=analyzing status=403 provider_code=AllocationQuota.FreeTierOnly",
+        stage="analyzing",
+    )
+    worker = RecordedVideoWorker(
+        repository=repository,
+        pipeline=CountingPipeline(error),
+        worker_concurrency=1,
+        lease_sec=90,
+        max_attempts=1,
+        clock=lambda: NOW,
+        output=lines.append,
+    )
+
+    await worker.run_once()
+
+    failed_event = next(event for event in map(json.loads, lines) if event["event"] == "job.failed")
+    assert failed_event["stage"] == "probing"
+    assert failed_event["active_stage"] == "analyzing"
 
 
 @pytest.mark.asyncio

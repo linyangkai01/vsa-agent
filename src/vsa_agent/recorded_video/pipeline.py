@@ -36,6 +36,8 @@ _HASH_CHUNK_BYTES = 1024 * 1024
 class MediaPipelineProcessor(Protocol):
     async def probe(self, path: str | Path) -> MediaProbe: ...
 
+    async def ensure_playback_proxy(self, asset: Asset) -> Path: ...
+
     async def extract_representative_frames(
         self,
         source_path: str | Path,
@@ -236,7 +238,10 @@ class RecordedVideoPipeline:
 
             started_at = self._now()
             monotonic_start = time.monotonic()
-            output = await self._fenced_call(job, operation)
+            try:
+                output = await self._fenced_call(job, operation)
+            except RecordedVideoError as error:
+                raise error.with_stage(stage.value)
             validator(output)
             await self._cancel_point(job)
             completed_at = self._now()
@@ -281,7 +286,7 @@ class RecordedVideoPipeline:
         extraction_output, extraction_sha = await run_stage(
             JobStage.EXTRACTING,
             segment_sha,
-            lambda: self._extract(job, source_path, segments, asset_dir, manifest_path.parent),
+            lambda: self._extract(job, probed_asset, source_path, segments, asset_dir, manifest_path.parent),
             lambda output: self._validate_extraction(output, segments),
         )
         analysis_output, analysis_sha = await run_stage(
@@ -400,6 +405,7 @@ class RecordedVideoPipeline:
     async def _extract(
         self,
         job: Job,
+        asset: Asset,
         source_path: Path,
         segments: Sequence[Segment],
         asset_dir: Path,
@@ -407,6 +413,12 @@ class RecordedVideoPipeline:
     ) -> dict[str, Any]:
         artifacts: dict[str, str] = {}
         outputs: list[dict[str, Any]] = []
+        playback_path = await self._fenced_call(job, lambda: self._media.ensure_playback_proxy(asset))
+        resolved_playback = Path(playback_path).resolve()
+        if not resolved_playback.is_relative_to(asset_dir):
+            raise _pipeline_error("media processor emitted an uncontrolled playback path")
+        playback_key = resolved_playback.relative_to(asset_dir).as_posix()
+        artifacts[playback_key] = _sha256_file(resolved_playback)
         frame_root = attempt_dir / "frames"
         for segment in segments:
             paths = await self._fenced_call(
@@ -433,7 +445,7 @@ class RecordedVideoPipeline:
                     "thumbnail_key": frame_keys[0] if frame_keys else None,
                 }
             )
-        return {"artifacts": artifacts, "segments": outputs}
+        return {"artifacts": artifacts, "playback_key": playback_key, "segments": outputs}
 
     async def _analyze(
         self,
@@ -534,7 +546,11 @@ class RecordedVideoPipeline:
                 "end_time": segment.end_time.isoformat(),
                 "start_offset_ms": segment.start_offset_ms,
                 "end_offset_ms": segment.end_offset_ms,
-                "screenshot_url": segment.thumbnail_key,
+                "screenshot_url": (
+                    f"/api/v1/videos/{asset.asset_id}/segments/{segment.segment_id}/thumbnail"
+                    if segment.thumbnail_key
+                    else None
+                ),
                 "vector": vectors[segment.segment_id],
             }
             for segment in segments
@@ -581,9 +597,16 @@ class RecordedVideoPipeline:
         try:
             items = output["segments"]
             artifacts = output["artifacts"]
+            playback_key = output["playback_key"]
         except KeyError as error:
             raise _pipeline_error("extraction manifest is incomplete") from error
-        if not isinstance(items, list) or not isinstance(artifacts, dict) or len(items) != len(segments):
+        if (
+            not isinstance(items, list)
+            or not isinstance(artifacts, dict)
+            or not isinstance(playback_key, str)
+            or not playback_key
+            or len(items) != len(segments)
+        ):
             raise _pipeline_error("extraction manifest is incomplete")
         all_frames: list[str] = []
         for segment, item in zip(segments, items, strict=True):
@@ -604,7 +627,7 @@ class RecordedVideoPipeline:
                     message="CORRUPT_MEDIA: representative frame output is incomplete",
                 )
             all_frames.extend(frames)
-        if len(set(all_frames)) != len(all_frames) or set(artifacts) != set(all_frames):
+        if len(set(all_frames)) != len(all_frames) or set(artifacts) != {*all_frames, playback_key}:
             raise _pipeline_error("representative frame artifact ownership is invalid")
 
     @staticmethod
@@ -705,7 +728,11 @@ class RecordedVideoPipeline:
                 "end_time": segment.end_time.isoformat(),
                 "start_offset_ms": segment.start_offset_ms,
                 "end_offset_ms": segment.end_offset_ms,
-                "screenshot_url": segment.thumbnail_key,
+                "screenshot_url": (
+                    f"/api/v1/videos/{asset.asset_id}/segments/{segment.segment_id}/thumbnail"
+                    if segment.thumbnail_key
+                    else None
+                ),
             }
             if any(document.get(key) != value for key, value in expected.items()):
                 raise _pipeline_error("projection document identity or model metadata is invalid")
@@ -994,6 +1021,7 @@ def _pipeline_error(message: str) -> RecordedVideoError:
         ErrorCode.CONFIGURATION,
         retryable=False,
         message=f"CONFIGURATION: {message}",
+        diagnostic=f"pipeline_failure reason={message}",
     )
 
 

@@ -86,6 +86,32 @@ def test_doctor_reports_ffmpeg_and_foreign_port_without_killing(tmp_path: Path):
     assert all(check.remediation for check in result.checks if not check.ok)
 
 
+def test_doctor_checks_configured_media_binary_paths(tmp_path: Path):
+    doctor = _load_doctor()
+    config = AppConfig(
+        recorded_video={
+            "enabled": False,
+            "data_root": tmp_path,
+            "max_upload_bytes": 1,
+            "ffmpeg_path": "/opt/media/bin/ffmpeg",
+            "ffprobe_path": "/opt/media/bin/ffprobe",
+        }
+    )
+    commands: list[str] = []
+
+    result = doctor.run_doctor(
+        config=config,
+        ports=(),
+        command_exists=lambda name: commands.append(name) or True,
+        python_module_exists=lambda _name: True,
+        docker_compose_available=lambda: True,
+    )
+
+    assert "/opt/media/bin/ffmpeg" in commands
+    assert "/opt/media/bin/ffprobe" in commands
+    assert result.ok
+
+
 def test_doctor_accepts_a_port_owned_by_the_current_user(tmp_path: Path):
     doctor = _load_doctor()
     config = AppConfig(recorded_video={"enabled": False, "data_root": tmp_path, "max_upload_bytes": 1})
@@ -304,6 +330,22 @@ class _FakeElasticsearch:
         self.closed = True
 
 
+class _ObjectResponse:
+    def __init__(self, body: object) -> None:
+        self.body = body
+
+
+class _WrappedIndices(_FakeIndices):
+    async def get_alias(self, **kwargs):
+        return _ObjectResponse(await super().get_alias(**kwargs))
+
+    async def get_mapping(self, **kwargs):
+        return _ObjectResponse(await super().get_mapping(**kwargs))
+
+    async def get_settings(self, **kwargs):
+        return _ObjectResponse(await super().get_settings(**kwargs))
+
+
 def test_elasticsearch_check_validates_alias_mapping_without_writes(
     tmp_path: Path,
     monkeypatch,
@@ -346,6 +388,29 @@ def test_elasticsearch_check_accepts_es_omitted_object_type(tmp_path: Path, monk
         dims=dims,
     )
     client = _FakeElasticsearch(_FakeIndices("recorded-video", index_name, mapping))
+
+    check = doctor.check_elasticsearch(
+        config,
+        "http://es.test:9200",
+        client_factory=lambda **_kwargs: client,
+    )
+
+    assert check.ok
+    assert check.code == "ES_INDEX_VALID"
+
+
+def test_elasticsearch_check_accepts_elasticsearch_8_object_responses(tmp_path: Path, monkeypatch):
+    doctor = _load_doctor()
+    config = _production_config(tmp_path)
+    monkeypatch.delenv("VSA_PROFILE", raising=False)
+    monkeypatch.setenv("TEST_PROVIDER_API_KEY", "secret-value")
+    dims = 4
+    mapping = build_segment_mapping(model="embedding-model", version="v1", dims=dims)
+    index_name = RecordedVideoIndex(None, alias="recorded-video").index_name(
+        model="embedding-model",
+        dims=dims,
+    )
+    client = _FakeElasticsearch(_WrappedIndices("recorded-video", index_name, mapping))
 
     check = doctor.check_elasticsearch(
         config,

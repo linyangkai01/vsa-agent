@@ -50,13 +50,17 @@ def _production_config(tmp_path: Path, *, enabled: bool = True) -> AppConfig:
             segment_duration_sec=17,
             representative_frames=3,
             worker_concurrency=2,
+            provider_concurrency=1,
             lease_sec=45,
             max_attempts=4,
+            ffmpeg_path="/opt/media/bin/ffmpeg",
+            ffprobe_path="/opt/media/bin/ffprobe",
         ),
         search=SearchBackendConfig(
             enabled=True,
             es_endpoint="http://127.0.0.1:9200",
             embed_index="recorded-video-production",
+            embedding_dimensions=768,
             verify_certs=False,
             allow_mock_fallback=False,
             force_mock_embedding=False,
@@ -78,13 +82,17 @@ def test_build_recorded_video_worker_composes_production_dependencies(
     assert isinstance(worker._pipeline._asset_store, LocalAssetStore)
     assert worker._pipeline._asset_store.root == tmp_path.resolve()
     assert isinstance(worker._pipeline._media, MediaProcessor)
+    assert worker._pipeline._media._ffmpeg_path == "/opt/media/bin/ffmpeg"
+    assert worker._pipeline._media._ffprobe_path == "/opt/media/bin/ffprobe"
     assert isinstance(worker._pipeline._segmenter, FixedDurationSegmenter)
     assert isinstance(worker._pipeline._vision, OpenAIVisionProvider)
     assert isinstance(worker._pipeline._embedding, OpenAIEmbeddingProvider)
     assert isinstance(worker._pipeline._projection, ElasticsearchProjectionStore)
-    assert worker._pipeline._expected_embedding_dims == 1024
+    assert worker._pipeline._expected_embedding_dims == 768
     assert worker._pipeline._representative_frames == 3
     assert worker._worker_concurrency == 2
+    assert worker._pipeline._vision._concurrency == 1
+    assert worker._pipeline._embedding._concurrency == 1
     assert worker._lease_sec == 45
     assert worker._max_attempts == 4
 

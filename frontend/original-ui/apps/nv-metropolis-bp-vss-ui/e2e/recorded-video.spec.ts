@@ -246,10 +246,12 @@ if (process.env.JEST_WORKER_ID) {
     });
 
     await page.getByTestId("sidebar-tab-search").click();
-    const searchInput = page.getByPlaceholder("Search Files");
+    const searchInput = page
+      .getByTestId("search-input")
+      .getByPlaceholder("Search Files");
     await expect(searchInput).toBeEnabled();
     await searchInput.fill("forklift");
-    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await page.getByTestId("search-button").click();
 
     const mp4AssetId = await verifySearchResultMedia(
       page,
@@ -403,7 +405,7 @@ if (process.env.JEST_WORKER_ID) {
           return ((await response.json()) as { status?: unknown }).status;
         })
         .toBe("cancelled");
-      await expect(page.getByText("Cancelled")).toBeVisible();
+      await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
       await expect(page.getByText("1 cancelled")).toBeVisible();
     } finally {
       await request.post(`${providerControlUrl}/control/release`, {

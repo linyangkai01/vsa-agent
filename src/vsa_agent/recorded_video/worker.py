@@ -6,13 +6,14 @@ import argparse
 import asyncio
 import inspect
 import json
+import logging
 import signal
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
 from vsa_agent.config import AppConfig, validate_recorded_video_runtime
 from vsa_agent.recorded_video.errors import LeaseLostError, RecordedVideoError
@@ -20,6 +21,7 @@ from vsa_agent.recorded_video.models import Job
 from vsa_agent.recorded_video.pipeline import PipelineCancelled
 
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
+_RUNTIME_LOG_HANDLER_MARKER = "_vsa_recorded_video_worker"
 
 
 class WorkerRepository(Protocol):
@@ -185,7 +187,13 @@ class RecordedVideoWorker:
                 self._emit_job("job.lease_lost", job, error_code="LEASE_LOST")
                 return None
             except RecordedVideoError as exc:
-                return await self._record_failure(job, exc.code.value, retryable=exc.retryable)
+                return await self._record_failure(
+                    job,
+                    exc.code.value,
+                    retryable=exc.retryable,
+                    error_detail=exc.diagnostic,
+                    active_stage=exc.stage,
+                )
             except Exception:
                 return await self._record_failure(job, "UNEXPECTED", retryable=False)
             else:
@@ -320,7 +328,15 @@ class RecordedVideoWorker:
         except LeaseLostError:
             return False
 
-    async def _record_failure(self, job: Job, error_code: str, *, retryable: bool) -> Job | None:
+    async def _record_failure(
+        self,
+        job: Job,
+        error_code: str,
+        *,
+        retryable: bool,
+        error_detail: str | None = None,
+        active_stage: str | None = None,
+    ) -> Job | None:
         owner = job.lease_owner
         if owner is None:
             return None
@@ -337,7 +353,14 @@ class RecordedVideoWorker:
                     attempt=job.attempt,
                     now=now,
                 )
-                self._emit_job("job.retry_scheduled", event_job, error_code=error_code, retry_delay_sec=delay)
+                self._emit_job(
+                    "job.retry_scheduled",
+                    event_job,
+                    error_code=error_code,
+                    retry_delay_sec=delay,
+                    **({"error_detail": error_detail} if error_detail else {}),
+                    **({"active_stage": active_stage} if active_stage else {}),
+                )
                 return result
             result = await self._repository.mark_failed(
                 job.job_id,
@@ -346,7 +369,13 @@ class RecordedVideoWorker:
                 attempt=job.attempt,
                 now=now,
             )
-            self._emit_job("job.failed", event_job, error_code=error_code)
+            self._emit_job(
+                "job.failed",
+                event_job,
+                error_code=error_code,
+                **({"error_detail": error_detail} if error_detail else {}),
+                **({"active_stage": active_stage} if active_stage else {}),
+            )
             return result
         except LeaseLostError:
             self._emit_job("job.lease_lost", event_job, error_code="LEASE_LOST")
@@ -442,6 +471,21 @@ def parse_worker_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _configure_worker_logging(stream: TextIO | None = None) -> logging.Handler:
+    logger = logging.getLogger("vsa_agent.recorded_video")
+    for handler in logger.handlers:
+        if getattr(handler, _RUNTIME_LOG_HANDLER_MARKER, False):
+            return handler
+
+    handler = logging.StreamHandler(stream or sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    setattr(handler, _RUNTIME_LOG_HANDLER_MARKER, True)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return handler
+
+
 WorkerFactory = Callable[[AppConfig], RecordedVideoWorker | Awaitable[RecordedVideoWorker]]
 
 
@@ -484,6 +528,7 @@ async def run_configured_worker(config_path: Path, worker_factory: WorkerFactory
 
 
 def main(argv: Sequence[str] | None = None, *, worker_factory: WorkerFactory | None = None) -> int:
+    _configure_worker_logging()
     args = parse_worker_args(argv)
     return asyncio.run(run_configured_worker(args.config, worker_factory))
 

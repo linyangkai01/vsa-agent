@@ -1,6 +1,6 @@
 # Development Status
 
-Last updated: 2026-07-21
+Last updated: 2026-07-23
 
 ## Current State
 
@@ -28,31 +28,31 @@ Last updated: 2026-07-21
 
 ## Latest Verified Change
 
-`wire-es-ingest`
+`production-recorded-video-ingest`
 
-- Added real `/api/search/ingest` behavior.
-- Uses `SearchBackendConfig`.
-- Returns `skipped` when search indexing is disabled or not configured.
-- Indexes one normalized metadata document to `search.embed_index` when enabled.
-- Returns HTTP 502 for Elasticsearch indexing failures.
-- Registers the ingest route in the FastAPI app.
+- 完成原版 UI 录播上传、SQLite Worker 恢复、版本化 ES alias、搜索/缩略图/Range 播放、搜索结果到片段问答、失败重试和运行中取消。
+- 修复 Playwright webServer 优雅关闭，使隔离验证结束后回收 API、Worker、UI、验证数据和 ES 索引。
+- 补齐原版 UI 聚合包与 Nemo `server` 子路径声明产物，恢复应用级 TypeScript 检查。
 
 Verification:
 
-```powershell
-python -m pytest tests\unit\api\test_video_search_ingest.py tests\unit\api\test_original_ui_chat.py tests\unit\api\test_original_ui_chat_route.py tests\unit\test_config_search.py tests\unit\tools\test_embed_search.py tests\unit\tools\test_attribute_search.py tests\unit\tools\test_search.py tests\unit\agents\test_search_agent.py -q
-```
-
-Result: `79 passed, 1 warning`.
+- 本地全量：`1568 passed, 6 skipped, 1 warning`；Ruff、format、compileall、Bash/PowerShell 语法和 diff check 通过。
+- Ubuntu ES/Python 矩阵：`645 passed, 1 skipped`。
+- Ubuntu Chromium 原版 UI E2E：连续两次 `3 passed (2.9m)`；第二次确认无测试端口、进程、索引或容器残留。
+- Ubuntu Video Management Jest：`99 passed`；包级和应用级 typecheck 通过。
 
 ## Active Change
 
-- `production-recorded-video-ingest`: Task 1-21 和 Task 23 已完成；Task 20A 已完成单进程日志 supervisor、真实 workload sidecar、PASS 线性化、Windows retained-handle 身份跟踪、确定性中断清理与共享 CIM snapshot。原版 UI 已接入任务状态轮询和流式同源代理；当前剩余 Task 22 Playwright 原版 UI 验收与 Task 24 全量质量门/Ubuntu 真实 provider 证据。
+- `production-recorded-video-ingest`: Task 1-23 及 Ubuntu fake-provider 浏览器验收已完成；原版 UI 已接入任务状态轮询、流式同源代理和录播业务链路。当前仅剩 Task 24 真实 provider PASS 证据和完成后的 Git 收口。
 - 当前分支：`codex/production-recorded-video-ingest`；Task 20 运行时实现与加固提交为 `473a001`、`71d5d71`、`a7f6f71`、`5252ddb`。启动器 focused tests、脚本语法与生命周期验证由对应任务记录。
 - Task 20A 最终本地证据：三文件串行 aggregate `185 passed, 1 conditional skip`，PowerShell lifecycle `45 passed`，TERM/PASS-lock 高风险 Bash probe 连续三轮通过；PowerShell AST、Bash syntax、compileall、Ruff check/format 和 diff check 全绿。v5 thorough review 为 Critical `0`、Important `0`。候选进程绑定失败仍不写 reason-code 日志，暂作为非阻塞可观测性 Minor 保留，避免 250ms tracker 轮询产生重复日志噪声。
-- Task 23 新增 `scripts/recorded-video-validate.py`：按 `runtime/job_stages/provider/es/search/media/delete` 记录证据，任何依赖或质量失败均写失败报告并返回非零，且在中途失败后仍尝试清理验证资产。中文手册为 `docs/recorded-video-runtime.md`；Ubuntu 真实模型证据仍须由 Task 24 采集，当前报告不得视为服务器通过。
+- Task 23 新增 `scripts/recorded-video-validate.py`：按 `runtime/job_stages/provider/es/search/media/delete` 记录证据，任何依赖或质量失败均写失败报告并返回非零，且在中途失败后仍尝试清理验证资产。中文手册为 `docs/recorded-video-runtime.md`；Task 24 已到达真实 DashScope，额度恢复前报告保持 FAIL。
 - 2026-07-21 已补齐搜索结果到视频问答的身份链路：Search API 保留 `asset_id/segment_id/job_id`，原版 UI `+ Chat` 发送片段 context，后端只通过 SQLite 和受控资产目录解析真实路径与相对时间范围，再交给 `video_understanding`。本地证据：相关 Python `136 passed`，Search Jest `165 passed`，Search typecheck 通过。
-- 2026-07-21 新增 `scripts/recorded-video-production-acceptance.py`：一次命令启动两次完整栈，三并发上传真实视频，在持久化 checkpoint 后校验本次 run 的 Worker manifest/UID/cmdline 并中断，随后验证 attempt 恢复、七阶段 checksum、真实 provider identity、ES/SQLite segment、原版 UI 同源搜索/缩略图/Range/选中片段问答和三资产幂等删除。当前仅完成本地 fake-HTTP/SQLite 与生命周期测试；Ubuntu 真实 provider 和浏览器证据仍未采集，`docs/recorded-video-validation.md` 仍不得视为 PASS。
+- 2026-07-21 新增 `scripts/recorded-video-production-acceptance.py`：一次命令启动两次完整栈，三并发上传真实视频，在持久化 checkpoint 后校验本次 run 的 Worker manifest/UID/cmdline 并中断，随后验证 attempt 恢复、七阶段 checksum、真实 provider identity、ES/SQLite segment、原版 UI 同源搜索/缩略图/Range/选中片段问答和三资产幂等删除。Ubuntu 已通过三视频上传、checkpoint、Worker TERM、第二次启动与 attempt 恢复，最终 PASS 仍受真实 provider 额度阻断。
+- 2026-07-23 原版 UI Chromium E2E 连续两次通过 `3 passed (2.9m)`：MP4/MKV 上传、索引、搜索、缩略图、HTTP Range 播放、失败任务重试和运行中取消均通过；第二次优雅关闭删除隔离 namespace，旁路确认无 validation 进程、索引、测试端口或容器残留。
+- 2026-07-23 Ubuntu 前端补充验证：Video Management Jest `99 passed`，Video Management 与原版应用 typecheck 通过；同步白名单已覆盖新增 mock 和声明契约文件。
+- 2026-07-23 Ubuntu 真实生产验收使用 `vsa-recorded-video-production` alias，避开并保留 legacy 具体索引 `vsa-video-embeddings`。三条真实视频并发上传、checkpoint、Worker TERM、第二次启动和 attempt 恢复均通过；服务器无管理员权限时复用了当前用户 `vss` Conda 环境中的 ffmpeg 8.0.1，并在 `vsa-agent` 环境提供用户态符号链接，探测到 `libopenh264`。
+- 真实 provider gate 仍未通过：三条恢复任务的 VLM 调用达到 `MODEL_TIMEOUT`，随后最小独立 DashScope VLM 请求在约 1 秒内明确返回 `403 AllocationQuota.FreeTierOnly`。这证明密钥文件读取、DNS、TCP/TLS 和兼容 API 路径正常，当前阻塞是供应商额度而非项目代码；报告保持 FAIL，待额度恢复后原命令重跑 Task 24。
 
 ## Python Quality Program
 
@@ -132,8 +132,8 @@ Current command for the next validation pass:
 
 Operational guide: `docs/es-video-search-runtime.md`.
 
-Server validation status: Ubuntu browser validation has passed. Through the SSH UI tunnel, the original Search UI returned one `runtime-validation.mp4` result for `forklift near worker`; API logs recorded both `original_ui.search.request` and `search_agent.embed_search`, and UI logs contained no stale declaration source-map errors. The runtime remains a deterministic mock-embedding validation environment, not a production semantic-quality evaluation. `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`.
+Server validation status: Ubuntu fake-provider browser E2E has passed, including upload, recovery, search, thumbnail, Range playback, retry and cancellation. The 2026-07-23 real-provider run reached DashScope after the Worker restart recovery gate, but remains FAIL because the configured account returns `403 AllocationQuota.FreeTierOnly`. `Z:\vsa-agent` is the mapped server project copy. Server sync should use the already-authenticated Windows mapped drive, not Git, so no server password is requested or stored by project scripts. Use `.\scripts\sync-server-files.ps1 -PreflightOnly` and then `.\scripts\sync-server-files.ps1` for targeted sync instead of recursive `robocopy /E`.
 
 ## Next Recommended Work
 
-完成 Task 22 原版 UI Playwright 上传、搜索、缩略图和 Range 播放验收后进入 Task 24：运行全量 Python、前端和 lint 检查，定向同步到 Ubuntu，并采集真实 provider、三并发、Worker 重启恢复、搜索、Range 媒体和生命周期清理证据。
+DashScope 额度恢复后直接重跑 Task 24 生产验收；通过后复核全量质量门，提交当前分支，合并到本地 `master` 并推送 `master`。

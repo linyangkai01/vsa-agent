@@ -125,6 +125,7 @@ def test_error_codes_are_partitioned_by_retryability() -> None:
         ErrorCode.FFMPEG_MISSING,
         ErrorCode.CONFIGURATION,
         ErrorCode.EMBEDDING_DIMENSION,
+        ErrorCode.MODEL_QUOTA,
     }
     assert RETRYABLE_ERROR_CODES == {
         ErrorCode.FFMPEG_TIMEOUT,

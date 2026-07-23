@@ -11,8 +11,13 @@ const providerBaseUrl = `http://127.0.0.1:${providerPort}`;
 const providerConfig = path.resolve(__dirname, "e2e/config.e2e.yaml");
 const condaEnv = (process.env.PLAYWRIGHT_CONDA_ENV || "").trim();
 if (condaEnv && !/^[A-Za-z0-9_.-]+$/.test(condaEnv)) {
-  throw new Error("PLAYWRIGHT_CONDA_ENV must be a conda environment name, not a shell expression.");
+  throw new Error(
+    "PLAYWRIGHT_CONDA_ENV must be a conda environment name, not a shell expression.",
+  );
 }
+const pythonCommand = condaEnv
+  ? `conda run --no-capture-output -n ${condaEnv} python`
+  : "python";
 const runtimeBaseUrl = (
   process.env.RUNTIME_BASE_URL || `http://127.0.0.1:${uiPort}`
 ).replace(/\/$/, "");
@@ -42,7 +47,7 @@ export default defineConfig({
     ? undefined
     : [
         {
-          command: `python e2e/fake-openai-provider.py --port ${providerPort}`,
+          command: `${pythonCommand} e2e/fake-openai-provider.py --port ${providerPort}`,
           cwd: __dirname,
           url: `${providerBaseUrl}/health`,
           reuseExistingServer: false,
@@ -65,6 +70,7 @@ export default defineConfig({
           url: runtimeBaseUrl,
           reuseExistingServer: false,
           timeout: 300_000,
+          gracefulShutdown: { signal: "SIGTERM", timeout: 15_000 },
           stdout: "pipe",
           stderr: "pipe",
           env: {

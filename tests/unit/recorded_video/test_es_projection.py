@@ -156,6 +156,22 @@ async def test_projection_rollback_deletes_only_exact_attempt_and_asset_delete_i
 
 
 @pytest.mark.asyncio
+async def test_projection_delete_accepts_elasticsearch_8_object_response() -> None:
+    class ObjectResponse:
+        def __init__(self, body: object) -> None:
+            self.body = body
+
+    class WrappedClient(FakeClient):
+        async def delete_by_query(self, **kwargs):
+            self.delete_calls.append(deepcopy(kwargs))
+            return ObjectResponse({"deleted": 1, "failures": [], "timed_out": False})
+
+    store = es_index.ElasticsearchProjectionStore(WrappedClient(), index=FakeRecordedVideoIndex())
+
+    await store.delete_asset(ASSET_ID)
+
+
+@pytest.mark.asyncio
 async def test_projection_rejects_mismatched_call_identity_before_writing(monkeypatch) -> None:
     store_type = getattr(es_index, "ElasticsearchProjectionStore", None)
     assert store_type is not None

@@ -197,6 +197,7 @@ def test_es_runtime_stack_bash_exposes_expected_options():
         "--data-root",
         "--validate",
         "--keep-running",
+        "--secrets-file",
         "-KeepRunning",
     ):
         assert option in text
@@ -222,8 +223,8 @@ def test_es_runtime_stack_bash_generates_temporary_search_config():
     assert "enabled: true" in text
     assert "verify_certs: false" in text
     assert 'validation = mode == "validation"' in text
-    assert "force_mock_embedding: {str(validation).lower()}" in text
-    assert "allow_mock_fallback: {str(validation).lower()}" in text
+    assert "force_mock_embedding: false" in text
+    assert "allow_mock_fallback: false" in text
     assert "recorded_video:" in text
     assert "enabled: true" in text
 
@@ -232,6 +233,39 @@ def test_linux_stack_exports_selected_runtime_config_to_short_lived_commands():
     text = _bash_script_text()
 
     assert 'export VSA_CONFIG="$API_CONFIG_PATH"' in text
+
+
+def test_linux_stack_loads_private_secrets_and_bootstraps_production_index():
+    text = _bash_script_text()
+
+    assert 'SECRETS_FILE="${VSA_SECRETS_FILE:-${HOME:-}/.config/vsa-agent/secrets.env}"' in text
+    assert "load_secrets_file" in text
+    assert "refusing secrets file with group or other permissions" in text
+    assert "recorded-video-bootstrap-index.py" in text
+    assert text.index("load_secrets_file") < text.index("--phase static")
+    assert text.index("recorded-video-bootstrap-index.py") < text.index(
+        'log_stack "validating active alias and mapping without writes"'
+    )
+
+
+def test_linux_stack_bootstraps_and_validates_the_active_runtime_config():
+    text = _bash_script_text()
+
+    assert 'recorded-video-bootstrap-index.py --config "$API_CONFIG_PATH" --json' in text
+    assert text.count('runtime-doctor.py --config "$API_CONFIG_PATH"') == 2
+    assert 'runtime-doctor.py --config "$CONFIG_PATH"' not in text
+    assert 'log_stack "bootstrapping isolated validation alias before service startup"' in text
+    assert 'curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX"' in text
+    assert '"$ES_ENDPOINT/_cat/indices/${VALIDATION_INDEX}-*?h=index"' in text
+
+
+def test_original_ui_launcher_forwards_the_requested_port_to_next():
+    text = Path("scripts/run_original_ui_vss.sh").read_text(encoding="utf-8")
+    turbo = Path("frontend/original-ui/turbo.json").read_text(encoding="utf-8")
+
+    assert '-- --port "${PORT:-3000}"' in text
+    assert '"env": ["VSA_INTERNAL_AGENT_API_URL_BASE"]' in turbo
+    assert "env-mode=loose" not in text
 
 
 def test_windows_stack_reclaims_selected_ports_and_starts_original_ui():
@@ -276,8 +310,15 @@ def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
         "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
         "NEXT_PUBLIC_AGENT_API_URL_BASE",
         "SMOKE_ONLY",
+        "reclaim_stale_project_ui_processes",
+        "stale_project_ui_pids",
     ):
         assert required in text
+    assert 'root "/frontend/original-ui"' in text
+    assert "current_uid" in text
+    assert text.index("reclaim_stale_project_ui_processes\n") < text.index(
+        'for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done'
+    )
 
 
 def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
@@ -310,6 +351,7 @@ def test_linux_stack_uses_port_discovery_fallbacks_without_killing_es_proxy():
     assert "PORT_TERMINATION_GRACE_SEC=5" in text
     assert "assert_current_user_pid" in text
     assert "FOREIGN_LISTENER" in text
+    assert 'kill -0 "$pid"' in text
 
 
 def test_linux_stack_preflights_python_and_reports_each_service_failure():
@@ -375,6 +417,8 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert "[string[]]$IncludePaths" in text
     assert "[switch]$DryRun" in text
     assert "[switch]$PreflightOnly" in text
+    assert '".gitignore"' in text
+    assert '"scripts\\sync-server-files.ps1"' in text
     assert '"docker-compose.es.yml"' in text
     assert '"src\\vsa_agent\\api\\video_search_ingest.py"' in text
     assert '"tests\\unit\\api\\test_video_search_ingest.py"' in text
@@ -382,7 +426,10 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
     assert '"scripts\\run_original_ui_vss.sh"' in text
     assert '"scripts\\runtime-log-supervisor.py"' in text
     for acceptance_path in (
+        "scripts\\recorded-video-bootstrap-index.py",
         "scripts\\recorded-video-production-acceptance.py",
+        "src\\vsa_agent\\recorded_video\\bootstrap.py",
+        "tests\\unit\\recorded_video\\test_bootstrap.py",
         "src\\vsa_agent\\recorded_video\\production_acceptance.py",
         "src\\vsa_agent\\recorded_video\\production_evidence.py",
         "src\\vsa_agent\\recorded_video\\production_runner.py",
@@ -467,7 +514,6 @@ def _run_sync_script(tmp_path: Path, *include_paths: str) -> subprocess.Complete
 @pytest.mark.parametrize(
     ("include_path", "expected_error"),
     [
-        (".gitignore", "not approved"),
         (".env", "forbidden"),
         (r".runtime\recorded-video\secret.json", "forbidden"),
     ],

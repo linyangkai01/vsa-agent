@@ -279,6 +279,7 @@ def test_playwright_runtime_uses_the_controlled_provider_profile() -> None:
     assert "VSA_LOCAL_CONFIG" in playwright
     assert "PLAYWRIGHT_PROVIDER_API_KEY" in playwright
     assert "PLAYWRIGHT_CONDA_ENV" in playwright
+    assert "conda run --no-capture-output -n ${condaEnv} python" in playwright
     assert "--conda-env ${condaEnv}" in playwright
     assert "active_profile: playwright_e2e" in runtime
     assert "base_url: http://127.0.0.1:8399/v1" in runtime

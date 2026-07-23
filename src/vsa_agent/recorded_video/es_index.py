@@ -150,7 +150,17 @@ def build_segment_mapping(*, model: str, version: str, dims: int) -> dict[str, A
             "start_offset_ms": dict(long),
             "end_offset_ms": dict(long),
             "screenshot_url": {"type": "keyword", "index": False},
-            "vector": {"type": "dense_vector", "dims": dims, "similarity": "cosine"},
+            "vector": {
+                "type": "dense_vector",
+                "dims": dims,
+                "index": True,
+                "similarity": "cosine",
+                "index_options": {
+                    "type": "int8_hnsw",
+                    "m": 16,
+                    "ef_construction": 100,
+                },
+            },
         },
     }
 
@@ -252,8 +262,11 @@ class RecordedVideoIndex:
     async def _validate_alias(self, client: Any, *, expected_model: str | None, expected_dims: int) -> str:
         if not await client.indices.exists_alias(name=self.alias):
             raise _configuration_error("INDEX_ALIAS_MISSING: recorded-video alias does not exist")
-        alias_response = await client.indices.get_alias(name=self.alias)
-        if not isinstance(alias_response, Mapping) or len(alias_response) != 1:
+        alias_response = _response_mapping(
+            await client.indices.get_alias(name=self.alias),
+            operation="get alias",
+        )
+        if len(alias_response) != 1:
             raise _configuration_error("INDEX_ALIAS_CONFLICT: alias must resolve to exactly one index")
         index_name, payload = next(iter(alias_response.items()))
         if not isinstance(index_name, str) or not isinstance(payload, Mapping):
@@ -386,22 +399,23 @@ class ElasticsearchProjectionStore:
 
     async def _delete_by_query(self, query: Mapping[str, Any], *, operation: str) -> None:
         try:
-            response = await _json_compatible_client(self._client).delete_by_query(
-                index=self._index.alias,
-                query=query,
-                conflicts="proceed",
-                refresh=True,
+            response = _response_mapping(
+                await _json_compatible_client(self._client).delete_by_query(
+                    index=self._index.alias,
+                    query=query,
+                    conflicts="proceed",
+                    refresh=True,
+                ),
+                operation=f"{operation} delete",
             )
-            failures = response.get("failures") if isinstance(response, Mapping) else None
-            timed_out = response.get("timed_out") if isinstance(response, Mapping) else None
+            failures = response.get("failures")
+            timed_out = response.get("timed_out")
             if failures or timed_out is True:
                 raise RecordedVideoError(
                     ErrorCode.ES_5XX,
                     retryable=True,
                     message=f"ES_5XX: Elasticsearch {operation} was incomplete",
                 )
-            if not isinstance(response, Mapping):
-                raise _configuration_error("PROJECTION_RESPONSE: Elasticsearch delete response is invalid")
         except RecordedVideoError:
             raise
         except Exception as error:
@@ -439,9 +453,7 @@ def _json_compatible_client(client: Any) -> Any:
 
 
 def _index_payload(response: Any, index_name: str, *, key: str) -> Mapping[str, Any]:
-    if not isinstance(response, Mapping):
-        raise _configuration_error(f"INDEX_RESPONSE_INVALID: Elasticsearch {key} response is invalid")
-    payload = response.get(index_name)
+    payload = _response_mapping(response, operation=f"get {key}").get(index_name)
     value = payload.get(key) if isinstance(payload, Mapping) else None
     if not isinstance(value, Mapping):
         raise _configuration_error(f"INDEX_RESPONSE_INVALID: Elasticsearch {key} response is incomplete")
@@ -490,9 +502,10 @@ def _as_setting(value: Any) -> str | None:
 
 
 def _require_acknowledged(response: Any, *, operation: str) -> None:
-    if not isinstance(response, Mapping) or "acknowledged" not in response:
+    payload = _response_mapping(response, operation=operation)
+    if "acknowledged" not in payload:
         raise _configuration_error(f"INDEX_RESPONSE_INVALID: Elasticsearch {operation} response is incomplete")
-    acknowledged = response.get("acknowledged")
+    acknowledged = payload.get("acknowledged")
     if acknowledged is False:
         raise RecordedVideoError(
             ErrorCode.ES_TIMEOUT,
@@ -501,6 +514,14 @@ def _require_acknowledged(response: Any, *, operation: str) -> None:
         )
     if acknowledged is not True:
         raise _configuration_error(f"INDEX_NOT_ACKNOWLEDGED: Elasticsearch did not acknowledge {operation}")
+
+
+def _response_mapping(response: Any, *, operation: str) -> Mapping[str, Any]:
+    """Return the decoded mapping from dicts and Elasticsearch 8 API wrappers."""
+    body = response if isinstance(response, Mapping) else getattr(response, "body", None)
+    if not isinstance(body, Mapping):
+        raise _configuration_error(f"INDEX_RESPONSE_INVALID: Elasticsearch {operation} response is invalid")
+    return body
 
 
 def _validate_contract_inputs(*, model: str, version: str, dims: int) -> None:

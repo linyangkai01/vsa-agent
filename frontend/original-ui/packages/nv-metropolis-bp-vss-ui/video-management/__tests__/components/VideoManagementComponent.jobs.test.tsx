@@ -3,6 +3,7 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import {
   cancelRecordedVideoJob,
+  getUploadUrl,
   pollRecordedVideoJob,
   retryRecordedVideoJob,
 } from '@nemo-agent-toolkit/ui';
@@ -12,6 +13,7 @@ import { chunkedUpload, notifyUploadComplete } from '../../lib-src/chunkedUpload
 const mockPollRecordedVideoJob = pollRecordedVideoJob as jest.Mock;
 const mockRetryRecordedVideoJob = retryRecordedVideoJob as jest.Mock;
 const mockCancelRecordedVideoJob = cancelRecordedVideoJob as jest.Mock;
+const mockGetUploadUrl = getUploadUrl as jest.Mock;
 const mockChunkedUpload = chunkedUpload as jest.Mock;
 const mockNotifyUploadComplete = notifyUploadComplete as jest.Mock;
 
@@ -24,6 +26,7 @@ jest.mock('@nemo-agent-toolkit/ui', () => ({
     closeVideoModal: jest.fn(),
   }),
   useChatVideoUploadCompleteSubscription: jest.fn(),
+  getUploadUrl: jest.fn(),
   pollRecordedVideoJob: jest.fn(),
   retryRecordedVideoJob: jest.fn(),
   cancelRecordedVideoJob: jest.fn(),
@@ -46,10 +49,6 @@ jest.mock('../../lib-src/hooks', () => ({
     getEndTimeForStream: jest.fn(),
     getLastTimelineForStream: jest.fn(),
   }),
-}));
-
-jest.mock('../../lib-src/api', () => ({
-  createApiEndpoints: () => ({ UPLOAD_FILE: 'https://vst.example.com/storage/file' }),
 }));
 
 jest.mock('../../lib-src/components', () => {
@@ -146,6 +145,7 @@ async function startUpload() {
 describe('VideoManagementComponent recorded video jobs', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGetUploadUrl.mockResolvedValue('https://agent.example.com/api/v1/vst/v1/storage/file?upload_session_id=session-1');
     mockChunkedUpload.mockResolvedValue({ sensorId: 'asset-1' });
     mockNotifyUploadComplete.mockResolvedValue(acceptedJob);
     mockRetryRecordedVideoJob.mockResolvedValue(jobStatus('queued'));
@@ -158,6 +158,14 @@ describe('VideoManagementComponent recorded video jobs', () => {
     renderComponent();
 
     await startUpload();
+    expect(mockGetUploadUrl).toHaveBeenCalledWith(
+      'recorded.mp4',
+      'https://agent.example.com/api/v1',
+      expect.any(AbortSignal),
+    );
+    expect(mockChunkedUpload).toHaveBeenCalledWith(expect.objectContaining({
+      uploadUrl: 'https://agent.example.com/api/v1/vst/v1/storage/file?upload_session_id=session-1',
+    }));
     expect(await screen.findByText('Processing...')).toBeInTheDocument();
     expect(screen.queryByText('Completed')).not.toBeInTheDocument();
     expect(mockPollRecordedVideoJob).toHaveBeenCalledWith(

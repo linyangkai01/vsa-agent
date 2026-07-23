@@ -24,6 +24,8 @@ from vsa_agent.recorded_video.ports import Embedding, VisionDescription
 logger = logging.getLogger(__name__)
 
 _MAX_CONTEXT_ID_LENGTH = 256
+_MAX_PROVIDER_CODE_LENGTH = 128
+_SAFE_PROVIDER_CODE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
 class _OpenAIProvider:
@@ -127,24 +129,41 @@ class _OpenAIProvider:
                 ErrorCode.MODEL_RATE_LIMIT,
                 retryable=True,
                 message="MODEL_RATE_LIMIT: provider rate limit exceeded",
+                diagnostic=_provider_http_diagnostic(response, stage),
+                stage=stage,
             )
         if response.status_code == 408:
             raise RecordedVideoError(
                 ErrorCode.MODEL_TIMEOUT,
                 retryable=True,
                 message="MODEL_TIMEOUT: provider reported request timeout",
+                diagnostic=_provider_http_diagnostic(response, stage),
+                stage=stage,
             )
         if response.status_code >= 500:
             raise RecordedVideoError(
                 ErrorCode.MODEL_5XX,
                 retryable=True,
                 message=f"MODEL_5XX: provider returned HTTP {response.status_code}",
+                diagnostic=_provider_http_diagnostic(response, stage),
+                stage=stage,
+            )
+        provider_code = _provider_error_code(response)
+        if response.status_code == 403 and provider_code is not None and "quota" in provider_code.lower():
+            raise RecordedVideoError(
+                ErrorCode.MODEL_QUOTA,
+                retryable=False,
+                message="MODEL_QUOTA: provider allocation quota is unavailable",
+                diagnostic=_provider_http_diagnostic(response, stage, provider_code=provider_code),
+                stage=stage,
             )
         if response.status_code >= 400:
             raise RecordedVideoError(
                 ErrorCode.CONFIGURATION,
                 retryable=False,
                 message=f"MODEL_REQUEST: provider returned HTTP {response.status_code}",
+                diagnostic=_provider_http_diagnostic(response, stage, provider_code=provider_code),
+                stage=stage,
             )
         return response
 
@@ -272,6 +291,43 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
 
 def _schema_error(message: str = "MODEL_RESPONSE_SCHEMA: provider response failed validation") -> RecordedVideoError:
     return RecordedVideoError(ErrorCode.CONFIGURATION, retryable=False, message=message)
+
+
+def _provider_error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    nested = payload.get("error")
+    value = nested.get("code") if isinstance(nested, Mapping) else payload.get("code")
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= _MAX_PROVIDER_CODE_LENGTH
+        or any(character not in _SAFE_PROVIDER_CODE for character in value)
+    ):
+        return None
+    return value
+
+
+def _provider_http_diagnostic(
+    response: httpx.Response,
+    stage: str,
+    *,
+    provider_code: str | None = None,
+) -> str:
+    fields = [f"provider_http_failure stage={stage}", f"status={response.status_code}"]
+    if provider_code:
+        fields.append(f"provider_code={provider_code}")
+    request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+    if (
+        isinstance(request_id, str)
+        and 1 <= len(request_id) <= _MAX_PROVIDER_CODE_LENGTH
+        and all(character in _SAFE_PROVIDER_CODE for character in request_id)
+    ):
+        fields.append(f"request_id={request_id}")
+    return " ".join(fields)
 
 
 def _provider_base_url(value: object) -> httpx.URL:

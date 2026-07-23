@@ -66,8 +66,11 @@ def test_recorded_video_defaults_and_limits():
     assert config.segment_duration_sec == 30
     assert config.representative_frames == 4
     assert config.worker_concurrency == 3
+    assert config.provider_concurrency == 1
     assert config.lease_sec == 120
     assert config.max_attempts == 3
+    assert config.ffmpeg_path == "ffmpeg"
+    assert config.ffprobe_path == "ffprobe"
 
 
 def test_provider_runtime_config_is_public_resolved_role_alias():
@@ -93,6 +96,8 @@ def test_provider_runtime_config_is_public_resolved_role_alias():
         ("representative_frames", 17),
         ("worker_concurrency", 0),
         ("worker_concurrency", 6),
+        ("provider_concurrency", 0),
+        ("provider_concurrency", 6),
         ("lease_sec", 0),
         ("max_attempts", 0),
     ],

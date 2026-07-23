@@ -203,6 +203,23 @@ The project SHALL provide scripts and configuration for starting a single-node E
 
 The system SHALL accept real MP4/MKV files through the original UI upload contract, process them in an independent recoverable Worker, persist durable checkpoints in SQLite, and publish only complete segment projections to Elasticsearch.
 
+#### Scenario: First production start bootstraps an exact versioned index
+
+- **GIVEN** the configured production alias does not exist and no concrete index occupies that alias name
+- **WHEN** the Ubuntu all-stack launcher starts in normal mode
+- **THEN** it creates or validates one versioned index using the configured embedding model and dimensions
+- **AND** it binds the production alias to exactly one explicit write index before starting API and Worker processes
+- **AND** repeated starts are idempotent and perform the same read-only contract validation
+- **AND** incompatible mappings, aliases, or same-name concrete indices fail closed without deletion or dynamic mapping mutation
+
+#### Scenario: Ubuntu launcher loads provider keys from a private file
+
+- **GIVEN** the provider key is stored outside the repository in a current-user-owned mode-0600 secrets file
+- **WHEN** the Ubuntu all-stack launcher starts
+- **THEN** it parses only `*_API_KEY=VALUE` entries without executing the file as shell code
+- **AND** it exports the values only to the current runtime process tree
+- **AND** logs record the file path and loaded key count but never key values
+
 #### Scenario: Three real uploads survive a Worker restart
 
 - **GIVEN** three readable video files with distinct SHA-256 content and a production profile with mock fallback disabled
@@ -211,6 +228,12 @@ The system SHALL accept real MP4/MKV files through the original UI upload contra
 - **AND** at least one interrupted job is reclaimed with an increased attempt
 - **AND** every completed pre-interruption manifest and checksum remains unchanged
 - **AND** the seven pipeline checkpoints are complete and segment identities are unique
+
+#### Scenario: Provider quota failures are explicit and safe
+
+- **WHEN** an OpenAI-compatible provider returns a bounded quota error such as `AllocationQuota.FreeTierOnly`
+- **THEN** the Worker records `MODEL_QUOTA` as a permanent failure with `active_stage` identifying the failed operation
+- **AND** logs contain only the HTTP status, bounded provider error code, and request ID; credentials and response bodies are not written
 
 #### Scenario: Worker interruption is fail-closed
 

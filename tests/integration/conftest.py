@@ -26,7 +26,7 @@ from vsa_agent.recorded_video.assets import LocalAssetStore
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.es_index import ElasticsearchProjectionStore, RecordedVideoIndex
 from vsa_agent.recorded_video.media import MediaProbe
-from vsa_agent.recorded_video.models import Job, JobStatus, Segment
+from vsa_agent.recorded_video.models import Asset, Job, JobStatus, Segment
 from vsa_agent.recorded_video.pipeline import RecordedVideoPipeline
 from vsa_agent.recorded_video.ports import ProjectionResult
 from vsa_agent.recorded_video.providers import OpenAIEmbeddingProvider, OpenAIVisionProvider
@@ -108,6 +108,7 @@ class _ProviderController:
 class _ControlledMedia:
     def __init__(self) -> None:
         self._block_probe = False
+        self._source_paths: dict[str, Path] = {}
         self.probe_started = asyncio.Event()
         self.probe_release = asyncio.Event()
 
@@ -129,6 +130,7 @@ class _ControlledMedia:
             await self.probe_release.wait()
             self._block_probe = False
         source = Path(path)
+        self._source_paths[source.parents[1].name] = source
         if source.read_bytes().startswith(b"CORRUPT"):
             raise RecordedVideoError(
                 ErrorCode.CORRUPT_MEDIA,
@@ -144,6 +146,15 @@ class _ControlledMedia:
             pixel_format="yuv420p",
             audio_codec="aac",
         )
+
+    async def ensure_playback_proxy(self, asset: Asset) -> Path:
+        source = self._source_paths[asset.asset_id]
+        if asset.source_extension == "mp4":
+            return source
+        proxy = source.parent.parent / "playback" / "proxy.mp4"
+        proxy.parent.mkdir(parents=True, exist_ok=True)
+        proxy.write_bytes(b"integration-mp4")
+        return proxy
 
     async def extract_representative_frames(
         self,

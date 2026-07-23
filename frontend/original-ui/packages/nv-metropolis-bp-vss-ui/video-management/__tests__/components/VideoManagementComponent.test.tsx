@@ -10,6 +10,7 @@ const mockCloseVideoModal = jest.fn();
 jest.mock('@nemo-agent-toolkit/ui', () => ({
   UploadFilesDialog: () => null,
   useChatVideoUploadCompleteSubscription: jest.fn(),
+  getUploadUrl: jest.fn().mockResolvedValue('https://agent.example.com/upload?upload_session_id=session-1'),
   VideoModal: ({ isOpen, title }: { isOpen: boolean; title: string }) =>
     isOpen ? <div data-testid="video-modal">{title}</div> : null,
   useVideoModal: () => ({

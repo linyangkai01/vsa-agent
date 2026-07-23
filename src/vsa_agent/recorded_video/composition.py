@@ -12,7 +12,6 @@ from vsa_agent.recorded_video.repository import JobRepository
 from vsa_agent.recorded_video.segmenter import FixedDurationSegmenter
 from vsa_agent.recorded_video.worker import RecordedVideoWorker
 
-_EXPECTED_EMBEDDING_DIMS = 1024
 _PROMPT_VERSION = "recorded-video-prompt-v1"
 
 
@@ -34,21 +33,25 @@ def build_recorded_video_worker(config: AppConfig) -> RecordedVideoWorker:
         allowed_snapshot_models={runtime.vlm.model, runtime.embedding.model},
     )
     asset_store = LocalAssetStore(recorded_video.data_root, cleanup_repository=repository)
-    media = MediaProcessor(asset_store)
+    media = MediaProcessor(
+        asset_store,
+        ffmpeg_path=recorded_video.ffmpeg_path,
+        ffprobe_path=recorded_video.ffprobe_path,
+    )
     segmenter = FixedDurationSegmenter(recorded_video.segment_duration_sec)
     vision = OpenAIVisionProvider(
         base_url=runtime.vlm.base_url,
         api_key=runtime.vlm.api_key,
         model=runtime.vlm.model,
         timeout_sec=search.request_timeout_sec,
-        concurrency=recorded_video.worker_concurrency,
+        concurrency=recorded_video.provider_concurrency,
     )
     embedding = OpenAIEmbeddingProvider(
         base_url=runtime.embedding.base_url,
         api_key=runtime.embedding.api_key,
         model=runtime.embedding.model,
         timeout_sec=search.request_timeout_sec,
-        concurrency=recorded_video.worker_concurrency,
+        concurrency=recorded_video.provider_concurrency,
     )
     es_client = AsyncElasticsearch(
         search.es_endpoint,
@@ -68,7 +71,7 @@ def build_recorded_video_worker(config: AppConfig) -> RecordedVideoWorker:
         vision=vision,
         embedding=embedding,
         projection=projection,
-        expected_embedding_dims=_EXPECTED_EMBEDDING_DIMS,
+        expected_embedding_dims=search.embedding_dimensions,
         representative_frames=recorded_video.representative_frames,
         prompt_version=_PROMPT_VERSION,
         segmenter_version=segmenter_version,

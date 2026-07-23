@@ -20,6 +20,13 @@ class FakeApiError(Exception):
         super().__init__(detail)
 
 
+class ObjectApiResponse:
+    """Minimal Elasticsearch 8 response wrapper exposing a decoded body."""
+
+    def __init__(self, body: object) -> None:
+        self.body = body
+
+
 class FakeIndices:
     def __init__(self) -> None:
         self.indices: dict[str, dict[str, object]] = {}
@@ -108,6 +115,29 @@ class FakeElasticsearch:
         return self
 
 
+class WrappedIndices(FakeIndices):
+    async def create(self, **kwargs):
+        return ObjectApiResponse(await super().create(**kwargs))
+
+    async def update_aliases(self, **kwargs):
+        return ObjectApiResponse(await super().update_aliases(**kwargs))
+
+    async def get_alias(self, **kwargs):
+        return ObjectApiResponse(await super().get_alias(**kwargs))
+
+    async def get_mapping(self, **kwargs):
+        return ObjectApiResponse(await super().get_mapping(**kwargs))
+
+    async def get_settings(self, **kwargs):
+        return ObjectApiResponse(await super().get_settings(**kwargs))
+
+
+class WrappedElasticsearch(FakeElasticsearch):
+    def __init__(self) -> None:
+        self.indices = WrappedIndices()
+        self.option_headers = []
+
+
 @pytest.fixture
 def fake_es() -> FakeElasticsearch:
     return FakeElasticsearch()
@@ -191,7 +221,13 @@ async def test_bootstrap_creates_explicit_versioned_mapping_then_atomically_upda
     assert mapping["properties"]["vector"] == {
         "type": "dense_vector",
         "dims": 1024,
+        "index": True,
         "similarity": "cosine",
+        "index_options": {
+            "type": "int8_hnsw",
+            "m": 16,
+            "ef_construction": 100,
+        },
     }
     assert fake_es.indices.alias_calls == [
         {
@@ -225,6 +261,17 @@ async def test_existing_compatible_alias_is_validated_without_mutation(
     assert await index.validate_alias(expected_model="embed-model", expected_dims=3) == name
     assert fake_es.indices.create_calls == []
     assert fake_es.indices.alias_calls == []
+
+
+@pytest.mark.asyncio
+async def test_elasticsearch_8_object_api_responses_are_unwrapped() -> None:
+    client = WrappedElasticsearch()
+    index = RecordedVideoIndex(client, alias="vsa-video-segments", index_version="v3")
+
+    created = await index.bootstrap(model="embed-model", dims=3)
+
+    assert await index.bootstrap(model="embed-model", dims=3) == created
+    assert await index.validate_alias(expected_model="embed-model", expected_dims=3) == created
 
 
 @pytest.mark.asyncio

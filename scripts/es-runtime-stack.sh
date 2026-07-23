@@ -13,8 +13,10 @@ SMOKE_ONLY=0
 VALIDATE=0
 EXPLICIT_VALIDATE=0
 KEEP_RUNNING=0
+SECRETS_FILE="${VSA_SECRETS_FILE:-${HOME:-}/.config/vsa-agent/secrets.env}"
+SECRETS_FILE_EXPLICIT=0
 PORT_TERMINATION_GRACE_SEC=5
-PROCESS_SHUTDOWN_GRACE_TICKS=10
+PROCESS_SHUTDOWN_GRACE_TICKS=50
 
 usage() {
   cat <<'EOF'
@@ -31,6 +33,7 @@ Options:
   --keep-running             Keep an explicit isolated validation runtime alive.
   --smoke-only               Compatibility alias for --validate without starting the UI.
   --conda-env NAME           Run Python through conda run -n NAME.
+  --secrets-file PATH        Private KEY=VALUE file. Default: ~/.config/vsa-agent/secrets.env
   --timeout-sec SECONDS      Startup timeout. Default: 90
   --stop-elasticsearch       Stop Elasticsearch on exit only when this run started it.
   -ApiPort PORT              PowerShell-style alias for --api-port.
@@ -58,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --keep-running|-KeepRunning) KEEP_RUNNING=1; shift ;;
     --smoke-only|-SmokeOnly) SMOKE_ONLY=1; VALIDATE=1; shift ;;
     --conda-env|-CondaEnv) CONDA_ENV="$2"; shift 2 ;;
+    --secrets-file|-SecretsFile) SECRETS_FILE="$2"; SECRETS_FILE_EXPLICIT=1; shift 2 ;;
     --timeout-sec|-TimeoutSec) TIMEOUT_SEC="$2"; shift 2 ;;
     --stop-elasticsearch|-StopElasticsearch) STOP_ELASTICSEARCH=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -86,6 +90,7 @@ if ! command -v python >/dev/null 2>&1; then
   exit 127
 fi
 RUN_ID="$(python -c 'import uuid; print(uuid.uuid4())')"
+LAUNCHER_PID="$BASHPID"
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 LATEST_LINK="$RUNTIME_DIR/latest"
 CONFIG_PATH="$RUN_DIR/config.yaml"
@@ -138,7 +143,7 @@ fi
 ln -sfn "$RUN_DIR" "$LATEST_LINK"
 
 LAUNCHER_PID_PATH="$RUN_DIR/launcher.pid"
-if ! printf '%s\n' "$BASHPID" >"$LAUNCHER_PID_PATH"; then
+if ! printf '%s\n' "$LAUNCHER_PID" >"$LAUNCHER_PID_PATH"; then
   printf '[stack] ERROR: unable to record launcher PID at %s\n' "$LAUNCHER_PID_PATH" >&2
   exit 1
 fi
@@ -239,6 +244,55 @@ publish_status() {
 log_stack_error() {
   start_sync_supervisor printf 'ERROR: %s\n' "$*" >&2
   wait_sync_supervisor 0
+}
+
+load_secrets_file() {
+  local path="$1" line key value mode owner current_owner loaded=0
+  if [[ ! -e "$path" ]]; then
+    if [[ "$SECRETS_FILE_EXPLICIT" == "1" ]]; then
+      log_stack_error "secrets file does not exist: $path"
+      return 1
+    fi
+    return 0
+  fi
+  if [[ ! -f "$path" || ! -r "$path" ]]; then
+    log_stack_error "secrets file must be a readable regular file: $path"
+    return 1
+  fi
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    mode="$(stat -c '%a' -- "$path")"
+    owner="$(stat -c '%u' -- "$path")"
+    current_owner="$(id -u)"
+    if [[ "$owner" != "$current_owner" ]]; then
+      log_stack_error "refusing secrets file not owned by the current user: $path"
+      return 1
+    fi
+    if (( (8#$mode & 077) != 0 )); then
+      log_stack_error "refusing secrets file with group or other permissions: $path"
+      return 1
+    fi
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ ! "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Z][A-Z0-9_]*_API_[K][E][Y])=(.*)$ ]]; then
+      log_stack_error "secrets file contains an invalid entry; only uppercase provider-key entries are allowed: $path"
+      return 1
+    fi
+    key="${BASH_REMATCH[2]}"
+    value="${BASH_REMATCH[3]}"
+    if [[ ${#value} -ge 2 && ( ( "$value" == \"*\" ) || ( "$value" == \'*\' ) ) ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    if [[ -z "$value" ]]; then
+      log_stack_error "secrets file contains an empty value for $key"
+      return 1
+    fi
+    printf -v "$key" '%s' "$value"
+    export "$key"
+    loaded=$((loaded + 1))
+  done <"$path"
+  log_stack "loaded private secrets file path=$path keys=$loaded"
 }
 
 cleanup_log_line() {
@@ -416,23 +470,27 @@ from pathlib import Path
 import json
 import re
 import sys
+import yaml
 
 source, target = Path(sys.argv[1]), Path(sys.argv[2])
 endpoint, index, data_root, mode = sys.argv[3:7]
 validation = mode == "validation"
 raw = source.read_text(encoding="utf-8")
+source_config = yaml.safe_load(raw) or {}
+embedding_dimensions = int((source_config.get("search") or {}).get("embedding_dimensions", 1024))
 search_block = f"""search:
   enabled: true
   es_endpoint: {endpoint}
   embed_index: {index}
+  embedding_dimensions: {embedding_dimensions}
   behavior_index: vsa-video-behavior
   frames_index:
   vector_field: vector
   embed_confidence_threshold: 0.0
   request_timeout_sec: 30.0
   verify_certs: false
-  allow_mock_fallback: {str(validation).lower()}
-  force_mock_embedding: {str(validation).lower()}
+  allow_mock_fallback: false
+  force_mock_embedding: false
 """
 updated = re.sub(r"(?m)^search:\r?\n(?:^[ \t]+[^\r\n]*(?:\r?\n|$))*", search_block + "\n", raw, count=1)
 enabled = "true"
@@ -453,6 +511,60 @@ target.write_text(updated, encoding="utf-8")
 PY
 }
 
+stale_project_ui_pids() {
+  local current_uid protected_pids=" " pid="$LAUNCHER_PID" parent depth=0
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+  current_uid="$(id -u)"
+
+  while [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 && depth < 64 )); do
+    [[ "$protected_pids" == *" $pid "* ]] && break
+    protected_pids+="$pid "
+    parent="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+    pid="$parent"
+    depth=$((depth + 1))
+  done
+
+  ps -eo uid=,pid=,comm=,args= | awk -v uid="$current_uid" -v root="$REPO_ROOT" -v protected="$protected_pids" '
+    $1 == uid && $3 ~ /^(node|npm|turbo|bash|sh)$/ {
+      command_line = $0
+      if (index(protected, " " $2 " ") == 0 &&
+          (index(command_line, root "/frontend/original-ui") > 0 ||
+           index(command_line, root "/scripts/run_original_ui_vss.sh") > 0)) {
+        print $2
+      }
+    }
+  '
+}
+
+reclaim_stale_project_ui_processes() {
+  local pids pid deadline
+  pids="$(stale_project_ui_pids)"
+  [[ -z "$pids" ]] && return 0
+  for pid in $pids; do
+    assert_current_user_pid "$pid" allow-missing || return 1
+    log_stack "reclaiming stale project UI process PID $pid"
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+  done
+  deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC))
+  while [[ -n "$(stale_project_ui_pids)" ]] && (( SECONDS < deadline )); do
+    sleep 0.25
+  done
+  pids="$(stale_project_ui_pids)"
+  for pid in $pids; do
+    assert_current_user_pid "$pid" allow-missing || return 1
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  done
+  deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC))
+  while [[ -n "$(stale_project_ui_pids)" ]] && (( SECONDS < deadline )); do
+    sleep 0.25
+  done
+  pids="$(stale_project_ui_pids)"
+  if [[ -n "$pids" ]]; then
+    log_stack_error "stale project UI process cleanup did not complete; remaining PID(s): $pids"
+    return 1
+  fi
+}
+
 port_listener_pids() {
   if command -v lsof >/dev/null 2>&1; then
     lsof -ti "TCP:$1" -sTCP:LISTEN 2>/dev/null || true
@@ -465,10 +577,19 @@ port_listener_pids() {
 }
 
 assert_current_user_pid() {
-  local pid="$1" owner_uid current_uid
+  local pid="$1" missing_policy="${2:-reject-missing}" owner_uid current_uid
   owner_uid="$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')"
   current_uid="$(id -u)"
-  if [[ -z "$owner_uid" || "$owner_uid" != "$current_uid" ]]; then
+  if [[ -z "$owner_uid" ]]; then
+    # The listener may exit between discovery and ownership validation.
+    # Only the stale-UI path has already established current-user ownership.
+    if [[ "$missing_policy" == "allow-missing" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    log_stack_error "FOREIGN_LISTENER: refusing to terminate PID $pid owned by uid unknown"
+    return 1
+  fi
+  if [[ "$owner_uid" != "$current_uid" ]]; then
     log_stack_error "FOREIGN_LISTENER: refusing to terminate PID $pid owned by uid ${owner_uid:-unknown}"
     return 1
   fi
@@ -770,7 +891,7 @@ signal_process_tree() {
 
 stop_pid_bounded() {
   local pid="$1" tick=0
-  local grace_ticks="${PROCESS_SHUTDOWN_GRACE_TICKS:-10}"
+  local grace_ticks="${PROCESS_SHUTDOWN_GRACE_TICKS:-50}"
   local deadline=$((grace_ticks * 2))
   STOPPED_PROCESS_STATUS=0
   if pid_is_running "$pid"; then
@@ -823,8 +944,18 @@ stop_sync_supervisor() {
 
 delete_validation_resources() {
   [[ "$VALIDATE" != "1" ]] && return 0
-  local failed=0 validation_resource
-  for validation_resource in "$VALIDATION_SMOKE_INDEX" "$VALIDATION_INDEX"; do
+  local failed=0 validation_resource validation_indices=""
+  if curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX" >/dev/null 2>&1; then
+    validation_indices="$(
+      curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX" |
+        python -c 'import json, sys; print("\n".join(json.load(sys.stdin)))'
+    )" || failed=1
+  fi
+  validation_indices="$({
+    printf '%s\n' "$validation_indices"
+    curl -fsS "$ES_ENDPOINT/_cat/indices/${VALIDATION_INDEX}-*?h=index" 2>/dev/null || true
+  } | awk 'NF && !seen[$0]++')"
+  for validation_resource in "$VALIDATION_SMOKE_INDEX" $validation_indices; do
     if ! curl -fsS -X DELETE --get --data-urlencode "ignore_unavailable=true" "$ES_ENDPOINT/$validation_resource" >/dev/null 2>&1; then
       cleanup_log_error "failed to remove validation index $validation_resource"
       failed=1
@@ -903,7 +1034,8 @@ trap 'handle_interrupt TERM' TERM
 
 init_process_manifest
 log_stack "run_id=$RUN_ID evidence=$RUN_DIR"
-log_stack "launcher_pid=$BASHPID"
+log_stack "launcher_pid=$LAUNCHER_PID"
+load_secrets_file "$SECRETS_FILE"
 
 require_command docker
 require_command curl
@@ -922,6 +1054,7 @@ elif [[ "$DATA_ROOT" != /* ]]; then
 fi
 mkdir -p "$DATA_ROOT"
 
+reclaim_stale_project_ui_processes
 for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
 write_search_config "$CONFIG_PATH" "$INDEX" "$DATA_ROOT" production
@@ -936,7 +1069,7 @@ if [[ "$SMOKE_ONLY" == "0" ]]; then
   ensure_ui_runtime
 fi
 
-doctor_args=(scripts/runtime-doctor.py --config "$CONFIG_PATH" --es-endpoint "$ES_ENDPOINT" --phase static --port "$API_PORT" --json)
+doctor_args=(scripts/runtime-doctor.py --config "$API_CONFIG_PATH" --es-endpoint "$ES_ENDPOINT" --phase static --port "$API_PORT" --json)
 if [[ "$SMOKE_ONLY" == "1" ]]; then
   doctor_args+=(--skip-ui)
 else
@@ -975,11 +1108,17 @@ while true; do
   sleep 2
 done
 
-doctor_args=(scripts/runtime-doctor.py --config "$CONFIG_PATH" --es-endpoint "$ES_ENDPOINT" --phase elasticsearch --json)
+doctor_args=(scripts/runtime-doctor.py --config "$API_CONFIG_PATH" --es-endpoint "$ES_ENDPOINT" --phase elasticsearch --json)
 if [[ -n "$CONDA_ENV" ]]; then
   doctor_args+=(--conda-env "$CONDA_ENV")
 fi
-log_stack "validating production alias and mapping without writes"
+if [[ "$VALIDATE" == "1" ]]; then
+  log_stack "bootstrapping isolated validation alias before service startup"
+else
+  log_stack "bootstrapping or validating production alias before service startup"
+fi
+run_python_stack_command scripts/recorded-video-bootstrap-index.py --config "$API_CONFIG_PATH" --json
+log_stack "validating active alias and mapping without writes"
 run_python_stack_command "${doctor_args[@]}"
 
 if [[ -n "$CONDA_ENV" ]]; then

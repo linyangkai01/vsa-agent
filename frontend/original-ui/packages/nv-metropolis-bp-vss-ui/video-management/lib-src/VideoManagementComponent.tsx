@@ -7,6 +7,7 @@ import {
   UploadFilesDialog,
   VideoModal,
   cancelRecordedVideoJob,
+  getUploadUrl,
   pollRecordedVideoJob,
   retryRecordedVideoJob,
   useVideoModal,
@@ -14,7 +15,6 @@ import {
 } from '@nemo-agent-toolkit/ui';
 import type { JobStatusResponse } from '@nemo-agent-toolkit/ui';
 import { chunkedUpload, notifyUploadComplete } from './chunkedUpload';
-import { createApiEndpoints } from './api';
 import { deleteRtspStream } from './rtspStream';
 import { deleteVideo } from './videoDelete';
 import { NUM_PARALLEL_FILE_UPLOADS } from './constants';
@@ -216,10 +216,14 @@ export const VideoManagementComponent: React.FC<VideoManagementComponentProps> =
 
         // Step 1: Chunked upload directly to the video storage service
         // (bypasses agent, avoids Cloudflare 100s timeout on large files)
-        const uploadEndpoints = createApiEndpoints(vstApiUrl);
+        const chunkUploadUrl = await getUploadUrl(
+          file.name,
+          agentApiUrl,
+          abortController.signal,
+        );
         const videoUploadApiResponse = await chunkedUpload({
           file,
-          uploadUrl: uploadEndpoints.UPLOAD_FILE,
+          uploadUrl: chunkUploadUrl,
           onProgress: (progress: number) => {
             if (!isSessionValid() || abortController.signal.aborted) return;
             setUploadProgress((prev) =>

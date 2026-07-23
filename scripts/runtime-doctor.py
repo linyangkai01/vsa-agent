@@ -293,6 +293,13 @@ def _mapping_value(mapping: dict[str, Any], *path: str) -> Any:
     return value
 
 
+def _response_mapping(response: Any, *, operation: str) -> Mapping[str, Any]:
+    body = response if isinstance(response, Mapping) else getattr(response, "body", None)
+    if not isinstance(body, Mapping):
+        raise ValueError(f"INDEX_RESPONSE_INVALID: Elasticsearch {operation} response is invalid")
+    return body
+
+
 def _normalized_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     """Match RecordedVideoIndex readiness semantics for ES-normalized objects."""
     normalized: dict[str, Any] = {}
@@ -339,16 +346,22 @@ async def _check_elasticsearch_async(
                 f"Recorded-video alias does not exist: {alias}",
                 "Bootstrap the versioned recorded-video index before starting the production stack.",
             )
-        alias_payload = await compatible.indices.get_alias(name=alias)
-        if not isinstance(alias_payload, dict) or len(alias_payload) != 1:
+        alias_payload = _response_mapping(
+            await compatible.indices.get_alias(name=alias),
+            operation="get alias",
+        )
+        if len(alias_payload) != 1:
             raise ValueError("INDEX_ALIAS_CONFLICT: alias must resolve to exactly one index")
         index_name, index_alias = next(iter(alias_payload.items()))
         alias_settings = index_alias.get("aliases", {}).get(alias, {}) if isinstance(index_alias, dict) else {}
         if alias_settings.get("is_write_index") is not True:
             raise ValueError("INDEX_ALIAS_CONFLICT: alias must identify one explicit write index")
 
-        mapping_payload = await compatible.indices.get_mapping(index=index_name)
-        mapping = mapping_payload.get(index_name, {}).get("mappings", {}) if isinstance(mapping_payload, dict) else {}
+        mapping_payload = _response_mapping(
+            await compatible.indices.get_mapping(index=index_name),
+            operation="get mapping",
+        )
+        mapping = mapping_payload.get(index_name, {}).get("mappings", {})
         dims = _mapping_value(mapping, "properties", "vector", "dims")
         resolved = resolve_runtime_config(config)
         expected_model = resolved.embedding.model if resolved.embedding else ""
@@ -359,10 +372,11 @@ async def _check_elasticsearch_async(
         if index_name != expected_name or _normalized_mapping(mapping) != _normalized_mapping(expected_mapping):
             raise ValueError("INDEX_MAPPING_CONFLICT: recorded-video mapping, model, or index name differs")
 
-        settings_payload = await compatible.indices.get_settings(index=index_name, flat_settings=True)
-        settings = (
-            settings_payload.get(index_name, {}).get("settings", {}) if isinstance(settings_payload, dict) else {}
+        settings_payload = _response_mapping(
+            await compatible.indices.get_settings(index=index_name, flat_settings=True),
+            operation="get settings",
         )
+        settings = settings_payload.get(index_name, {}).get("settings", {})
         actual_settings = {
             "shards": str(settings.get("index.number_of_shards")),
             "replicas": str(settings.get("index.number_of_replicas")),
@@ -478,15 +492,22 @@ def run_doctor(
     required_commands = (
         (("conda",) if conda_env.strip() else ()) + (("npm",) if require_ui else ()) + _REQUIRED_COMMANDS
     )
+    configured_commands = {
+        "ffmpeg": app_config.recorded_video.ffmpeg_path,
+        "ffprobe": app_config.recorded_video.ffprobe_path,
+    }
     for command in required_commands:
-        exists = command_exists(command)
+        configured_command = str(configured_commands.get(command, command))
+        exists = command_exists(configured_command)
         checks.append(
             _check(
                 command,
                 f"{command.upper()}_AVAILABLE" if exists else _COMMAND_CODES[command],
                 exists,
                 f"Command is available: {command}" if exists else f"Required command is missing: {command}",
-                f"Install {command} for the current user or selected conda environment." if not exists else "none",
+                f"Install {command} for the current user or configure recorded_video.{command}_path."
+                if not exists
+                else "none",
             )
         )
 
