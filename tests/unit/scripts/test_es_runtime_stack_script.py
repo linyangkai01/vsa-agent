@@ -99,8 +99,11 @@ def test_es_runtime_stack_exposes_expected_parameters():
         "[int]$UiPort = 3000",
         "[switch]$SmokeOnly",
         '[string]$DataRoot = ""',
+        '[string]$Config = "config.yaml"',
+        '[string]$SecretsFile = ""',
         "[switch]$Validate",
         "[switch]$KeepRunning",
+        "[switch]$ProbeProviders",
     ):
         assert parameter in text
 
@@ -198,7 +201,10 @@ def test_es_runtime_stack_bash_exposes_expected_options():
         "--validate",
         "--keep-running",
         "--secrets-file",
+        "--config",
+        "--probe-providers",
         "-KeepRunning",
+        "-ProbeProviders",
     ):
         assert option in text
 
@@ -257,6 +263,36 @@ def test_linux_stack_bootstraps_and_validates_the_active_runtime_config():
     assert 'log_stack "bootstrapping isolated validation alias before service startup"' in text
     assert 'curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX"' in text
     assert '"$ES_ENDPOINT/_cat/indices/${VALIDATION_INDEX}-*?h=index"' in text
+
+
+def test_provider_probe_mode_is_secret_aware_and_precedes_all_stack_side_effects():
+    bash = _bash_script_text()
+    powershell = _script_text()
+
+    bash_load = bash.rindex('load_secrets_file "$SECRETS_FILE"')
+    bash_probe = bash.rindex('if [[ "$PROBE_PROVIDERS" == "1" ]]')
+    bash_python_bootstrap = bash.rindex("ensure_python_runtime")
+    bash_data_root = bash.rindex('mkdir -p "$DATA_ROOT"')
+    bash_port_reclaim = bash.rindex('for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done')
+    bash_docker = bash.rindex("require_command docker")
+    assert bash_load < bash_probe < bash_python_bootstrap < bash_docker
+    assert bash_probe < bash_data_root
+    assert bash_probe < bash_port_reclaim
+    assert 'scripts/runtime-doctor.py --config "$SOURCE_CONFIG" --probe-providers --json' in bash
+    assert "--probe-providers cannot be combined with validation or keep-running modes" in bash
+
+    ps_load = powershell.rindex("Import-PrivateSecretsFile -Path $SecretsFile")
+    ps_probe = powershell.rindex("if ($ProbeProviders)")
+    ps_port_reclaim = powershell.rindex("foreach ($port in @($ApiPort, $UiPort))")
+    ps_data_root = powershell.rindex("New-Item -ItemType Directory -Force -Path $DataRoot")
+    ps_ui = powershell.rindex("Ensure-UiRuntime")
+    assert ps_load < ps_probe < ps_port_reclaim
+    assert ps_probe < ps_data_root
+    assert ps_probe < ps_ui
+    assert '"--config", $sourceConfig, "--probe-providers", "--json"' in powershell
+    assert "-ProbeProviders cannot be combined with validation or keep-running modes" in powershell
+    assert "exit $probeStatus" in powershell
+    assert "secretEnvironmentSnapshot" in powershell
 
 
 def test_original_ui_launcher_forwards_the_requested_port_to_next():
@@ -432,10 +468,13 @@ def test_sync_server_files_script_exposes_target_and_manifest_options():
         "tests\\unit\\recorded_video\\test_bootstrap.py",
         "src\\vsa_agent\\recorded_video\\production_acceptance.py",
         "src\\vsa_agent\\recorded_video\\production_evidence.py",
+        "src\\vsa_agent\\recorded_video\\provider_probe.py",
         "src\\vsa_agent\\recorded_video\\production_runner.py",
         "tests\\unit\\recorded_video\\test_production_acceptance.py",
         "tests\\unit\\recorded_video\\test_production_evidence.py",
+        "tests\\unit\\recorded_video\\test_provider_probe.py",
         "tests\\acceptance\\test_recorded_video_validation_report.py",
+        "docs\\specs\\provider-readiness-probe.md",
     ):
         assert f'"{acceptance_path}"' in text
     assert '"frontend\\original-ui\\package.json"' not in text

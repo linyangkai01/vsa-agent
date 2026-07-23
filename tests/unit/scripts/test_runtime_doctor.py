@@ -10,6 +10,7 @@ from typing import Any
 
 from vsa_agent.config import AppConfig
 from vsa_agent.recorded_video.es_index import RecordedVideoIndex, build_segment_mapping
+from vsa_agent.recorded_video.provider_probe import ProviderProbeResult
 
 SCRIPT_PATH = Path("scripts/runtime-doctor.py")
 
@@ -280,6 +281,131 @@ def test_doctor_reports_provider_configuration_without_exposing_secret(
     assert not provider_check.ok
     assert "TEST_PROVIDER_API_KEY" in provider_check.message
     assert "secret-value" not in json.dumps(result.to_dict())
+
+
+def test_live_provider_probe_returns_structured_role_results_and_quota_exit_code(
+    tmp_path: Path,
+    monkeypatch,
+):
+    doctor = _load_doctor()
+    config = _production_config(tmp_path)
+    monkeypatch.delenv("VSA_PROFILE", raising=False)
+    monkeypatch.setenv("TEST_PROVIDER_API_KEY", "secret-value")
+    probe_results = (
+        ProviderProbeResult(
+            role="embedding",
+            outcome="ok",
+            provider="openai_compatible",
+            model="embedding-model",
+            host="provider.test",
+            status=200,
+            duration_ms=12,
+        ),
+        ProviderProbeResult(
+            role="vlm",
+            outcome="quota",
+            provider="openai_compatible",
+            model="vision-model",
+            host="provider.test",
+            status=403,
+            duration_ms=18,
+            provider_code="AllocationQuota.FreeTierOnly",
+            request_id="request-123",
+        ),
+    )
+
+    result = doctor.run_doctor(
+        config=config,
+        probe_providers=True,
+        provider_probe_runner=lambda _config: probe_results,
+    )
+
+    assert result.exit_code == 3
+    assert not result.ok
+    assert [check.component for check in result.checks] == ["provider:embedding", "provider:vlm"]
+    assert result.checks[0].code == "PROVIDER_OK"
+    assert result.checks[1].code == "PROVIDER_QUOTA"
+    assert result.checks[1].details == probe_results[1].to_dict()
+    serialized = json.dumps(result.to_dict())
+    assert "secret-value" not in serialized
+    assert "Authorization" not in serialized
+
+
+def test_default_doctor_never_calls_live_provider_probe(tmp_path: Path):
+    doctor = _load_doctor()
+    config = AppConfig(recorded_video={"enabled": False, "data_root": tmp_path, "max_upload_bytes": 1})
+
+    def unexpected_probe(_config):
+        raise AssertionError("default doctor must not call the live provider")
+
+    result = doctor.run_doctor(
+        config=config,
+        ports=(),
+        phase="static",
+        command_exists=lambda _name: True,
+        python_module_exists=lambda _name: True,
+        docker_compose_available=lambda: True,
+        provider_probe_runner=unexpected_probe,
+    )
+
+    assert result.ok
+
+
+def test_live_provider_probe_cli_propagates_stable_exit_code(tmp_path: Path, capsys):
+    doctor = _load_doctor()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("recorded_video:\n  enabled: false\n", encoding="utf-8")
+    failed = doctor.DoctorResult(
+        checks=(
+            doctor.DoctorCheck(
+                component="provider:vlm",
+                code="PROVIDER_QUOTA",
+                ok=False,
+                message="provider_probe role=vlm outcome=quota status=403",
+                remediation="Restore provider quota.",
+            ),
+        ),
+        exit_code=3,
+    )
+
+    exit_code = doctor.main(
+        ["--config", str(config_path), "--probe-providers", "--json"],
+        runner=lambda **_kwargs: failed,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 3
+    assert payload["exit_code"] == 3
+    assert payload["checks"][0]["code"] == "PROVIDER_QUOTA"
+
+
+def test_live_provider_probe_config_failure_uses_stable_configuration_exit_code(tmp_path: Path, capsys):
+    doctor = _load_doctor()
+    missing_config = tmp_path / "missing.yaml"
+
+    exit_code = doctor.main(["--config", str(missing_config), "--probe-providers", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["exit_code"] == 2
+    assert payload["checks"][0]["code"] == "CONFIG_LOAD_FAILED"
+
+
+def test_live_provider_probe_rejects_incomplete_role_results(tmp_path: Path, monkeypatch):
+    doctor = _load_doctor()
+    config = _production_config(tmp_path)
+    monkeypatch.delenv("VSA_PROFILE", raising=False)
+    monkeypatch.setenv("TEST_PROVIDER_API_KEY", "secret-value")
+
+    result = doctor.run_doctor(
+        config=config,
+        probe_providers=True,
+        provider_probe_runner=lambda _config: (),
+    )
+
+    assert result.exit_code == 5
+    assert not result.ok
+    assert result.checks[0].code == "PROVIDER_PROBE_INCOMPLETE"
 
 
 class _FakeIndices:

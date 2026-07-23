@@ -5,11 +5,14 @@ param(
     [string]$Index = "vsa-video-embeddings",
     [string]$CondaEnv = "",
     [string]$DataRoot = "",
+    [string]$Config = "config.yaml",
+    [string]$SecretsFile = "",
     [int]$TimeoutSec = 90,
     [switch]$StopElasticsearch,
     [switch]$SmokeOnly,
     [switch]$Validate,
-    [switch]$KeepRunning
+    [switch]$KeepRunning,
+    [switch]$ProbeProviders
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +22,9 @@ if ($KeepRunning -and $SmokeOnly) {
 }
 if ($KeepRunning -and -not $explicitValidation) {
     throw "-KeepRunning requires explicit validation via -Validate"
+}
+if ($ProbeProviders -and ($Validate -or $SmokeOnly -or $KeepRunning)) {
+    throw "-ProbeProviders cannot be combined with validation or keep-running modes"
 }
 $Validate = $Validate -or $SmokeOnly
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -56,6 +62,15 @@ $oldAgentApiUrl = $env:NEXT_PUBLIC_AGENT_API_URL_BASE
 $oldVstApiUrl = $env:NEXT_PUBLIC_VST_API_URL
 $oldInternalAgentApiUrl = $env:VSA_INTERNAL_AGENT_API_URL_BASE
 $oldUiPort = $env:PORT
+$secretEnvironmentSnapshot = @{}
+$secretsFileExplicit = $PSBoundParameters.ContainsKey("SecretsFile")
+if ([string]::IsNullOrWhiteSpace($SecretsFile)) {
+    $SecretsFile = if ([string]::IsNullOrWhiteSpace($env:VSA_SECRETS_FILE)) {
+        Join-Path $HOME ".config\vsa-agent\secrets.env"
+    } else {
+        $env:VSA_SECRETS_FILE
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 foreach ($path in @($stackLogPath, $apiLogPath, $workerLogPath, $uiLogPath, $esLogPath)) {
@@ -87,6 +102,51 @@ function Protect-RuntimeText {
         Add-Type -Path $sourcePath
     }
     return [VsaRuntimeLogPump]::ProtectText($Text)
+}
+
+function Import-PrivateSecretsFile {
+    param([string]$Path, [bool]$Explicit)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        if ($Explicit) { throw "secrets file does not exist: $Path" }
+        return
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "secrets file must be a readable regular file: $Path"
+    }
+    $acl = if ("System.IO.FileSystemAclExtensions" -as [type]) {
+        [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]::new($Path))
+    } else {
+        [System.IO.File]::GetAccessControl($Path)
+    }
+    $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+    $currentOwnerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($null -eq $currentOwnerSid -or $ownerSid -ne $currentOwnerSid) {
+        throw "secrets file must be owned by the current user"
+    }
+
+    $loaded = 0
+    foreach ($rawLine in Get-Content -LiteralPath $Path) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) { continue }
+        if ($line -notmatch '^(?<key>[A-Z][A-Z0-9_]*_API_[K][E][Y])=(?<value>.+)$') {
+            throw "secrets file contains an invalid entry"
+        }
+        $key = $Matches.key
+        $value = $Matches.value.Trim()
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "secrets file contains an empty value for $key"
+        }
+        if (-not $script:secretEnvironmentSnapshot.ContainsKey($key)) {
+            $script:secretEnvironmentSnapshot[$key] = @{
+                Exists = Test-Path -LiteralPath "Env:$key"
+                Value = [Environment]::GetEnvironmentVariable($key, "Process")
+            }
+        }
+        [Environment]::SetEnvironmentVariable($key, $value, "Process")
+        $loaded += 1
+    }
+    Write-Stack "loaded private secrets file path=$Path keys=$loaded"
 }
 
 function Write-ProcessManifest {
@@ -849,6 +909,26 @@ function Wait-RuntimeProcesses {
 
 try {
     Set-Location $repoRoot
+    $sourceConfig = if ([System.IO.Path]::IsPathRooted($Config)) { $Config } else { Join-Path $repoRoot $Config }
+    if (-not (Test-Path -LiteralPath $sourceConfig -PathType Leaf)) {
+        throw "source config must be a readable regular file: $sourceConfig"
+    }
+    Import-PrivateSecretsFile -Path $SecretsFile -Explicit $secretsFileExplicit
+    $env:PYTHONPATH = Join-Path $repoRoot "src"
+
+    if ($ProbeProviders) {
+        $probe = PythonCommand -CondaEnv $CondaEnv -PythonArgs @("scripts\runtime-doctor.py", "--config", $sourceConfig, "--probe-providers", "--json")
+        Write-Stack "running live provider readiness probe"
+        & $probe.File @($probe.Args) 2>&1 | ForEach-Object { Write-Stack "$_" }
+        $probeStatus = $LASTEXITCODE
+        if ($probeStatus -ne 0) {
+            Write-Stack "live provider readiness probe failed with exit code $probeStatus" -ErrorLine
+            exit $probeStatus
+        }
+        Write-Stack "live VLM and embedding provider readiness probe succeeded"
+        exit 0
+    }
+
     foreach ($port in @($ApiPort, $UiPort)) { Reclaim-Port -Port $port -TimeoutSec $TimeoutSec }
 
     if ([string]::IsNullOrWhiteSpace($DataRoot)) {
@@ -857,13 +937,12 @@ try {
         $DataRoot = Join-Path $repoRoot $DataRoot
     }
     New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
-    Write-SearchConfig -SourceConfig (Join-Path $repoRoot "config.yaml") -TargetConfig $configPath -EsEndpoint $esEndpoint -SelectedIndex $Index -SelectedDataRoot $DataRoot -Mode production
+    Write-SearchConfig -SourceConfig $sourceConfig -TargetConfig $configPath -EsEndpoint $esEndpoint -SelectedIndex $Index -SelectedDataRoot $DataRoot -Mode production
     if ($Validate) {
-        Write-SearchConfig -SourceConfig (Join-Path $repoRoot "config.yaml") -TargetConfig $validationConfigPath -EsEndpoint $esEndpoint -SelectedIndex $validationIndex -SelectedDataRoot $validationDataRoot -Mode validation
+        Write-SearchConfig -SourceConfig $sourceConfig -TargetConfig $validationConfigPath -EsEndpoint $esEndpoint -SelectedIndex $validationIndex -SelectedDataRoot $validationDataRoot -Mode validation
         $apiConfigPath = $validationConfigPath
     }
 
-    $env:PYTHONPATH = Join-Path $repoRoot "src"
     if (-not $SmokeOnly) { Ensure-UiRuntime }
 
     $doctorArgs = @("scripts\runtime-doctor.py", "--config", $configPath, "--es-endpoint", $esEndpoint, "--phase", "static", "--port", "$ApiPort", "--json")
@@ -958,6 +1037,14 @@ try {
     $env:NEXT_PUBLIC_VST_API_URL = $oldVstApiUrl
     $env:VSA_INTERNAL_AGENT_API_URL_BASE = $oldInternalAgentApiUrl
     $env:PORT = $oldUiPort
+    foreach ($key in @($secretEnvironmentSnapshot.Keys)) {
+        $snapshot = $secretEnvironmentSnapshot[$key]
+        if ($snapshot.Exists) {
+            [Environment]::SetEnvironmentVariable($key, $snapshot.Value, "Process")
+        } else {
+            [Environment]::SetEnvironmentVariable($key, $null, "Process")
+        }
+    }
 
     if ($esStartedByRun -and $StopElasticsearch) {
         try {

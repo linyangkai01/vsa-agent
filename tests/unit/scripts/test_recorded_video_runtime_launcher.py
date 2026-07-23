@@ -880,6 +880,20 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         """search:\n  enabled: false\nrecorded_video:\n  enabled: true\n  data_root: .runtime/recorded-video\n""",
         encoding="utf-8",
     )
+    (scripts / "runtime-doctor.py").write_text(
+        """
+import os
+from pathlib import Path
+import sys
+
+with Path(os.environ["HARNESS_TRACE"]).open("a", encoding="utf-8") as stream:
+    stream.write(f"doctor={' '.join(sys.argv)}\\n")
+    stream.write(f"doctor_key_loaded={'yes' if os.environ.get('PROBE_CANARY_API_KEY') else 'no'}\\n")
+print("api_key=doctor-secret")
+raise SystemExit(int(os.environ.get("HARNESS_DOCTOR_STATUS", "0")))
+""".lstrip(),
+        encoding="utf-8",
+    )
     _write_executable(
         fake_bin / "lsof",
         """
@@ -965,8 +979,10 @@ def _bash_runtime_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         fi
         if [[ "$1" == "-c" ]]; then exec "$REAL_PYTHON" "$@"; fi
         if [[ "$1" == "scripts/runtime-doctor.py" ]]; then
+          printf 'doctor=%s\n' "$*" >>"$HARNESS_TRACE"
+          printf 'doctor_key_loaded=%s\n' "${PROBE_CANARY_API_KEY:+yes}" >>"$HARNESS_TRACE"
           echo 'api_key=doctor-secret'
-          exit 0
+          exit "${HARNESS_DOCTOR_STATUS:-0}"
         fi
         if [[ "$1" == "scripts/recorded-video-bootstrap-index.py" ]]; then
           printf 'bootstrap=%s\n' "$*" >>"$HARNESS_TRACE"
@@ -1062,6 +1078,10 @@ if [[ -n "${{HARNESS_DEFINE_CONDA_FUNCTION:-}}" ]]; then
     [[ "$1" == "run" ]] && shift
     [[ "${{1:-}}" == "--no-capture-output" ]] && shift
     if [[ "${{1:-}}" == "-n" ]]; then shift 2; fi
+    if [[ "${{1:-}}" == "python" && "${{2:-}}" == "-c" && "${{3:-}}" == *"sys.executable"* ]]; then
+      printf '%s\n' "$HARNESS_CONDA_PYTHON"
+      return 0
+    fi
     "$@"
   }}
 fi
@@ -1077,6 +1097,7 @@ hash -r
             "REAL_PYTHON": as_bash_path(Path(sys.executable)),
             "VSA_SUPERVISOR_PYTHON": as_bash_path(Path(sys.executable)),
             "HARNESS_TRACE": as_bash_path(trace),
+            "HARNESS_CONDA_PYTHON": f"{fake_bin_bash}/python",
         }
     )
     return repo, env
@@ -1115,6 +1136,40 @@ def _run_bash_runtime(repo: Path, env: dict[str, str], *args: str) -> subprocess
         env=env,
         timeout=BASH_RUNTIME_READINESS_TIMEOUT_SEC,
     )
+
+
+@pytest.mark.parametrize("doctor_status", [0, 3])
+def test_bash_provider_probe_propagates_status_without_starting_stack(tmp_path: Path, doctor_status: int):
+    repo, env = _bash_runtime_harness(tmp_path)
+    secrets = repo / "secrets.env"
+    secrets.write_text("PROBE_CANARY_API_KEY=canary-secret\n", encoding="utf-8", newline="\n")
+    secrets.chmod(0o600)
+    env["HARNESS_DOCTOR_STATUS"] = str(doctor_status)
+
+    completed = _run_bash_runtime(
+        repo,
+        env,
+        "--config",
+        "config.yaml",
+        "--secrets-file",
+        secrets.as_posix(),
+        "--probe-providers",
+    )
+
+    assert completed.returncode == doctor_status, completed.stderr
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "doctor=scripts/runtime-doctor.py --config" in trace
+    assert "--probe-providers --json" in trace
+    assert "doctor_key_loaded=yes" in trace
+    assert "docker=" not in trace
+    assert "curl=" not in trace
+    assert "bootstrap=" not in trace
+    assert "api_config=" not in trace
+    assert "worker_config=" not in trace
+    assert "smoke=" not in trace
+    assert not (repo / ".runtime/recorded-video").exists()
+    assert "canary-secret" not in completed.stdout
+    assert "canary-secret" not in completed.stderr
 
 
 @pytest.mark.skipif(os.name != "nt", reason="regression covers Windows runtime tree cleanup")
@@ -1460,7 +1515,16 @@ time.sleep(3600)
 """,
         encoding="utf-8",
     )
-    (scripts / "runtime-doctor.py").write_text(fake_runtime + "print('api_key=doctor-secret')\n", encoding="utf-8")
+    (scripts / "runtime-doctor.py").write_text(
+        fake_runtime
+        + """
+with trace.open("a", encoding="utf-8") as stream:
+    stream.write(f"doctor_key_loaded={'yes' if os.environ.get('PROBE_CANARY_API_KEY') else 'no'}\\n")
+print('api_key=doctor-secret')
+raise SystemExit(int(os.environ.get("HARNESS_DOCTOR_STATUS", "0")))
+""",
+        encoding="utf-8",
+    )
     (scripts / "recorded-video-worker.py").write_text(
         fake_runtime
         + """
@@ -2345,6 +2409,57 @@ def _run_powershell_runtime(
     )
 
 
+@pytest.mark.parametrize("doctor_status", [0, 3])
+def test_powershell_provider_probe_propagates_status_without_starting_stack(
+    tmp_path: Path,
+    doctor_status: int,
+):
+    repo, env = _powershell_runtime_harness(tmp_path)
+    secrets = repo / "secrets.env"
+    secrets.write_text("PROBE_CANARY_API_KEY=canary-secret\n", encoding="utf-8")
+    env["HARNESS_DOCTOR_STATUS"] = str(doctor_status)
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(repo / "scripts/es-runtime-stack.ps1"),
+            "-Config",
+            "config.yaml",
+            "-SecretsFile",
+            str(secrets),
+            "-ProbeProviders",
+        ],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == doctor_status, completed.stderr
+    trace = (repo / "trace.log").read_text(encoding="utf-8")
+    assert "runtime-doctor.py=--config" in trace
+    assert "--probe-providers --json" in trace
+    assert "doctor_key_loaded=yes" in trace
+    assert "inspect=" not in trace
+    assert "compose=" not in trace
+    assert "uvicorn.py=" not in trace
+    assert "recorded-video-worker.py=" not in trace
+    assert "es_ingest_smoke.py=" not in trace
+    assert not (repo / ".runtime/recorded-video").exists()
+    assert "canary-secret" not in completed.stdout
+    assert "canary-secret" not in completed.stderr
+
+
 def test_bash_help_exposes_data_root_and_explicit_validation_without_starting_services():
     bash = shutil.which("bash")
     if bash is None:
@@ -2611,7 +2726,8 @@ def test_bash_conda_shell_function_adapter_covers_doctor_and_long_running_api(tm
     assert completed.returncode == 17, completed.stderr
     trace = (repo / "trace.log").read_text(encoding="utf-8")
     conda_calls = [line for line in trace.splitlines() if line.startswith("conda_function=")]
-    assert any("scripts/runtime-doctor.py" in line for line in conda_calls)
+    assert any("sys.executable" in line for line in conda_calls)
+    assert "doctor=scripts/runtime-doctor.py" in trace
     assert any("python -m uvicorn" in line for line in conda_calls)
 
 

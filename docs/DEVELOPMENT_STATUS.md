@@ -28,18 +28,18 @@ Last updated: 2026-07-23
 
 ## Latest Verified Change
 
-`production-recorded-video-ingest`
+`provider-readiness-probe`
 
-- 完成原版 UI 录播上传、SQLite Worker 恢复、版本化 ES alias、搜索/缩略图/Range 播放、搜索结果到片段问答、失败重试和运行中取消。
-- 修复 Playwright webServer 优雅关闭，使隔离验证结束后回收 API、Worker、UI、验证数据和 ES 索引。
-- 补齐原版 UI 聚合包与 Nemo `server` 子路径声明产物，恢复应用级 TypeScript 检查。
+- 现有单栈启动器新增显式 `--probe-providers` / `-ProbeProviders`，按生产配置顺序检查真实 embedding 与 VLM，并以稳定退出码区分配置、认证/额度、暂态网络和接口契约问题。
+- 探针默认关闭；显式运行时加载同一私密密钥文件，但不安装完整栈依赖、不启动或停止 Docker/ES/API/Worker/UI、不回收端口、不创建数据目录、索引或任务。
+- 结构化日志只保留安全 provider identity、HTTP status、耗时、白名单错误码与 request ID；canary 测试覆盖响应、异常、JSON、stdout/stderr 和启动器日志脱敏。
 
 Verification:
 
-- 本地全量：`1568 passed, 6 skipped, 1 warning`；Ruff、format、compileall、Bash/PowerShell 语法和 diff check 通过。
-- Ubuntu ES/Python 矩阵：`645 passed, 1 skipped`。
-- Ubuntu Chromium 原版 UI E2E：连续两次 `3 passed (2.9m)`；第二次确认无测试端口、进程、索引或容器残留。
-- Ubuntu Video Management Jest：`99 passed`；包级和应用级 typecheck 通过。
+- 本地全量（显式 projection fallback）：`1590 passed, 6 skipped, 1 warning`；未配置本地 ES 的首次运行另有 `1580 passed`，10 个 integration fixture 按契约拒绝启动，不是断言失败。
+- Bash/PowerShell 启动器生命周期：`121 passed`；其中实际 probe 成功/额度失败路径确认退出码 `0/3` 且没有 Docker、端口、UI、数据目录或业务写入副作用。
+- Ruff 全仓、format、compileall、Bash/PowerShell 语法、diff check 和 `Z:\vsa-agent` 同步预检均通过。
+- Ubuntu focused：`74 passed, 5 skipped`，Bash syntax 通过。真实 probe 两次稳定得到 embedding `200/ok`（最终 239 ms）、VLM `403/AllocationQuota.FreeTierOnly`（最终 62 ms）并退出 `3`；精确密钥扫描、Docker 状态不变和 Conda 噪声检查均 PASS。
 
 ## Outstanding Validation
 
@@ -53,6 +53,7 @@ Verification:
 - 2026-07-23 Ubuntu 前端补充验证：Video Management Jest `99 passed`，Video Management 与原版应用 typecheck 通过；同步白名单已覆盖新增 mock 和声明契约文件。
 - 2026-07-23 Ubuntu 真实生产验收使用 `vsa-recorded-video-production` alias，避开并保留 legacy 具体索引 `vsa-video-embeddings`。三条真实视频并发上传、checkpoint、Worker TERM、第二次启动和 attempt 恢复均通过；服务器无管理员权限时复用了当前用户 `vss` Conda 环境中的 ffmpeg 8.0.1，并在 `vsa-agent` 环境提供用户态符号链接，探测到 `libopenh264`。
 - 真实 provider gate 仍未通过：三条恢复任务的 VLM 调用达到 `MODEL_TIMEOUT`，随后最小独立 DashScope VLM 请求在约 1 秒内明确返回 `403 AllocationQuota.FreeTierOnly`。这证明密钥文件读取、DNS、TCP/TLS 和兼容 API 路径正常，当前阻塞是供应商额度而非项目代码；报告保持 FAIL，待额度恢复后原命令重跑 Task 24。
+- 2026-07-23 新增单入口真实 provider readiness probe；Ubuntu 证据 run `03ad4833-0b6c-4c4b-929d-5e796e7ba923` 确认 embedding 可用、VLM quota，返回稳定退出码 `3`，且未改变 Docker 状态、未泄露密钥。额度恢复后先重跑同一 probe，只有两项均 `ok` 才进入三视频最终生产验收。
 
 ## Python Quality Program
 

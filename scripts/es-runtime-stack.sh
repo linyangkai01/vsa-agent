@@ -7,12 +7,14 @@ UI_PORT=3000
 INDEX="vsa-video-embeddings"
 CONDA_ENV=""
 DATA_ROOT=""
+SOURCE_CONFIG="config.yaml"
 TIMEOUT_SEC=90
 STOP_ELASTICSEARCH=0
 SMOKE_ONLY=0
 VALIDATE=0
 EXPLICIT_VALIDATE=0
 KEEP_RUNNING=0
+PROBE_PROVIDERS=0
 SECRETS_FILE="${VSA_SECRETS_FILE:-${HOME:-}/.config/vsa-agent/secrets.env}"
 SECRETS_FILE_EXPLICIT=0
 PORT_TERMINATION_GRACE_SEC=5
@@ -29,6 +31,8 @@ Options:
   --ui-port PORT             Original UI port. Default: 3000
   --index NAME               Production Elasticsearch alias. Default: vsa-video-embeddings
   --data-root PATH           Recorded-video data directory. Default: .runtime/recorded-video
+  --config PATH              Source application config. Default: config.yaml
+  --probe-providers          Probe live VLM and embedding providers, then exit.
   --validate                 Run an isolated validation and exit.
   --keep-running             Keep an explicit isolated validation runtime alive.
   --smoke-only               Compatibility alias for --validate without starting the UI.
@@ -41,6 +45,8 @@ Options:
   -UiPort PORT               PowerShell-style alias for --ui-port.
   -Index NAME                PowerShell-style alias for --index.
   -DataRoot PATH             PowerShell-style alias for --data-root.
+  -Config PATH               PowerShell-style alias for --config.
+  -ProbeProviders            PowerShell-style alias for --probe-providers.
   -Validate                  PowerShell-style alias for --validate.
   -KeepRunning               PowerShell-style alias for --keep-running.
   -SmokeOnly                 PowerShell-style alias for --smoke-only.
@@ -57,6 +63,8 @@ while [[ $# -gt 0 ]]; do
     --ui-port|-UiPort) UI_PORT="$2"; shift 2 ;;
     --index|-Index) INDEX="$2"; shift 2 ;;
     --data-root|-DataRoot) DATA_ROOT="$2"; shift 2 ;;
+    --config|-Config) SOURCE_CONFIG="$2"; shift 2 ;;
+    --probe-providers|-ProbeProviders) PROBE_PROVIDERS=1; shift ;;
     --validate|-Validate) VALIDATE=1; EXPLICIT_VALIDATE=1; shift ;;
     --keep-running|-KeepRunning) KEEP_RUNNING=1; shift ;;
     --smoke-only|-SmokeOnly) SMOKE_ONLY=1; VALIDATE=1; shift ;;
@@ -77,19 +85,44 @@ if [[ "$KEEP_RUNNING" == "1" && "$EXPLICIT_VALIDATE" != "1" ]]; then
   echo "ERROR: --keep-running requires explicit validation via --validate" >&2
   exit 2
 fi
+if [[ "$PROBE_PROVIDERS" == "1" && ( "$VALIDATE" == "1" || "$KEEP_RUNNING" == "1" ) ]]; then
+  echo "ERROR: --probe-providers cannot be combined with validation or keep-running modes" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_LOG_SUPERVISOR="$SCRIPT_DIR/runtime-log-supervisor.py"
-SUPERVISOR_PYTHON="${VSA_SUPERVISOR_PYTHON:-python}"
 RUNTIME_DIR="$REPO_ROOT/.runtime/es-stack"
 RUNS_DIR="$RUNTIME_DIR/runs"
 
-if ! command -v python >/dev/null 2>&1; then
-  echo "ERROR: required command 'python' was not found on PATH" >&2
-  exit 127
+if [[ -n "$CONDA_ENV" ]]; then
+  if ! command -v conda >/dev/null 2>&1; then
+    echo "ERROR: required command 'conda' was not found on PATH" >&2
+    exit 127
+  fi
+  CONDA_PYTHON="$(conda run --no-capture-output -n "$CONDA_ENV" python -c 'import sys; print(sys.executable)')"
+  if command -v cygpath >/dev/null 2>&1 && [[ "$CONDA_PYTHON" =~ ^[A-Za-z]:\\ ]]; then
+    CONDA_PYTHON="$(cygpath -u "$CONDA_PYTHON")"
+  fi
+  if [[ -z "$CONDA_PYTHON" || ! -x "$CONDA_PYTHON" ]]; then
+    echo "ERROR: unable to resolve Python for conda environment '$CONDA_ENV'" >&2
+    exit 127
+  fi
+  PYTHON_COMMAND=("$CONDA_PYTHON")
+else
+  if ! command -v python >/dev/null 2>&1; then
+    echo "ERROR: required command 'python' was not found on PATH" >&2
+    exit 127
+  fi
+  PYTHON_COMMAND=(python)
 fi
-RUN_ID="$(python -c 'import uuid; print(uuid.uuid4())')"
+if [[ -n "${VSA_SUPERVISOR_PYTHON:-}" ]]; then
+  SUPERVISOR_PYTHON_COMMAND=("$VSA_SUPERVISOR_PYTHON")
+else
+  SUPERVISOR_PYTHON_COMMAND=("${PYTHON_COMMAND[@]}")
+fi
+RUN_ID="$("${PYTHON_COMMAND[@]}" -c 'import uuid; print(uuid.uuid4())')"
 LAUNCHER_PID="$BASHPID"
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 LATEST_LINK="$RUNTIME_DIR/latest"
@@ -181,7 +214,7 @@ register_component_supervisor() {
 
 start_sync_supervisor() {
   begin_supervisor_start
-  "$SUPERVISOR_PYTHON" -u "$RUNTIME_LOG_SUPERVISOR" --label stack --stack-log "$STACK_LOG_PATH" -- "$@" &
+  "${SUPERVISOR_PYTHON_COMMAND[@]}" -u "$RUNTIME_LOG_SUPERVISOR" --label stack --stack-log "$STACK_LOG_PATH" -- "$@" &
   local command_pid=$!
   register_sync_supervisor "$command_pid"
   finish_supervisor_start
@@ -230,7 +263,7 @@ publish_status() {
     status_guards+=(--require-running-status "$component" "$pid" "$status_file")
   done
   begin_supervisor_start
-  "$SUPERVISOR_PYTHON" -u "$RUNTIME_LOG_SUPERVISOR" \
+  "${SUPERVISOR_PYTHON_COMMAND[@]}" -u "$RUNTIME_LOG_SUPERVISOR" \
     --label stack \
     --stack-log "$STACK_LOG_PATH" \
     "${status_guards[@]}" \
@@ -315,11 +348,7 @@ run_conda_stack_command() {
 }
 
 run_python_stack_command() {
-  if [[ -n "$CONDA_ENV" ]]; then
-    run_conda_stack_command run --no-capture-output -n "$CONDA_ENV" python "$@"
-  else
-    run_stack_command python "$@"
-  fi
+  run_stack_command "${PYTHON_COMMAND[@]}" "$@"
 }
 
 start_supervised_process() {
@@ -329,7 +358,7 @@ start_supervised_process() {
   PROCESS_STATUS_FILES["$component"]="$status_file"
   begin_supervisor_start
   bash -c 'VSA_SUPERVISOR_REGISTERED_PID="$BASHPID" exec "$@"' vsa-supervisor \
-    "$SUPERVISOR_PYTHON" -u "$RUNTIME_LOG_SUPERVISOR" \
+  "${SUPERVISOR_PYTHON_COMMAND[@]}" -u "$RUNTIME_LOG_SUPERVISOR" \
     --label "$component" \
     --stack-log "$STACK_LOG_PATH" \
     --component-log "$component_log" \
@@ -342,7 +371,7 @@ start_supervised_process() {
 }
 
 init_process_manifest() {
-  python - "$PROCESS_MANIFEST_PATH" "$RUN_ID" <<'PY'
+  "${PYTHON_COMMAND[@]:-python}" - "$PROCESS_MANIFEST_PATH" "$RUN_ID" <<'PY'
 import json
 import os
 import sys
@@ -358,7 +387,7 @@ PY
 
 update_process_manifest() {
   local action="$1" component="$2" value1="$3" value2="${4:-}"
-  python - "$PROCESS_MANIFEST_PATH" "$action" "$component" "$value1" "$value2" <<'PY'
+  "${PYTHON_COMMAND[@]:-python}" - "$PROCESS_MANIFEST_PATH" "$action" "$component" "$value1" "$value2" <<'PY'
 from datetime import UTC, datetime
 import json
 import os
@@ -413,11 +442,7 @@ require_command() {
 }
 
 python_cmd() {
-  if [[ -n "$CONDA_ENV" ]]; then
-    conda run --no-capture-output -n "$CONDA_ENV" python "$@"
-  else
-    python "$@"
-  fi
+  "${PYTHON_COMMAND[@]:-python}" "$@"
 }
 
 verify_python_runtime() {
@@ -464,8 +489,8 @@ ensure_ui_runtime() {
 }
 
 write_search_config() {
-  local target="$1" selected_index="$2" selected_data_root="$3" mode="$4"
-  python - "$REPO_ROOT/config.yaml" "$target" "$ES_ENDPOINT" "$selected_index" "$selected_data_root" "$mode" <<'PY'
+  local source="$1" target="$2" selected_index="$3" selected_data_root="$4" mode="$5"
+  "${PYTHON_COMMAND[@]:-python}" - "$source" "$target" "$ES_ENDPOINT" "$selected_index" "$selected_data_root" "$mode" <<'PY'
 from pathlib import Path
 import json
 import re
@@ -670,7 +695,7 @@ observe_managed_processes() {
 
 validate_component_status() {
   local component="$1" status_file="$2" expected_supervisor_pid="$3"
-  python - "$status_file" "$RUN_ID" "$component" "$expected_supervisor_pid" <<'PY'
+  "${PYTHON_COMMAND[@]:-python}" - "$status_file" "$RUN_ID" "$component" "$expected_supervisor_pid" <<'PY'
 import json
 import os
 import sys
@@ -794,7 +819,7 @@ wait_http_health() {
     fail_if_managed_process_exited || return $?
     validate_managed_statuses || return $?
     health_payload="$(curl -fsS "$API_HEALTH_URL" 2>/dev/null || true)"
-    if [[ -n "$health_payload" ]] && printf '%s' "$health_payload" | python -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "ok" else 1)'; then
+    if [[ -n "$health_payload" ]] && printf '%s' "$health_payload" | "${PYTHON_COMMAND[@]:-python}" -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "ok" else 1)'; then
       return 0
     fi
     sleep 2
@@ -808,7 +833,7 @@ wait_worker_ready() {
   while (( SECONDS < deadline )); do
     fail_if_managed_process_exited || return $?
     validate_managed_statuses || return $?
-    if python - "$WORKER_LOG_PATH" <<'PY'
+    if "${PYTHON_COMMAND[@]:-python}" - "$WORKER_LOG_PATH" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -948,7 +973,7 @@ delete_validation_resources() {
   if curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX" >/dev/null 2>&1; then
     validation_indices="$(
       curl -fsS "$ES_ENDPOINT/_alias/$VALIDATION_INDEX" |
-        python -c 'import json, sys; print("\n".join(json.load(sys.stdin)))'
+        "${PYTHON_COMMAND[@]:-python}" -c 'import json, sys; print("\n".join(json.load(sys.stdin)))'
     )" || failed=1
   fi
   validation_indices="$({
@@ -1037,16 +1062,31 @@ log_stack "run_id=$RUN_ID evidence=$RUN_DIR"
 log_stack "launcher_pid=$LAUNCHER_PID"
 load_secrets_file "$SECRETS_FILE"
 
-require_command docker
-require_command curl
-require_command python
 if [[ -n "$CONDA_ENV" ]]; then
-  require_command conda
   require_command bash
 fi
 
 cd "$REPO_ROOT"
+if [[ "$SOURCE_CONFIG" != /* ]]; then
+  SOURCE_CONFIG="$REPO_ROOT/$SOURCE_CONFIG"
+fi
+if [[ ! -f "$SOURCE_CONFIG" || ! -r "$SOURCE_CONFIG" ]]; then
+  log_stack_error "source config must be a readable regular file: $SOURCE_CONFIG"
+  exit 2
+fi
+export PYTHONPATH="$REPO_ROOT/src"
+
+if [[ "$PROBE_PROVIDERS" == "1" ]]; then
+  probe_args=(scripts/runtime-doctor.py --config "$SOURCE_CONFIG" --probe-providers --json)
+  log_stack "running live provider readiness probe"
+  run_python_stack_command "${probe_args[@]}"
+  log_stack "live VLM and embedding provider readiness probe succeeded"
+  exit 0
+fi
+
 ensure_python_runtime
+require_command docker
+require_command curl
 if [[ -z "$DATA_ROOT" ]]; then
   DATA_ROOT="$REPO_ROOT/.runtime/recorded-video"
 elif [[ "$DATA_ROOT" != /* ]]; then
@@ -1057,14 +1097,13 @@ mkdir -p "$DATA_ROOT"
 reclaim_stale_project_ui_processes
 for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
-write_search_config "$CONFIG_PATH" "$INDEX" "$DATA_ROOT" production
+write_search_config "$SOURCE_CONFIG" "$CONFIG_PATH" "$INDEX" "$DATA_ROOT" production
 if [[ "$VALIDATE" == "1" ]]; then
-  write_search_config "$VALIDATION_CONFIG_PATH" "$VALIDATION_INDEX" "$VALIDATION_DATA_ROOT" validation
+  write_search_config "$SOURCE_CONFIG" "$VALIDATION_CONFIG_PATH" "$VALIDATION_INDEX" "$VALIDATION_DATA_ROOT" validation
   API_CONFIG_PATH="$VALIDATION_CONFIG_PATH"
 fi
 export VSA_CONFIG="$API_CONFIG_PATH"
 
-export PYTHONPATH="$REPO_ROOT/src"
 if [[ "$SMOKE_ONLY" == "0" ]]; then
   ensure_ui_runtime
 fi

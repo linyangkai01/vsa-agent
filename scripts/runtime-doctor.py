@@ -61,21 +61,26 @@ class DoctorCheck:
     ok: bool
     message: str
     remediation: str
+    details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
 class DoctorResult:
     checks: tuple[DoctorCheck, ...]
+    exit_code: int | None = None
 
     @property
     def ok(self) -> bool:
         return all(check.ok for check in self.checks)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "ok": self.ok,
             "checks": [asdict(check) for check in self.checks],
         }
+        if self.exit_code is not None:
+            payload["exit_code"] = self.exit_code
+        return payload
 
 
 def _check(
@@ -84,6 +89,7 @@ def _check(
     ok: bool,
     message: str,
     remediation: str = "none",
+    details: dict[str, Any] | None = None,
 ) -> DoctorCheck:
     return DoctorCheck(
         component=component,
@@ -91,6 +97,7 @@ def _check(
         ok=ok,
         message=_redact_sensitive(message),
         remediation=_redact_sensitive(remediation),
+        details=_redact_details(details),
     )
 
 
@@ -98,6 +105,22 @@ def _redact_sensitive(value: str) -> str:
     redacted = _CREDENTIAL_URL.sub(r"\1<redacted>@", value)
     redacted = _AUTHORIZATION_VALUE.sub(r"\1<redacted>", redacted)
     return _API_KEY_VALUE.sub(r"\1<redacted>", redacted)
+
+
+def _redact_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    if details is None:
+        return None
+    redacted: dict[str, Any] = {}
+    for key, value in details.items():
+        if isinstance(value, str):
+            redacted[key] = _redact_sensitive(value)
+        elif isinstance(value, dict):
+            redacted[key] = _redact_details(value)
+        elif isinstance(value, list):
+            redacted[key] = [_redact_sensitive(item) if isinstance(item, str) else item for item in value]
+        else:
+            redacted[key] = value
+    return redacted
 
 
 def _safe_error_summary(error: Exception) -> str:
@@ -284,6 +307,90 @@ def _provider_check(config: Any) -> DoctorCheck:
     )
 
 
+def _provider_probe_result(
+    config: Any,
+    probe_runner: Callable[[Any], tuple[Any, ...]] | None = None,
+) -> DoctorResult:
+    config_check = _provider_check(config)
+    if not config_check.ok:
+        return DoctorResult(checks=(config_check,), exit_code=2)
+
+    from vsa_agent.recorded_video.provider_probe import (
+        probe_exit_code,
+        probe_recorded_video_providers,
+    )
+
+    runner = probe_runner or probe_recorded_video_providers
+    try:
+        probe_results = tuple(runner(config))
+    except Exception as error:
+        return DoctorResult(
+            checks=(
+                _check(
+                    "providers",
+                    "PROVIDER_PROBE_FAILED",
+                    False,
+                    f"Provider probe failed before producing results ({type(error).__name__}).",
+                    "Inspect provider configuration and retry the explicit readiness probe.",
+                ),
+            ),
+            exit_code=5,
+        )
+
+    roles = tuple(result.role for result in probe_results)
+    if roles != ("embedding", "vlm"):
+        return DoctorResult(
+            checks=(
+                _check(
+                    "providers",
+                    "PROVIDER_PROBE_INCOMPLETE",
+                    False,
+                    "Provider probe did not return exactly one embedding result followed by one VLM result.",
+                    "Verify the provider probe implementation and retry.",
+                ),
+            ),
+            exit_code=5,
+        )
+
+    checks: list[DoctorCheck] = []
+    for result in probe_results:
+        status = result.status if result.status is not None else "none"
+        provider_code = result.provider_code or "none"
+        request_id = result.request_id or "none"
+        message = (
+            f"provider_probe role={result.role} outcome={result.outcome} status={status} "
+            f"duration_ms={result.duration_ms} provider_code={provider_code} request_id={request_id}"
+        )
+        checks.append(
+            _check(
+                f"provider:{result.role}",
+                f"PROVIDER_{result.outcome.upper()}",
+                result.ok,
+                message,
+                _provider_probe_remediation(result.outcome),
+                details=result.to_dict(),
+            )
+        )
+    exit_code = probe_exit_code(probe_results)
+    return DoctorResult(checks=tuple(checks), exit_code=exit_code)
+
+
+def _provider_probe_remediation(outcome: str) -> str:
+    remediations = {
+        "ok": "none",
+        "configuration": "Fix the active profile, provider URL, model, api_key_env, and production mock policy.",
+        "authentication": "Verify the private API key and provider account access.",
+        "quota": "Restore provider VLM allocation quota before running production acceptance.",
+        "rate_limit": "Wait for the provider rate-limit window or reduce provider request pressure.",
+        "timeout": "Check provider latency and network reachability, then retry.",
+        "network": "Check DNS, TCP/TLS reachability, and proxy settings, then retry.",
+        "server_error": "Retry after the provider service recovers.",
+        "response_schema": "Verify the configured model exposes the expected OpenAI-compatible response schema.",
+        "http_error": "Verify the provider endpoint, model, and request contract.",
+    }
+    return remediations.get(outcome, "Inspect the provider readiness result.")
+
+
 def _mapping_value(mapping: dict[str, Any], *path: str) -> Any:
     value: Any = mapping
     for item in path:
@@ -444,9 +551,10 @@ def check_elasticsearch(
 
 def _python_dependency_checks(
     python_module_exists: Callable[[str], bool],
+    modules: Sequence[str] = _REQUIRED_PYTHON_MODULES,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
-    for module in _REQUIRED_PYTHON_MODULES:
+    for module in modules:
         exists = python_module_exists(module)
         checks.append(
             _check(
@@ -467,6 +575,7 @@ def run_doctor(
     ports: Sequence[int] = (8000, 3000),
     conda_env: str = "",
     phase: str = "all",
+    probe_providers: bool = False,
     require_ui: bool = True,
     command_exists: Callable[[str], bool] = _default_command_exists,
     python_module_exists: Callable[[str], bool] = _default_python_module_exists,
@@ -475,6 +584,7 @@ def run_doctor(
     current_user: Callable[[], str] = getpass.getuser,
     disk_free_bytes: Callable[[Path], int] = lambda path: shutil.disk_usage(path).free,
     es_checker: Callable[[Any, str], DoctorCheck] = check_elasticsearch,
+    provider_probe_runner: Callable[[Any], tuple[Any, ...]] | None = None,
 ) -> DoctorResult:
     if phase not in {"all", "static", "elasticsearch"}:
         raise ValueError(f"Unsupported runtime doctor phase: {phase}")
@@ -484,6 +594,9 @@ def run_doctor(
         config = AppConfig()
     app_config = config
     checks: list[DoctorCheck] = []
+
+    if probe_providers:
+        return _provider_probe_result(app_config, provider_probe_runner)
 
     if phase == "elasticsearch":
         endpoint = es_endpoint.strip() or app_config.search.es_endpoint.strip()
@@ -571,6 +684,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conda-env", default="")
     parser.add_argument("--phase", choices=("all", "static", "elasticsearch"), default="all")
     parser.add_argument("--skip-ui", action="store_true")
+    parser.add_argument("--probe-providers", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
@@ -581,10 +695,14 @@ def main(
     runner: Callable[..., DoctorResult] = run_doctor,
 ) -> int:
     args = _build_parser().parse_args(argv)
-    dependency_checks = _python_dependency_checks(_default_python_module_exists)
+    required_modules = ("httpx", "pydantic", "yaml") if args.probe_providers else _REQUIRED_PYTHON_MODULES
+    dependency_checks = _python_dependency_checks(_default_python_module_exists, required_modules)
     missing_dependencies = tuple(check for check in dependency_checks if not check.ok)
     if missing_dependencies:
-        result = DoctorResult(checks=missing_dependencies)
+        result = DoctorResult(
+            checks=missing_dependencies,
+            exit_code=2 if args.probe_providers else None,
+        )
     else:
         try:
             from vsa_agent.config import AppConfig
@@ -600,17 +718,21 @@ def main(
                         _safe_error_summary(error),
                         "Fix the YAML file and referenced local configuration before starting the stack.",
                     ),
-                )
+                ),
+                exit_code=2 if args.probe_providers else None,
             )
         else:
-            result = runner(
-                config=config,
-                es_endpoint=args.es_endpoint,
-                ports=tuple(args.port or (8000, 3000)),
-                conda_env=args.conda_env,
-                phase=args.phase,
-                require_ui=not args.skip_ui,
-            )
+            runner_options = {
+                "config": config,
+                "es_endpoint": args.es_endpoint,
+                "ports": tuple(args.port or (8000, 3000)),
+                "conda_env": args.conda_env,
+                "phase": args.phase,
+                "require_ui": not args.skip_ui,
+            }
+            if args.probe_providers:
+                runner_options["probe_providers"] = True
+            result = runner(**runner_options)
 
     if args.json_output:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -621,7 +743,9 @@ def main(
             if not check.ok:
                 print(f"  remediation: {check.remediation}")
         print("PASS: runtime doctor succeeded" if result.ok else "ERROR: runtime doctor failed")
-    return 0 if result.ok else 1
+    if result.ok:
+        return 0
+    return result.exit_code or 1
 
 
 if __name__ == "__main__":

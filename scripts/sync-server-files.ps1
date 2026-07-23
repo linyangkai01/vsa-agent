@@ -48,6 +48,7 @@ $ApprovedPaths = @(
         "src\vsa_agent\recorded_video\ports.py",
         "src\vsa_agent\recorded_video\production_acceptance.py",
         "src\vsa_agent\recorded_video\production_evidence.py",
+        "src\vsa_agent\recorded_video\provider_probe.py",
         "src\vsa_agent\recorded_video\production_runner.py",
         "src\vsa_agent\recorded_video\providers.py",
         "src\vsa_agent\recorded_video\repository.py",
@@ -128,6 +129,7 @@ $ApprovedPaths = @(
         "tests\unit\recorded_video\test_ports.py",
         "tests\unit\recorded_video\test_production_acceptance.py",
         "tests\unit\recorded_video\test_production_evidence.py",
+        "tests\unit\recorded_video\test_provider_probe.py",
         "tests\unit\recorded_video\test_providers.py",
         "tests\unit\recorded_video\test_repository.py",
         "tests\unit\recorded_video\test_segmenter.py",
@@ -147,6 +149,7 @@ $ApprovedPaths = @(
         "tests\unit\tools\test_embed_search_production.py",
         "tests\acceptance\test_recorded_video_validation_report.py",
         "docs\DEVELOPMENT_STATUS.md",
+        "docs\specs\provider-readiness-probe.md",
         "docs\recorded-video-runtime.md",
         "docs\es-video-search-runtime.md",
         "docs\recorded-video-validation.md"
