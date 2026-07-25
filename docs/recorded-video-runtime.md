@@ -53,7 +53,7 @@ chmod 600 "$HOME/.config/vsa-agent/secrets.env"
 | `4` | 限流、超时、网络或供应商 5xx | 检查网络并在暂态问题恢复后重试 |
 | `5` | HTTP 契约或响应结构不兼容 | 核对 base URL、模型和 OpenAI-compatible 接口 |
 
-当前已知 DashScope 状态是 embedding `ok`、VLM `quota`，因此额度恢复前预期整体退出 `3`。探针通过只证明两个模型接口可调用，不能替代第 6 节的三视频原版 UI 最终生产验收。
+2026-07-24 的真实探针 run `56606c54-ebe1-4020-b78c-a997932b30c2` 已通过：embedding `text-embedding-v4` 与 VLM `qwen3-vl-flash-2025-10-15` 均返回 HTTP 200，整体退出 `0`。探针通过只证明两个模型接口可调用，不能替代第 6 节的三视频原版 UI 最终生产验收。
 
 ## 3. Ubuntu 单命令启动
 
@@ -133,9 +133,18 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@10.157.68.44
 
 #### 最终生产恢复验收（推荐 gate）
 
-下面的一条命令自行启动完整栈两次，不需要预先运行 normal 栈。三个 `--video` 必须是存在、可读、内容 SHA-256 不同的真实 MP4/MKV；`--query` 可传一次供三个视频共用，也可按视频顺序传三次。生产 profile 必须关闭 mock fallback 和 mock embedding。
+下面的一组命令自行启动完整栈两次，不需要预先运行 normal 栈。三个 `--video` 必须是存在、可读、内容 SHA-256 不同的真实 MP4/MKV；`--query` 可传一次供三个视频共用，也可按视频顺序传三次。生产 profile 必须关闭 mock fallback 和 mock embedding。
+
+最终 gate 必须创建全新、专用、空的 data-root 和独立 ES alias。不要复用 normal 生产目录或已有 alias：Worker 会按同一 SQLite repository 认领历史 backlog，旧任务可能消耗并发、重试次数或 provider 配额，使恢复断言失去确定性。
 
 ```bash
+acceptance_stamp="$(date -u +%Y%m%d%H%M%S)"
+acceptance_root="/data/project/lyk/vsa-validation-data/final-${acceptance_stamp}"
+acceptance_alias="vsa-recorded-video-production-final-${acceptance_stamp}"
+
+test ! -e "$acceptance_root"
+mkdir -p "$acceptance_root"
+
 conda run --no-capture-output -n vsa-agent python scripts/recorded-video-production-acceptance.py \
   --video /data/project/lyk/validation/forklift-worker.mp4 \
   --video /data/project/lyk/validation/worker-fall.mp4 \
@@ -144,8 +153,8 @@ conda run --no-capture-output -n vsa-agent python scripts/recorded-video-product
   --query 'worker falls to the ground' \
   --query 'visible smoke event' \
   --config config.yaml \
-  --index vsa-recorded-video-production \
-  --data-root /data/project/lyk/vsa-data \
+  --index "$acceptance_alias" \
+  --data-root "$acceptance_root" \
   --conda-env vsa-agent \
   --api-port 8000 \
   --es-port 9200 \
@@ -154,6 +163,8 @@ conda run --no-capture-output -n vsa-agent python scripts/recorded-video-product
 ```
 
 执行顺序固定为：第一次完整栈 readiness → 三并发原版分块上传 → 捕获持久化 checkpoint → 校验 manifest/UID/cmdline/run 路径后只向本次 Worker supervisor 发送 TERM → 第一次 launcher 完整退出 → 使用相同端口、索引和数据根目录启动第二次栈 → 至少一个 job 的 `attempt` 增加并完成 publish → 校验七阶段 checkpoint、真实 provider identity、ES 文档 → 通过原版 UI 同源代理执行三次搜索、缩略图、Range 播放和选中片段理解问答 → 幂等删除三资产 → 回收第二次 launcher → 扫描日志并原子写报告。
+
+2026-07-24 的最终证据使用 data-root `/data/project/lyk/vsa-validation-data/final-20260724-01`、alias `vsa-recorded-video-production-final-20260724-01`，acceptance ID 为 `b9932665-3f18-4d16-ba09-da0877e40653`，结果 PASS。验收后 alias 文档数为 `0`；隔离目录和运行证据可保留用于审计，不应在其中继续承载生产任务。
 
 证据位于：
 
