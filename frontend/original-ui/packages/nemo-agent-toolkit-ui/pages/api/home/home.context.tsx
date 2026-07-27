@@ -33,7 +33,14 @@ export interface HomeContextProps {
   /** Optional: called when a message is submitted programmatically (e.g. so embedder can show attention/highlight). */
   onMessageSubmitted?: () => void;
   /** Optional: called when chat is ready; receives a function the embedder can call to add a query context item to the chat input. */
-  onAddQueryContextReady?: (addItem: (item: { id: string; label: string; type: string; data: Record<string, unknown> }) => void) => void;
+  onAddQueryContextReady?: (
+    addItem: (item: {
+      id: string;
+      label: string;
+      contextType: string;
+      data: Record<string, unknown>;
+    }) => void,
+  ) => void;
   /** Optional: called when a chat video upload batch completes with at least one success. */
   onChatVideoUploadComplete?: (payload: ChatVideoUploadCompletePayload) => void;
 }

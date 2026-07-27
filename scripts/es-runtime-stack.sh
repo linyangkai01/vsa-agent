@@ -1184,7 +1184,7 @@ wait_worker_ready # readiness: recorded-video Worker
 
 if [[ "$SMOKE_ONLY" == "0" ]]; then
   start_supervised_process ui "$UI_LOG_PATH" "bash scripts/run_original_ui_vss.sh" \
-    env NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" NEXT_PUBLIC_VST_API_URL="/api/v1/vst" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" bash "$SCRIPT_DIR/run_original_ui_vss.sh"
+    env NEXT_PUBLIC_ENABLE_SEARCH_TAB=true NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL="${API_URL}/chat/stream" NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1" NEXT_PUBLIC_VST_API_URL="/api/v1/vst" VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1" PORT="$UI_PORT" bash "$SCRIPT_DIR/run_original_ui_vss.sh"
   UI_PID="$STARTED_SUPERVISOR_PID"
   wait_component_status_running ui
   wait_ui_health # readiness: original UI

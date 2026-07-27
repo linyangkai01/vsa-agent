@@ -23,6 +23,7 @@ PROVIDER_SCRIPT = (
 )
 PLAYWRIGHT_CONFIG = REPO_ROOT / "frontend" / "original-ui" / "apps" / "nv-metropolis-bp-vss-ui" / "playwright.config.ts"
 E2E_RUNTIME_CONFIG = PROVIDER_SCRIPT.with_name("config.e2e.yaml")
+RECORDED_VIDEO_SPEC = PROVIDER_SCRIPT.with_name("recorded-video.spec.ts")
 PROVIDER_STATE_CLASS = runpy.run_path(str(PROVIDER_SCRIPT))["ProviderState"]
 
 
@@ -107,6 +108,94 @@ def test_fake_provider_returns_fixed_openai_compatible_results() -> None:
     assert isinstance(vector, list)
     assert len(vector) == 1024
     assert all(type(value) is float for value in vector)
+
+
+def test_fake_provider_drives_selected_recorded_video_tool_call_and_final_answer() -> None:
+    selected_path = "/srv/vsa-data/assets/asset-123/source/forklift.mp4"
+    user_text = (
+        "What safety risk is visible?\n\n"
+        "Selected recorded video context (server validated):\n"
+        "asset_id: asset-123\n"
+        "segment_id: segment-456\n"
+        "video_name: forklift.mp4\n"
+        f"video_path: {selected_path}\n"
+        "start_timestamp: 0\n"
+        "end_timestamp: 4\n"
+        "Use video_understanding with exactly this video_path and time range."
+    )
+    tool_schema = {
+        "type": "function",
+        "function": {"name": "video_understanding", "parameters": {"type": "object"}},
+    }
+
+    with _provider() as base_url:
+        tool_response = _request_json(
+            f"{base_url}/v1/chat/completions",
+            {
+                "model": "playwright-chat",
+                "messages": [{"role": "user", "content": user_text}],
+                "tools": [tool_schema],
+            },
+        )
+        assistant = tool_response["choices"][0]["message"]  # type: ignore[index]
+        tool_call = assistant["tool_calls"][0]
+        arguments = json.loads(tool_call["function"]["arguments"])
+
+        final_response = _request_json(
+            f"{base_url}/v1/chat/completions",
+            {
+                "model": "playwright-chat",
+                "messages": [
+                    {"role": "user", "content": user_text},
+                    assistant,
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": "A forklift operates near a worker in an industrial area.",
+                    },
+                ],
+                "tools": [tool_schema],
+            },
+        )
+
+    assert tool_response["choices"][0]["finish_reason"] == "tool_calls"  # type: ignore[index]
+    assert tool_call["function"]["name"] == "video_understanding"
+    assert arguments == {
+        "video_path": selected_path,
+        "query": "What safety risk is visible?",
+        "source_type": "video_file",
+        "start_timestamp": "0",
+        "end_timestamp": "4",
+    }
+    assert final_response["choices"][0]["message"]["content"] == (  # type: ignore[index]
+        "The selected segment shows a forklift operating near a worker in an industrial area."
+    )
+
+
+def test_fake_provider_does_not_call_tool_from_browser_context_without_server_path() -> None:
+    with _provider() as base_url:
+        response = _request_json(
+            f"{base_url}/v1/chat/completions",
+            {
+                "model": "playwright-chat",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": '[Context: [{"assetId":"asset-123","segmentId":"segment-456"}]]',
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "video_understanding", "parameters": {"type": "object"}},
+                    }
+                ],
+            },
+        )
+
+    message = response["choices"][0]["message"]  # type: ignore[index]
+    assert "tool_calls" not in message
+    assert message["content"] == "No selected recorded-video context was provided."
 
 
 def test_fake_provider_blocks_exactly_the_next_vision_request() -> None:
@@ -285,3 +374,9 @@ def test_playwright_runtime_uses_the_controlled_provider_profile() -> None:
     assert "base_url: http://127.0.0.1:8399/v1" in runtime
     assert "allow_mock_fallback: false" in runtime
     assert "force_mock_embedding: false" in runtime
+
+
+def test_live_provider_waits_for_the_stream_to_finish() -> None:
+    spec = RECORDED_VIDEO_SPEC.read_text(encoding="utf-8")
+
+    assert "toBeHidden({ timeout: LIVE_PROVIDER ? 180_000 : 30_000 })" in spec

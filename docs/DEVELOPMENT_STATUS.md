@@ -1,6 +1,6 @@
 # Development Status
 
-Last updated: 2026-07-25
+Last updated: 2026-07-27
 
 ## Current State
 
@@ -28,7 +28,21 @@ Last updated: 2026-07-25
 
 ## Latest Verified Change
 
-`production-recorded-video-acceptance`
+`original-ui-chat-canary`
+
+- 原版 UI 真实业务链已覆盖：上传 MP4/MKV、Worker 真实 VLM/embedding 入库、Elasticsearch 搜索、缩略图与 HTTP 206 播放、`+ Chat` 上下文选择、同源 Chat API、TopAgent、`video_understanding` 和最终页面回答。
+- 修复隔离端口下 Chat 仍回退到 `127.0.0.1:8000` 的问题；Linux/Windows 单脚本现在把当前 API URL 注入 `NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL`。真实 Provider 模式为流式最终回答保留 180 秒窗口，确定性模式仍保持 30 秒快速失败。
+- 修复真实模型 Markdown 回答中的 inline code 被块级 `CodeBlock` 渲染而产生 `<div>/<pre>` 嵌套于 `<p>` 的 React 警告，并增加 DOM 回归测试。
+- 确定性隔离 run `362c35d3-9563-404a-8ea0-546c754530a4` 完整通过 `3 passed (2.3m)`；trace 中 `original_ui.chat.request`、`top_agent.tool.call`、`video_understanding.result`、`top_agent.tool.result`、`top_agent.final` 均存在且最终回答唯一非空。
+- 真实 Provider probe run `33ab793c-6b99-449d-bafe-cdbd0f7944a3` 通过，DashScope VLM/embedding 均返回 HTTP 200。最终真实原版 UI run `bb060cac-4981-4bbe-bcca-c0d0ec9edfe3` 通过 `1 passed (1.6m)`，实际使用 `qwen3.7-plus`、`qwen3-vl-flash-2025-10-15` 和 `text-embedding-v4`，页面、console、网络、5xx 与 trace 检查全部通过。
+- 所有 canary runtime、validation namespace 和 8300/3300/8399 端口均已清理；生产 Elasticsearch 未停止或清空，密钥只从 `~/.config/vsa-agent/secrets.env` 加载且未输出。
+
+Verification:
+
+- 本地启动器契约：`45 passed`；Provider/E2E 契约：`12 passed`；Markdown DOM Jest：`1 passed`；相关 Prettier 与 `git diff --check` 通过。
+- Ubuntu `@nemo-agent-toolkit/ui` build：`107 files compiled`；Markdown DOM Jest：`1 passed`；确定性浏览器 E2E：`3 passed`；真实 Provider 浏览器 E2E：`1 passed`。
+
+Previous production acceptance baseline:
 
 - 新密钥通过服务器用户私有文件 `~/.config/vsa-agent/secrets.env` 注入，文件 owner/mode/单条目契约均已验证；密钥未进入命令参数、仓库、报告或日志。
 - 真实 provider probe run `56606c54-ebe1-4020-b78c-a997932b30c2` 通过：`text-embedding-v4` 与 `qwen3-vl-flash-2025-10-15` 均返回 HTTP 200，整体退出码为 `0`。

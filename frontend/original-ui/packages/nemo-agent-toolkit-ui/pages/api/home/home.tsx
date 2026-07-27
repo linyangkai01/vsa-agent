@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from 'react';
+import toast from 'react-hot-toast';
 
 import { useTranslation } from 'next-i18next';
 import Head from 'next/head';
@@ -20,9 +27,10 @@ import {
   loadConversationsFromDb,
 } from '@/utils/app/conversationDb';
 import { saveFolders } from '@/utils/app/folders';
-// import { getSettings } from '@/utils/app/settings';
-
-import { APPLICATION_NAME } from '@/constants/constants';
+import {
+  isFolderDeleteBlocked,
+  isQueryProcessing,
+} from '@/utils/app/queryProcessing';
 
 import { Conversation, type CallerInfo } from '@/types/chat';
 import type { ChatVideoUploadCompletePayload } from '@/types/chatVideoUpload';
@@ -33,14 +41,16 @@ import { Chat } from '@/components/Chat/Chat';
 import { Chatbar } from '@/components/Chatbar/Chatbar';
 import { Navbar } from '@/components/Mobile/Navbar';
 
-import { getStorageKey, useRuntimeConfig } from '@/contexts/RuntimeConfigContext';
-import { isFolderDeleteBlocked, isQueryProcessing } from '@/utils/app/queryProcessing';
-
 import HomeContext from './home.context';
 import { HomeInitialState, initialState } from './home.state';
 
-import toast from 'react-hot-toast';
+// import { getSettings } from '@/utils/app/settings';
 
+import { APPLICATION_NAME } from '@/constants/constants';
+import {
+  getStorageKey,
+  useRuntimeConfig,
+} from '@/contexts/RuntimeConfigContext';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface ChatSidebarControlHandlers {
@@ -63,17 +73,17 @@ export interface NemoAgentToolkitAppProps {
   // Theme control props
   theme?: 'light' | 'dark';
   onThemeChange?: (theme: 'light' | 'dark') => void;
-  
+
   // Optional override for initial state (e.g. when imported for multiple instantiations in an app)
   initialStateOverride?: Partial<HomeInitialState>;
-  
+
   // Controls rendering props
   renderControlsInLeftSidebar?: boolean; // Default: false - set true to render controls in external left sidebar instead of chatbar footer
   onControlsReady?: (handlers: ChatSidebarControlHandlers) => void; // Callback to provide control handlers externally
-  
+
   // Document head rendering
   renderApplicationHead?: boolean; // Default: true - set false when embedded to prevent setting document title/meta tags
-  
+
   /**
    * Optional storage key prefix (e.g. "searchTab", "alertsTab") so this instance uses
    * separate sessionStorage keys (conversationHistory, selectedConversation, folders).
@@ -108,7 +118,14 @@ export interface NemoAgentToolkitAppProps {
    * Optional: called when the chat is ready; receives a function the embedder can call
    * to add a query context item (e.g. search result) to the chat input area.
    */
-  onAddQueryContextReady?: (addItem: (item: { id: string; label: string; type: string; data: Record<string, unknown> }) => void) => void;
+  onAddQueryContextReady?: (
+    addItem: (item: {
+      id: string;
+      label: string;
+      contextType: string;
+      data: Record<string, unknown>;
+    }) => void,
+  ) => void;
 
   /**
    * Optional: called when a chat video upload batch completes with at least one successful file.
@@ -122,8 +139,8 @@ export interface NemoAgentToolkitAppProps {
 }
 
 const Home = (props: NemoAgentToolkitAppProps = {}) => {
-  const { 
-    theme: externalTheme, 
+  const {
+    theme: externalTheme,
     onThemeChange,
     initialStateOverride,
     renderControlsInLeftSidebar = false,
@@ -136,10 +153,10 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
     onMessageSubmitted,
     onAddQueryContextReady,
     onChatVideoUploadComplete,
-    className = '', 
-    style = {} 
+    className = '',
+    style = {},
   } = props;
-  
+
   const { t } = useTranslation('chat');
 
   // Initialize state: base from env, then optional override (e.g. Search tab chat env), then external theme
@@ -165,15 +182,16 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
 
   const runtimeConfig = useRuntimeConfig();
   // Prop takes precedence so embedder can pass prefix at instantiation; otherwise use provider config
-  const storageKeyPrefix = storageKeyPrefixProp ?? runtimeConfig?.storageKeyPrefix ?? null;
+  const storageKeyPrefix =
+    storageKeyPrefixProp ?? runtimeConfig?.storageKeyPrefix ?? null;
 
   const stopConversationRef = useRef<boolean>(false);
-  
+
   // Track if we're in the middle of an external theme update to prevent loops
   const isExternalThemeUpdateRef = useRef(false);
   // Track the last external theme to detect changes
   const lastExternalThemeRef = useRef(externalTheme);
-  
+
   // Apply theme to document root synchronously before paint to avoid flash
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -184,192 +202,207 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
     }
   }, [lightMode]);
 
-  const handleSelectConversation = useCallback((conversation: Conversation) => {
-    // Clear any streaming states before switching conversations
-    dispatch({ field: 'messageIsStreaming', value: false });
-    dispatch({ field: 'loading', value: false });
+  const handleSelectConversation = useCallback(
+    (conversation: Conversation) => {
+      // Clear any streaming states before switching conversations
+      dispatch({ field: 'messageIsStreaming', value: false });
+      dispatch({ field: 'loading', value: false });
 
-    dispatch({
-      field: 'selectedConversation',
-      value: conversation,
-    });
+      dispatch({
+        field: 'selectedConversation',
+        value: conversation,
+      });
 
-    saveConversation(conversation, storageKeyPrefix);
-  }, [dispatch, storageKeyPrefix]);
+      saveConversation(conversation, storageKeyPrefix);
+    },
+    [dispatch, storageKeyPrefix],
+  );
 
   // FOLDER OPERATIONS  --------------------------------------------
 
-  const handleCreateFolder = useCallback((name: string, type: FolderType) => {
-    const newFolder: FolderInterface = {
-      id: uuidv4(),
-      name,
-      type,
-    };
+  const handleCreateFolder = useCallback(
+    (name: string, type: FolderType) => {
+      const newFolder: FolderInterface = {
+        id: uuidv4(),
+        name,
+        type,
+      };
 
-    const updatedFolders = [...folders, newFolder];
+      const updatedFolders = [...folders, newFolder];
 
-    dispatch({ field: 'folders', value: updatedFolders });
-    saveFolders(updatedFolders, storageKeyPrefix);
-  }, [folders, dispatch, storageKeyPrefix]);
+      dispatch({ field: 'folders', value: updatedFolders });
+      saveFolders(updatedFolders, storageKeyPrefix);
+    },
+    [folders, dispatch, storageKeyPrefix],
+  );
 
-  const handleDeleteFolder = useCallback((folderId: string) => {
-    if (
-      isFolderDeleteBlocked(
-        folderId,
-        conversations,
-        selectedConversation?.id,
-        loading,
-        messageIsStreaming,
-      )
-    ) {
-      toast.error(t('queryProcessingBlockDeleteFolder'));
-      return;
-    }
-
-    const updatedFolders = folders.filter((f) => f.id !== folderId);
-    dispatch({ field: 'folders', value: updatedFolders });
-    saveFolders(updatedFolders, storageKeyPrefix);
-
-    // Remove all conversations that were inside this folder
-    const updatedConversations: Conversation[] = conversations.filter(
-      (c) => c.folderId !== folderId,
-    );
-
-    dispatch({ field: 'conversations', value: updatedConversations });
-    saveConversations(updatedConversations, storageKeyPrefix);
-
-    // If the selected conversation was in the deleted folder, select another or create new
-    if (selectedConversation?.folderId === folderId) {
-      if (updatedConversations.length > 0) {
-        const nextConversation =
-          updatedConversations[updatedConversations.length - 1];
-        dispatch({ field: 'selectedConversation', value: nextConversation });
-        saveConversation(nextConversation, storageKeyPrefix);
-      } else {
-        const newConversation: Conversation = {
-          id: uuidv4(),
-          name: t('New Conversation'),
-          messages: [],
-          folderId: null,
-          isHomepageConversation: true,
-        };
-        const updatedWithNew = [...updatedConversations, newConversation];
-        dispatch({ field: 'conversations', value: updatedWithNew });
-        dispatch({ field: 'selectedConversation', value: newConversation });
-        saveConversation(newConversation, storageKeyPrefix);
-        saveConversations(updatedWithNew, storageKeyPrefix);
-      }
-    }
-  }, [
-    folders,
-    conversations,
-    selectedConversation,
-    dispatch,
-    storageKeyPrefix,
-    t,
-    loading,
-    messageIsStreaming,
-  ]);
-
-  const handleUpdateFolder = useCallback((folderId: string, name: string) => {
-    const updatedFolders = folders.map((f) => {
-      if (f.id === folderId) {
-        return {
-          ...f,
-          name,
-        };
+  const handleDeleteFolder = useCallback(
+    (folderId: string) => {
+      if (
+        isFolderDeleteBlocked(
+          folderId,
+          conversations,
+          selectedConversation?.id,
+          loading,
+          messageIsStreaming,
+        )
+      ) {
+        toast.error(t('queryProcessingBlockDeleteFolder'));
+        return;
       }
 
-      return f;
-    });
+      const updatedFolders = folders.filter((f) => f.id !== folderId);
+      dispatch({ field: 'folders', value: updatedFolders });
+      saveFolders(updatedFolders, storageKeyPrefix);
 
-    dispatch({ field: 'folders', value: updatedFolders });
+      // Remove all conversations that were inside this folder
+      const updatedConversations: Conversation[] = conversations.filter(
+        (c) => c.folderId !== folderId,
+      );
 
-    saveFolders(updatedFolders, storageKeyPrefix);
-  }, [folders, dispatch, storageKeyPrefix]);
+      dispatch({ field: 'conversations', value: updatedConversations });
+      saveConversations(updatedConversations, storageKeyPrefix);
+
+      // If the selected conversation was in the deleted folder, select another or create new
+      if (selectedConversation?.folderId === folderId) {
+        if (updatedConversations.length > 0) {
+          const nextConversation =
+            updatedConversations[updatedConversations.length - 1];
+          dispatch({ field: 'selectedConversation', value: nextConversation });
+          saveConversation(nextConversation, storageKeyPrefix);
+        } else {
+          const newConversation: Conversation = {
+            id: uuidv4(),
+            name: t('New Conversation'),
+            messages: [],
+            folderId: null,
+            isHomepageConversation: true,
+          };
+          const updatedWithNew = [...updatedConversations, newConversation];
+          dispatch({ field: 'conversations', value: updatedWithNew });
+          dispatch({ field: 'selectedConversation', value: newConversation });
+          saveConversation(newConversation, storageKeyPrefix);
+          saveConversations(updatedWithNew, storageKeyPrefix);
+        }
+      }
+    },
+    [
+      folders,
+      conversations,
+      selectedConversation,
+      dispatch,
+      storageKeyPrefix,
+      t,
+      loading,
+      messageIsStreaming,
+    ],
+  );
+
+  const handleUpdateFolder = useCallback(
+    (folderId: string, name: string) => {
+      const updatedFolders = folders.map((f) => {
+        if (f.id === folderId) {
+          return {
+            ...f,
+            name,
+          };
+        }
+
+        return f;
+      });
+
+      dispatch({ field: 'folders', value: updatedFolders });
+
+      saveFolders(updatedFolders, storageKeyPrefix);
+    },
+    [folders, dispatch, storageKeyPrefix],
+  );
 
   // CONVERSATION OPERATIONS  --------------------------------------------
 
-  const handleNewConversation = useCallback((folderId?: string | null) => {
-    if (isQueryProcessing(loading, messageIsStreaming)) {
-      toast.error(t('queryProcessingBlockNewChat'));
-      return;
-    }
+  const handleNewConversation = useCallback(
+    (folderId?: string | null) => {
+      if (isQueryProcessing(loading, messageIsStreaming)) {
+        toast.error(t('queryProcessingBlockNewChat'));
+        return;
+      }
 
-    // When creating in a folder, always create a new conversation. Otherwise reuse empty homepage conversation when applicable.
-    const createInFolder = folderId != null && folderId !== '';
+      // When creating in a folder, always create a new conversation. Otherwise reuse empty homepage conversation when applicable.
+      const createInFolder = folderId != null && folderId !== '';
 
-    if (
-      !createInFolder &&
-      selectedConversation?.isHomepageConversation &&
-      selectedConversation.messages.length === 0
-    ) {
-      // Just remove the homepage flag to make it visible in sidebar, don't create a new conversation
-      const updatedConversation = {
-        ...selectedConversation,
-        isHomepageConversation: undefined,
+      if (
+        !createInFolder &&
+        selectedConversation?.isHomepageConversation &&
+        selectedConversation.messages.length === 0
+      ) {
+        // Just remove the homepage flag to make it visible in sidebar, don't create a new conversation
+        const updatedConversation = {
+          ...selectedConversation,
+          isHomepageConversation: undefined,
+        };
+
+        const updatedConversations = conversations.map((c) =>
+          c.id === selectedConversation.id ? updatedConversation : c,
+        );
+
+        dispatch({ field: 'selectedConversation', value: updatedConversation });
+        dispatch({ field: 'conversations', value: updatedConversations });
+
+        saveConversation(updatedConversation, storageKeyPrefix);
+        saveConversations(updatedConversations, storageKeyPrefix);
+
+        return;
+      }
+
+      const newConversation: Conversation = {
+        id: uuidv4(),
+        name: t('New Conversation'),
+        messages: [],
+        folderId: createInFolder ? (folderId as string) : null,
       };
 
-      const updatedConversations = conversations.map(c =>
-        c.id === selectedConversation.id ? updatedConversation : c
-      );
+      const updatedConversations = [...conversations, newConversation];
 
-      dispatch({ field: 'selectedConversation', value: updatedConversation });
+      dispatch({ field: 'selectedConversation', value: newConversation });
       dispatch({ field: 'conversations', value: updatedConversations });
+      if (createInFolder) {
+        dispatch({ field: 'folderIdToExpand', value: folderId });
+      }
 
-      saveConversation(updatedConversation, storageKeyPrefix);
+      saveConversation(newConversation, storageKeyPrefix);
       saveConversations(updatedConversations, storageKeyPrefix);
 
-      return;
-    }
-
-    const newConversation: Conversation = {
-      id: uuidv4(),
-      name: t('New Conversation'),
-      messages: [],
-      folderId: createInFolder ? (folderId as string) : null,
-    };
-
-    const updatedConversations = [...conversations, newConversation];
-
-    dispatch({ field: 'selectedConversation', value: newConversation });
-    dispatch({ field: 'conversations', value: updatedConversations });
-    if (createInFolder) {
-      dispatch({ field: 'folderIdToExpand', value: folderId });
-    }
-
-    saveConversation(newConversation, storageKeyPrefix);
-    saveConversations(updatedConversations, storageKeyPrefix);
-
-    dispatch({ field: 'loading', value: false });
-  }, [
-    selectedConversation,
-    conversations,
-    dispatch,
-    t,
-    storageKeyPrefix,
-    loading,
-    messageIsStreaming,
-  ]);
-
-  const handleUpdateConversation = useCallback((
-    conversation: Conversation,
-    data: KeyValuePair,
-  ) => {
-    const updatedConversation = {
-      ...conversation,
-      [data.key]: data.value,
-    };
-
-    const { single, all } = updateConversation(
-      updatedConversation,
+      dispatch({ field: 'loading', value: false });
+    },
+    [
+      selectedConversation,
       conversations,
+      dispatch,
+      t,
       storageKeyPrefix,
-    );
+      loading,
+      messageIsStreaming,
+    ],
+  );
 
-    dispatch({ field: 'selectedConversation', value: single });
-    dispatch({ field: 'conversations', value: all });
-  }, [conversations, dispatch, storageKeyPrefix]);
+  const handleUpdateConversation = useCallback(
+    (conversation: Conversation, data: KeyValuePair) => {
+      const updatedConversation = {
+        ...conversation,
+        [data.key]: data.value,
+      };
+
+      const { single, all } = updateConversation(
+        updatedConversation,
+        conversations,
+        storageKeyPrefix,
+      );
+
+      dispatch({ field: 'selectedConversation', value: single });
+      dispatch({ field: 'conversations', value: all });
+    },
+    [conversations, dispatch, storageKeyPrefix],
+  );
 
   // EFFECTS  --------------------------------------------
 
@@ -382,7 +415,10 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
     // Give priority to saved sessionStorage value over environment variable (only when not externally controlled)
     if (!externalTheme) {
       const savedLightMode = sessionStorage.getItem('lightMode');
-      if (savedLightMode && (savedLightMode === 'light' || savedLightMode === 'dark')) {
+      if (
+        savedLightMode &&
+        (savedLightMode === 'light' || savedLightMode === 'dark')
+      ) {
         dispatch({
           field: 'lightMode',
           value: savedLightMode,
@@ -411,13 +447,17 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
       try {
         storedConversations = await loadConversationsFromDb(storageKeyPrefix);
       } catch (error) {
-        console.warn('Failed to load conversation history from IndexedDB; starting fresh:', error);
+        console.warn(
+          'Failed to load conversation history from IndexedDB; starting fresh:',
+          error,
+        );
         storedConversations = [];
       }
       if (cancelled) return;
 
       if (storedConversations.length > 0) {
-        const cleanedConversationHistory = cleanConversationHistory(storedConversations);
+        const cleanedConversationHistory =
+          cleanConversationHistory(storedConversations);
         dispatch({ field: 'conversations', value: cleanedConversationHistory });
       }
 
@@ -425,13 +465,17 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
       try {
         storedSelected = await loadConversationFromDb(storageKeyPrefix);
       } catch (error) {
-        console.warn('Failed to load selected conversation from IndexedDB; starting fresh:', error);
+        console.warn(
+          'Failed to load selected conversation from IndexedDB; starting fresh:',
+          error,
+        );
         storedSelected = null;
       }
       if (cancelled) return;
 
       if (storedSelected) {
-        const cleanedSelectedConversation = cleanSelectedConversation(storedSelected);
+        const cleanedSelectedConversation =
+          cleanSelectedConversation(storedSelected);
         dispatch({
           field: 'selectedConversation',
           value: cleanedSelectedConversation,
@@ -450,9 +494,15 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
         // `storageKeyPrefix`, so that value is stale (initial empty state on
         // mount, or out-of-date on prefix change) and would silently drop
         // any in-memory conversations on re-runs.
-        const updatedConversations = [...storedConversations, homepageConversation];
+        const updatedConversations = [
+          ...storedConversations,
+          homepageConversation,
+        ];
 
-        dispatch({ field: 'selectedConversation', value: homepageConversation });
+        dispatch({
+          field: 'selectedConversation',
+          value: homepageConversation,
+        });
         dispatch({ field: 'conversations', value: updatedConversations });
 
         saveConversation(homepageConversation, storageKeyPrefix);
@@ -462,7 +512,9 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
 
     loadConversations();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [storageKeyPrefix]); // Run when instance prefix is set (e.g. main vs search tab)
 
   // Handle external theme prop changes separately
@@ -485,11 +537,11 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
       isExternalThemeUpdateRef.current = false;
       return;
     }
-    
+
     // REMOVED: Don't call onThemeChange for internal theme changes to prevent conflicts
     // This ensures one-way data binding - external theme prop controls internal state,
     // but internal changes don't propagate back to consumer app via onThemeChange
-    
+
     // Only save to sessionStorage if not externally controlled (lightMode stays global; no prefix)
     if (!externalTheme) {
       sessionStorage.setItem('lightMode', lightMode);
@@ -497,37 +549,40 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
   }, [lightMode, externalTheme]);
 
   // Memoize context value to prevent unnecessary re-renders of consumers
-  const homeContextValue = useMemo(() => ({
-    ...contextValue,
-    storageKeyPrefix,
-    handleNewConversation,
-    handleCreateFolder,
-    handleDeleteFolder,
-    handleUpdateFolder,
-    handleSelectConversation,
-    handleUpdateConversation,
-    onAnswerComplete,
-    onAnswerCompleteWithContent,
-    onSubmitMessageReady,
-    onMessageSubmitted,
-    onAddQueryContextReady,
-    onChatVideoUploadComplete,
-  }), [
-    contextValue,
-    storageKeyPrefix,
-    handleNewConversation,
-    handleCreateFolder,
-    handleDeleteFolder,
-    handleUpdateFolder,
-    handleSelectConversation,
-    handleUpdateConversation,
-    onAnswerComplete,
-    onAnswerCompleteWithContent,
-    onSubmitMessageReady,
-    onMessageSubmitted,
-    onAddQueryContextReady,
-    onChatVideoUploadComplete,
-  ]);
+  const homeContextValue = useMemo(
+    () => ({
+      ...contextValue,
+      storageKeyPrefix,
+      handleNewConversation,
+      handleCreateFolder,
+      handleDeleteFolder,
+      handleUpdateFolder,
+      handleSelectConversation,
+      handleUpdateConversation,
+      onAnswerComplete,
+      onAnswerCompleteWithContent,
+      onSubmitMessageReady,
+      onMessageSubmitted,
+      onAddQueryContextReady,
+      onChatVideoUploadComplete,
+    }),
+    [
+      contextValue,
+      storageKeyPrefix,
+      handleNewConversation,
+      handleCreateFolder,
+      handleDeleteFolder,
+      handleUpdateFolder,
+      handleSelectConversation,
+      handleUpdateConversation,
+      onAnswerComplete,
+      onAnswerCompleteWithContent,
+      onSubmitMessageReady,
+      onMessageSubmitted,
+      onAddQueryContextReady,
+      onChatVideoUploadComplete,
+    ],
+  );
 
   return (
     <HomeContext.Provider value={homeContextValue}>
@@ -545,7 +600,9 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
       )}
       {selectedConversation && (
         <main
-          className={`flex ${renderApplicationHead ? 'h-screen w-screen' : 'h-full w-full'} flex-col text-sm text-white dark:text-white ${lightMode} ${className}`}
+          className={`flex ${
+            renderApplicationHead ? 'h-screen w-screen' : 'h-full w-full'
+          } flex-col text-sm text-white dark:text-white ${lightMode} ${className}`}
           style={style}
         >
           {renderApplicationHead && (
@@ -553,14 +610,23 @@ const Home = (props: NemoAgentToolkitAppProps = {}) => {
               <Navbar
                 selectedConversation={selectedConversation}
                 onNewConversation={handleNewConversation}
-                newConversationDisabled={isQueryProcessing(loading, messageIsStreaming)}
-                newConversationDisabledTitle={t('queryProcessingBlockNewChatTitle', { ns: 'sidebar' })}
+                newConversationDisabled={isQueryProcessing(
+                  loading,
+                  messageIsStreaming,
+                )}
+                newConversationDisabledTitle={t(
+                  'queryProcessingBlockNewChatTitle',
+                  { ns: 'sidebar' },
+                )}
               />
             </div>
           )}
 
           <div className="flex h-full w-full min-w-0 sm:pt-0">
-            <Chatbar renderControlsInLeftSidebar={renderControlsInLeftSidebar} onControlsReady={onControlsReady} />
+            <Chatbar
+              renderControlsInLeftSidebar={renderControlsInLeftSidebar}
+              onControlsReady={onControlsReady}
+            />
 
             <div className="flex flex-1 min-w-0">
               <Chat />

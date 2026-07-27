@@ -58,6 +58,7 @@ $manifest = [ordered]@{ run_id = $runId; processes = @() }
 $oldVsaConfig = $env:VSA_CONFIG
 $oldPythonPath = $env:PYTHONPATH
 $oldSearchTab = $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB
+$oldChatCompletionUrl = $env:NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL
 $oldAgentApiUrl = $env:NEXT_PUBLIC_AGENT_API_URL_BASE
 $oldVstApiUrl = $env:NEXT_PUBLIC_VST_API_URL
 $oldInternalAgentApiUrl = $env:VSA_INTERNAL_AGENT_API_URL_BASE
@@ -985,6 +986,7 @@ try {
 
     if (-not $SmokeOnly) {
         $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = "true"
+        $env:NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL = "$apiUrl/chat/stream"
         $env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"
         $env:NEXT_PUBLIC_VST_API_URL = "/api/v1/vst"
         $env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"
@@ -1033,6 +1035,7 @@ try {
     $env:VSA_CONFIG = $oldVsaConfig
     $env:PYTHONPATH = $oldPythonPath
     $env:NEXT_PUBLIC_ENABLE_SEARCH_TAB = $oldSearchTab
+    $env:NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL = $oldChatCompletionUrl
     $env:NEXT_PUBLIC_AGENT_API_URL_BASE = $oldAgentApiUrl
     $env:NEXT_PUBLIC_VST_API_URL = $oldVstApiUrl
     $env:VSA_INTERNAL_AGENT_API_URL_BASE = $oldInternalAgentApiUrl

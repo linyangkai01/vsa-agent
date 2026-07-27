@@ -6,6 +6,7 @@ import pytest
 
 SCRIPT = Path("scripts/es-runtime-stack.ps1")
 BASH_SCRIPT = Path("scripts/es-runtime-stack.sh")
+ORIGINAL_UI_RUNNER = Path("scripts/run_original_ui_vss.sh")
 RUNTIME_LOG_SUPERVISOR = Path("scripts/runtime-log-supervisor.py")
 SYNC_SCRIPT = Path("scripts/sync-server-files.ps1")
 ES_COMPOSE = Path("docker-compose.es.yml")
@@ -68,14 +69,22 @@ def test_stack_proxies_browser_search_requests_through_the_original_ui():
     next_config = VSS_NEXT_CONFIG.read_text(encoding="utf-8")
 
     assert 'NEXT_PUBLIC_AGENT_API_URL_BASE="/api/v1"' in launcher
+    assert 'NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL="${API_URL}/chat/stream"' in launcher
     assert 'VSA_ORIGINAL_UI_TRACE_ROOT="$RUN_DIR/chat-traces"' in launcher
     assert 'NEXT_PUBLIC_VST_API_URL="/api/v1/vst"' in launcher
     assert 'VSA_INTERNAL_AGENT_API_URL_BASE="${API_URL}/api/v1"' in launcher
     assert '$env:NEXT_PUBLIC_AGENT_API_URL_BASE = "/api/v1"' in windows_launcher
+    assert '$env:NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL = "$apiUrl/chat/stream"' in windows_launcher
     assert '$env:NEXT_PUBLIC_VST_API_URL = "/api/v1/vst"' in windows_launcher
     assert '$env:VSA_INTERNAL_AGENT_API_URL_BASE = "$apiUrl/api/v1"' in windows_launcher
     assert "source: '/api/v1/:path*'" in next_config
     assert "VSA_INTERNAL_AGENT_API_URL_BASE" in next_config
+
+
+def test_original_ui_runner_enables_the_search_chat_sidebar_by_default():
+    text = ORIGINAL_UI_RUNNER.read_text(encoding="utf-8")
+
+    assert 'NEXT_PUBLIC_ENABLE_CHAT_SIDEBAR="${NEXT_PUBLIC_ENABLE_CHAT_SIDEBAR:-true}"' in text
 
 
 def test_original_ui_server_declarations_do_not_reference_missing_source_maps():

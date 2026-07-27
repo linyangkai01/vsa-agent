@@ -1,7 +1,26 @@
 // SPDX-License-Identifier: MIT
 
-import type { APIRequestContext, Page, Response } from "@playwright/test";
+import type {
+  APIRequestContext,
+  ConsoleMessage,
+  Page,
+  Request,
+  Response,
+} from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+
+const CHAT_QUESTION = "What safety risk is visible in the selected segment?";
+const CHAT_FINAL_ANSWER =
+  "The selected segment shows a forklift operating near a worker in an industrial area.";
+const LIVE_PROVIDER = process.env.PLAYWRIGHT_LIVE_PROVIDER === "1";
+const CHAT_TRACE_ROOT =
+  process.env.PLAYWRIGHT_CHAT_TRACE_ROOT ||
+  path.resolve(
+    __dirname,
+    "../../../../..",
+    ".runtime/es-stack/latest/chat-traces"
+  );
 
 if (process.env.JEST_WORKER_ID) {
   describe.skip("recorded-video Playwright acceptance", () => {
@@ -213,7 +232,244 @@ if (process.env.JEST_WORKER_ID) {
     return assetId;
   }
 
-  test("uploads, indexes and plays MP4 and MKV recorded-video segments", async ({
+  async function readNonEmptyFile(
+    filePath: string,
+    timeout: number
+  ): Promise<string> {
+    let content = "";
+    await expect
+      .poll(
+        async () => {
+          try {
+            content = await readFile(filePath, "utf8");
+            return content.trim().length;
+          } catch {
+            return 0;
+          }
+        },
+        { timeout }
+      )
+      .toBeGreaterThan(0);
+    return content;
+  }
+
+  async function verifyChatTrace(
+    expectedAssetId: string,
+    expectedSegmentId: string
+  ): Promise<void> {
+    const latestTrace = (
+      await readNonEmptyFile(path.join(CHAT_TRACE_ROOT, "latest.txt"), 30_000)
+    ).trim();
+    const traceDirectoryName = path.basename(latestTrace.replaceAll("\\", "/"));
+    const traceDirectory = path.join(CHAT_TRACE_ROOT, traceDirectoryName);
+    const requestPayload = JSON.parse(
+      await readNonEmptyFile(path.join(traceDirectory, "request.json"), 30_000)
+    ) as Record<string, unknown>;
+    expect(requestPayload.selected_asset_id).toBe(expectedAssetId);
+    expect(requestPayload.selected_segment_id).toBe(expectedSegmentId);
+
+    const tracePath = path.join(traceDirectory, "trace.jsonl");
+    let traceText = "";
+    await expect
+      .poll(
+        async () => {
+          try {
+            traceText = await readFile(tracePath, "utf8");
+          } catch {
+            traceText = "";
+          }
+          return traceText.includes('"event_type": "top_agent.final"');
+        },
+        { timeout: 30_000 }
+      )
+      .toBe(true);
+
+    const events = traceText
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const eventTypes = events.map((event) => String(event.event_type || ""));
+    for (const requiredEvent of [
+      "original_ui.chat.request",
+      "top_agent.tool.call",
+      "video_understanding.result",
+      "top_agent.tool.result",
+      "top_agent.final",
+    ]) {
+      expect(eventTypes).toContain(requiredEvent);
+    }
+
+    const videoToolCalls = events.filter(
+      (event) =>
+        event.event_type === "top_agent.tool.call" &&
+        (event.payload as Record<string, unknown> | undefined)?.tool_name ===
+          "video_understanding"
+    );
+    expect(videoToolCalls).toHaveLength(1);
+    const finalEvents = events.filter(
+      (event) => event.event_type === "top_agent.final"
+    );
+    expect(finalEvents).toHaveLength(1);
+    expect(
+      requiredString(
+        (finalEvents[0].payload as Record<string, unknown> | undefined)
+          ?.final_answer,
+        "top_agent.final answer"
+      )
+    ).not.toBe("");
+    expect(
+      eventTypes.filter((eventType) => /(?:^|[._])error$/.test(eventType))
+    ).toEqual([]);
+    expect(traceText).not.toMatch(
+      /Traceback|Failed to fetch|api_key client option/i
+    );
+  }
+
+  async function verifySearchResultChat(
+    page: Page,
+    runtimeBaseUrl: string,
+    fixturePath: string,
+    expectedAssetId: string,
+    expectedJobId: string
+  ): Promise<void> {
+    const filename = path.basename(fixturePath);
+    const result = page.getByTestId("search-result-card").filter({
+      has: page.getByRole("button", {
+        name: `Play ${filename}`,
+        exact: true,
+      }),
+    });
+    await expect(result).toHaveCount(1);
+
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    const networkFailures: string[] = [];
+    const serverErrors: string[] = [];
+    const captureConsoleError = (message: ConsoleMessage) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    };
+    const capturePageError = (error: Error) => pageErrors.push(error.message);
+    const captureRequestFailure = (request: Request) => {
+      networkFailures.push(
+        `${request.method()} ${request.url()}: ${
+          request.failure()?.errorText || "unknown failure"
+        }`
+      );
+    };
+    const captureServerError = (response: Response) => {
+      if (response.status() >= 500) {
+        serverErrors.push(`${response.status()} ${response.url()}`);
+      }
+    };
+
+    page.on("console", captureConsoleError);
+    page.on("pageerror", capturePageError);
+    page.on("requestfailed", captureRequestFailure);
+    page.on("response", captureServerError);
+    try {
+      const addToChat = result.getByRole("button", {
+        name: "+ Chat",
+        exact: true,
+      });
+      await expect(addToChat).toBeVisible({ timeout: 30_000 });
+      await addToChat.click();
+      await expect(
+        result.getByRole("button", { name: "Added", exact: true })
+      ).toBeVisible();
+
+      const openChat = page.getByTestId("chat-sidebar-open");
+      if (await openChat.isVisible()) await openChat.click();
+
+      await expect(
+        page.getByTitle(`${filename} (media/video)`, { exact: true })
+      ).toBeVisible();
+      const textarea = page.locator('[data-testid="chat-textarea"]:visible');
+      await expect(textarea).toBeVisible();
+      await textarea.fill(CHAT_QUESTION);
+
+      const chatResponsePromise = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/chat"
+      );
+      await textarea.press("Enter");
+      const chatResponse = await chatResponsePromise;
+
+      expect(chatResponse.status()).toBe(200);
+      expect(new URL(chatResponse.url()).origin).toBe(
+        new URL(runtimeBaseUrl).origin
+      );
+      const requestBody = chatResponse.request().postDataJSON() as {
+        messages?: Array<{ role?: unknown; content?: unknown }>;
+      };
+      const latestUserMessage = requestBody.messages
+        ?.filter((message) => message.role === "user")
+        .at(-1);
+      const userContent = requiredString(
+        latestUserMessage?.content,
+        "Chat user message content"
+      );
+      const contextMatch = /^\[Context: (.+)\]\n\n([^]+)$/.exec(userContent);
+      expect(contextMatch).not.toBeNull();
+      const contextItems = JSON.parse(contextMatch![1]) as Array<
+        Record<string, unknown>
+      >;
+      expect(contextItems).toHaveLength(1);
+      const context = contextItems[0];
+      expect(context.assetId).toBe(expectedAssetId);
+      const selectedSegmentId = requiredString(context.segmentId, "segmentId");
+      expect(selectedSegmentId).not.toBe("");
+      expect(context.jobId).toBe(expectedJobId);
+      expect(context.videoName).toBe(filename);
+      expect(requiredString(context.startTime, "startTime")).not.toBe("");
+      expect(requiredString(context.endTime, "endTime")).not.toBe("");
+      expect(context).not.toHaveProperty("video_path");
+      expect(context).not.toHaveProperty("videoPath");
+      expect(contextMatch![2]).toBe(CHAT_QUESTION);
+
+      const assistantMessages = page.locator(
+        '[data-testid="chat-message-assistant"]:visible'
+      );
+      if (LIVE_PROVIDER) {
+        await expect
+          .poll(
+            async () =>
+              ((await assistantMessages.last().textContent()) || "").trim(),
+            { timeout: 180_000 }
+          )
+          .not.toBe("");
+      } else {
+        const answer = assistantMessages.filter({
+          hasText: CHAT_FINAL_ANSWER,
+        });
+        await expect(answer).toHaveCount(1, { timeout: 120_000 });
+        await expect(answer).toBeVisible();
+      }
+      await expect(
+        page.locator('[data-testid="chat-loading-spinner"]:visible')
+      ).toBeHidden({ timeout: LIVE_PROVIDER ? 180_000 : 30_000 });
+      const finalRenderedAnswer = (
+        (await assistantMessages.last().textContent()) || ""
+      ).trim();
+      expect(finalRenderedAnswer).not.toBe("");
+      expect(finalRenderedAnswer).not.toMatch(
+        /(?:^|\b)(?:error|failed to fetch|api_key)(?:\b|:)/i
+      );
+      await verifyChatTrace(expectedAssetId, selectedSegmentId);
+
+      expect(consoleErrors).toEqual([]);
+      expect(pageErrors).toEqual([]);
+      expect(networkFailures).toEqual([]);
+      expect(serverErrors).toEqual([]);
+    } finally {
+      page.off("console", captureConsoleError);
+      page.off("pageerror", capturePageError);
+      page.off("requestfailed", captureRequestFailure);
+      page.off("response", captureServerError);
+    }
+  }
+
+  test("uploads, searches, plays and chats with MP4 and MKV recorded-video segments", async ({
     page,
     request,
     runtimeBaseUrl,
@@ -268,6 +524,13 @@ if (process.env.JEST_WORKER_ID) {
     expect(mp4AssetId).toBe(mp4Upload.assetId);
     expect(mkvAssetId).toBe(mkvUpload.assetId);
     expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
+    await verifySearchResultChat(
+      page,
+      runtimeBaseUrl,
+      media.mp4,
+      mp4Upload.assetId,
+      mp4Upload.jobId
+    );
   });
 
   test("shows a real failed job and retries the same recorded-video job", async ({
