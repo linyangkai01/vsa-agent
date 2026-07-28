@@ -1,6 +1,6 @@
 schema_version: 1
 dataset_id: vsa-industrial-safety-real
-dataset_version: 1.0.0
+dataset_version: 1.0.1
 license_policy:
   allowed_license_ids:
     - CC-BY-3.0
@@ -163,7 +163,18 @@ cases:
       - group_id: close_range
         alternatives: [close, nearby, together, near each other, 近距离, 靠近, 一起]
       - group_id: collaboration
-        alternatives: [collaborating, teamwork, working together, shared task, 协同, 合作, 共同作业]
+        alternatives:
+          - collaborating
+          - teamwork
+          - working together
+          - shared task
+          - coordinate
+          - coordination
+          - cooperative
+          - complementary
+          - 协同
+          - 合作
+          - 共同作业
     forbidden_concepts:
       - only one person is present
       - no people are present

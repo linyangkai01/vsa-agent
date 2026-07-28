@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from vsa_agent.evaluators.business_baseline_eval import (
     evaluate_business_answer,
     evaluate_business_attempts,
     evaluate_business_search,
 )
-from vsa_agent.recorded_video.business_manifest import ConceptGroup
+from vsa_agent.recorded_video.business_manifest import ConceptGroup, load_business_manifest
 from vsa_agent.tools.search import SearchOutput, SearchResult
 
 
@@ -140,3 +141,18 @@ def test_release_attempts_fail_if_any_attempt_contains_forbidden_conclusion() ->
     assert result.pass_count == 2
     assert result.forbidden_attempts == (3,)
     assert result.passed is False
+
+
+def test_formal_collaboration_case_accepts_observed_coordination_wording() -> None:
+    manifest = load_business_manifest(Path("tests/fixtures/business_video_baseline/manifest.yaml"))
+    case = next(item for item in manifest.cases if item.case_id == "worker-close-collaboration")
+
+    result = evaluate_business_answer(
+        "Three workers coordinate a common task at close range in a shared work area.",
+        case.required_concept_groups,
+        case.forbidden_concepts,
+        minimum_coverage=manifest.profiles["release"].minimum_concept_coverage,
+    )
+
+    assert result.passed is True
+    assert result.matched_group_ids == ("multiple_people", "close_range", "collaboration")

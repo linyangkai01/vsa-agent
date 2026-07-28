@@ -17,6 +17,8 @@
 ```bash
 cd /data/project/lyk/vsa-agent
 
+export PATH="/home/ykh/.conda/envs/vsa-agent/bin:/usr/local/dev/anaconda3/bin:$PATH"
+
 conda run --no-capture-output -n vsa-agent python \
   scripts/prepare-business-video-baseline.py \
   --manifest tests/fixtures/business_video_baseline/manifest.yaml \
@@ -35,7 +37,8 @@ conda run --no-capture-output -n vsa-agent python \
 ```bash
 cd /data/project/lyk/vsa-agent
 
-stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+export PATH="/home/ykh/.conda/envs/vsa-agent/bin:/usr/local/dev/anaconda3/bin:$PATH"
+stamp="$(date -u +%Y%m%d-%H%M%S)"
 export VSA_BUSINESS_STAMP="$stamp"
 
 ./scripts/es-runtime-stack.sh \
