@@ -258,19 +258,50 @@ def test_delete_cancels_every_active_pipeline_job_before_cleanup(
     assert projection_store.deleted_assets == []
 
 
-def test_delete_rejects_uploading_asset_without_cleanup(
+def test_delete_cleans_uploading_asset_before_job_creation(
     api_context: tuple[TestClient, Path, RecordingProjectionStore],
 ) -> None:
     client, data_root, projection_store = api_context
     created = client.post("/api/v1/videos", json={"filename": "uploading.mp4"})
     asset_id = created.json()["asset_id"]
+    session_id = created.json()["upload_session_id"]
+    uploaded = client.post(
+        created.json()["url"],
+        files={"mediaFile": ("uploading.mp4", b"partial-video", "video/mp4")},
+        headers={
+            "nvstreamer-chunk-number": "1",
+            "nvstreamer-total-chunks": "2",
+            "nvstreamer-is-last-chunk": "false",
+            "nvstreamer-identifier": session_id,
+            "nvstreamer-file-name": "uploading.mp4",
+        },
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json() == {"chunkCount": 1}
+    assert list((data_root / "uploads" / session_id / "chunks").glob("*.part"))
 
-    response = client.delete(f"/api/v1/videos/{asset_id}")
+    first = client.delete(f"/api/v1/videos/{asset_id}")
+    repeated = client.delete(f"/api/v1/videos/{asset_id}")
 
-    assert response.status_code == 409
-    assert response.json() == {"detail": "uploading assets cannot be deleted"}
-    assert projection_store.deleted_assets == []
-    assert (data_root / "uploads" / created.json()["upload_session_id"]).is_dir()
+    assert first.status_code == repeated.status_code == 204
+    assert projection_store.deleted_assets == [asset_id]
+    assert not (data_root / "uploads" / session_id).exists()
+    with sqlite3.connect(data_root / "recorded-video.sqlite3") as connection:
+        asset = connection.execute(
+            "SELECT status, deleted_at FROM assets WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()
+        upload_sessions = connection.execute(
+            "SELECT COUNT(*) FROM upload_sessions WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()[0]
+        jobs = connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()[0]
+    assert asset is not None and asset[0] == AssetStatus.DELETED.value and asset[1] is not None
+    assert upload_sessions == 0
+    assert jobs == 0
 
 
 def test_delete_fails_closed_when_projection_store_is_not_configured(

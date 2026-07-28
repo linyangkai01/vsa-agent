@@ -233,7 +233,7 @@ def _safe_trace_component(value: str, fallback: str) -> str:
     return cleaned[:80] or fallback
 
 
-def _create_original_ui_trace_dir(
+def create_original_ui_trace_dir(
     conversation_id: str,
     user_message_id: str,
     trace_root: str | Path | None,
@@ -336,6 +336,7 @@ async def stream_original_ui_chat(
     graph_builder: Callable[[], Awaitable[Any]] | None = None,
     configured_video_path: str | None = None,
     trace_root: str | Path | None = None,
+    trace_dir: Path | None = None,
     recorded_video_context_resolver: Callable[[list[dict[str, Any]]], Awaitable[SelectedRecordedVideoContext | None]]
     | None = None,
 ) -> AsyncIterator[str]:
@@ -344,7 +345,8 @@ async def stream_original_ui_chat(
 
     raw_user_text = extract_latest_user_text(request)
     thread_id = conversation_id or "original-ui-chat"
-    trace_dir = _create_original_ui_trace_dir(conversation_id, user_message_id, trace_root)
+    if trace_dir is None:
+        trace_dir = create_original_ui_trace_dir(conversation_id, user_message_id, trace_root)
     index = 0
     try:
         question_text, context_items = extract_query_context(raw_user_text)

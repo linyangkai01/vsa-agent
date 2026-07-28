@@ -13,6 +13,7 @@ from vsa_agent.api.original_ui_search import router as original_ui_search_router
 from vsa_agent.api.recorded_video import router as recorded_video_router
 from vsa_agent.api.recorded_video_vst import router as recorded_video_vst_router
 from vsa_agent.api.rtsp_stream_api import router as rtsp_router
+from vsa_agent.api.runtime_evidence import router as runtime_evidence_router
 from vsa_agent.api.video_delete import router as video_delete_router
 from vsa_agent.api.video_search_ingest import router as video_search_ingest_router
 
@@ -39,6 +40,7 @@ app.router.routes.extend(video_search_ingest_router.routes)
 app.router.routes.extend(original_ui_search_router.routes)
 app.router.routes.extend(recorded_video_router.routes)
 app.router.routes.extend(recorded_video_vst_router.routes)
+app.router.routes.extend(runtime_evidence_router.routes)
 
 
 class ChatRequest(BaseModel):
@@ -70,21 +72,26 @@ async def chat(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def original_ui_chat_stream(req: OriginalUIChatRequest, request: Request):
-    from vsa_agent.api.original_ui_chat import stream_original_ui_chat
+    from vsa_agent.api.original_ui_chat import create_original_ui_trace_dir, stream_original_ui_chat
 
     try:
         extract_latest_user_text(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    conversation_id = request.headers.get("Conversation-Id", "")
+    user_message_id = request.headers.get("User-Message-ID", "")
+    trace_dir = create_original_ui_trace_dir(conversation_id, user_message_id, None)
     stream = stream_original_ui_chat(
         req,
-        conversation_id=request.headers.get("Conversation-Id", ""),
-        user_message_id=request.headers.get("User-Message-ID", ""),
+        conversation_id=conversation_id,
+        user_message_id=user_message_id,
+        trace_dir=trace_dir,
     )
 
     async def event_stream():
         async for frame in stream:
             yield frame
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    headers = {"X-VSA-Trace-ID": trace_dir.name} if trace_dir is not None else None
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)

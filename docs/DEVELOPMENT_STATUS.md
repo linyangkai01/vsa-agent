@@ -1,12 +1,12 @@
 # Development Status
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 
 ## Current State
 
-- Active development track: real business video regression baseline implementation and Ubuntu acceptance.
-- Integration target: local and remote `master`; manifest, preparation, deterministic gates, structured runner and explicit real-video original-UI entry are implemented on the development branch.
-- Phase: local unit, simulated HTTP integration, TypeScript and Playwright discovery checks pass; Ubuntu fixed-hash, real Provider and browser acceptance remain before final archive.
+- Active development track: real business video regression manifest schema v2 hardening and final Ubuntu acceptance.
+- Integration target: local and remote `master`; the manifest schema v2 / dataset `1.1.0` implementation is complete in the current change set, while final verification and server synchronization remain pending.
+- Phase: Ubuntu validation has already established the production recorded-video and original-UI path on earlier dataset revisions. Those runs are historical evidence only; final dataset `1.1.0` quick, release, full-source and real original-UI runs are all pending and must be repeated before archive.
 - Goal: deliver original-UI recorded-video upload, durable analysis, Elasticsearch search, selected-video understanding Q&A, thumbnail and time-range playback without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
@@ -16,10 +16,12 @@ Last updated: 2026-07-28
 `real-business-video-regression-baseline`
 
 - Use a manifest-driven external dataset: public network videos remain on the Ubuntu server, while Git stores source, license, attribution, SHA-256, clip lineage and expected business conclusions.
-- The first baseline contains six positive/negative cases covering forklift proximity, safe separation, close worker collaboration, ordinary work, PPE compliance and PPE misuse.
+- Dataset `1.1.0` contains six positive/negative cases covering forklift proximity, safe separation, close worker collaboration, ordinary work, PPE respiratory/dust controls and PPE misuse. The former PPE-positive case is now `ppe-respiratory-controls` so the gate describes visible equipment instead of asserting broad compliance.
 - Fast validation runs 20-60 second clips once; release validation runs each case three times and requires 2/3 concept coverage passes with no forbidden conclusion in any attempt. Full-source runs validate long-video segmentation and event retrieval.
 - Every core search must hit the correct run-scoped asset in Top-5 within a five-second boundary tolerance. Required-concept coverage is at least 80%; output language is not a contract and LLM-as-judge is diagnostic only.
 - A representative real forklift Playwright flow verifies original-UI upload, processing, search, playback, `+ Chat` context and final answer. Synthetic fixtures remain only for fast deterministic UI behavior tests.
+- Schema v2 uses clause-level required and forbidden concept groups with explicit negated alternatives. A required concept does not match when its negation occurs in the same clause, and forbidden conclusions are reported by stable group ID.
+- Real-provider acceptance is blocked unless `/api/v1/runtime/evidence` proves recorded video is enabled, resolved LLM/VLM/embedding roles are configured and non-mock, search mock controls are disabled, and a redacted configuration fingerprint is available.
 - Accepted Chinese specification: `docs/specs/real-business-video-regression-baseline.md`.
 
 ## Git Policy
@@ -37,17 +39,31 @@ Last updated: 2026-07-28
 - Parallelize only genuinely independent work with clear ownership boundaries.
 - The main session remains responsible for integration, verification, cleanup, and the final local merge to `master`.
 
-## Latest Verified Change
+## Current Business Baseline Hardening
 
-`original-ui-chat-canary`
+`real-business-video-regression-baseline` manifest schema v2 / dataset `1.1.0`
 
-Current implementation awaiting Ubuntu validation:
+Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 
-- 固定 manifest 已记录三个 CC BY 3.0 公共来源、三个源文件哈希、六个审查片段哈希、许可归属、搜索/Chat 问题、双语概念同义组和事实性禁止结论；视频二进制仍排除在 Git 外。
-- 数据准备器支持下载或复用缓存，并严格复核源文件大小、SHA-256、H.264 媒体规格、片段边界和固定派生哈希。
-- 业务回归运行器复用真实分块上传和七阶段 Job API，经原版 UI 同源代理验证 Top-5、时间窗口、缩略图、HTTP Range、选中片段 Chat、2/3 attempt 和清理；稳定输出 JSON、JUnit、逐 attempt 证据及四类失败退出码。
-- 原版 UI 新增显式 `PLAYWRIGHT_REAL_VIDEO` 真实叉车门禁；默认合成 Playwright 不变。
-- 本地定向验证：`38 passed`；Ruff、前端 TypeScript、Prettier 和 Playwright test discovery 通过，真实 UI 用例被独立发现。
+- 固定 manifest 升级为严格 schema v2、dataset `1.1.0`，继续固定三个 CC BY 3.0 来源、三个源文件和六个派生片段的身份、许可与哈希；required groups 新增同 clause 的 `negated_alternatives`，forbidden conclusions 改为稳定分组。
+- 数据准备器对已有文件同时验证大小和 SHA-256；下载使用临时文件和原子替换，默认总 deadline 为 30 分钟；每次 ffprobe/FFmpeg 调用默认 deadline 为 10 分钟，超时会终止工具进程组并删除未完成片段。
+- 业务 runner 在任何上传前执行 redacted runtime-evidence 硬门禁，并把角色、模型、mock 控制和配置指纹写入报告。搜索、缩略图和媒体请求可按瞬时 HTTP 策略重试；每个 Provider attempt 的 Chat 只发送一次，失败即 `pipeline_error`，不得用重试改变 2/3 统计。
+- 每次成功 Chat 必须由 API 经原版 UI proxy 返回精确 `X-VSA-Trace-ID`；runner 再读取该 trace 的脱敏证据，强校验 conversation/message/asset/segment 身份、唯一 `video_understanding` 调用、唯一非空 final、五类关键事件和无 error 事件。
+- 搜索命中必须同时匹配本次运行的 `asset_id`、`job_id` 和 `segment_id`；缩略图必须同源且非空，媒体必须返回合法 HTTP 206 单字节 Range。
+- 资产一创建就登记清理候选，因此上传/complete/Job/搜索/Chat 任一阶段失败仍会尝试删除。报告分别保留 `primary_failure` 与 `cleanup_failures`；清理失败使用退出码 `5`，不会覆盖丢失原始故障证据。
+- 原版 UI 真实叉车门禁在上传前检查相同 runtime evidence，使用与 Python evaluator 对齐的 clause-level 门禁，并从响应头关联精确 Chat trace。所有路径都清理 create 后已登记的资产；204 后还必须验证媒体 404/410、搜索不再命中，并释放页面诊断。服务器若缺少 Chromium 系统库，浏览器使用版本匹配的官方 Playwright 容器，测试 runner 和输出仍由宿主用户管理。
+- 本地验证：排除两个只能在 Ubuntu 运行的 launcher 环境文件后，Python 单元集 `1458 passed, 1 skipped`；原版 UI focused Jest `5 passed, 1 skipped`，Chat header Jest `1 passed`，应用 typecheck、相关 Prettier 检查和真实用例 Playwright discovery 均通过。
+
+Pending final verification:
+
+- 对 dataset `1.1.0` 重新执行无下载固定身份复核；旧 dataset 的 quick/release/full/UI 结果不得作为本版本验收结果。
+- 在全新隔离 data-root 和 Elasticsearch namespace 上依次执行 quick、release 和 full，检查 JSON、JUnit、逐 attempt、provider evidence、精确身份以及成功/失败路径清理。
+- 使用真实叉车片段执行原版 UI Playwright，归档宿主机可写的独立 output directory、chat traces、页面/网络诊断和删除证据。
+- 完成上述验证后才能把设计状态改为已验收并形成正式归档；目前不得记录 `1.1.0` PASS。
+
+## Previous Verified Runtime Baseline
+
+The following results predate dataset `1.1.0` and prove the underlying production path, not the current business baseline release:
 
 - 原版 UI 真实业务链已覆盖：上传 MP4/MKV、Worker 真实 VLM/embedding 入库、Elasticsearch 搜索、缩略图与 HTTP 206 播放、`+ Chat` 上下文选择、同源 Chat API、TopAgent、`video_understanding` 和最终页面回答。
 - 修复隔离端口下 Chat 仍回退到 `127.0.0.1:8000` 的问题；Linux/Windows 单脚本现在把当前 API URL 注入 `NEXT_PUBLIC_HTTP_CHAT_COMPLETION_URL`。真实 Provider 模式为流式最终回答保留 180 秒窗口，确定性模式仍保持 30 秒快速失败。
@@ -172,4 +188,4 @@ Server validation status: Ubuntu fake-provider browser E2E and the 2026-07-24 re
 
 ## Next Recommended Work
 
-将当前实现合并推送到 `master`，在 Ubuntu 对正式 manifest 执行无下载固定哈希复核，并在全新隔离 data-root/alias 中依次完成六场景 quick、release、full 和原版 UI 真实叉车验收。通过后归档结构化报告，再继续长期运行监控、容量与保留策略。
+完成 schema v2 / dataset `1.1.0` 的本地验证、提交和服务器同步；随后在 Ubuntu 执行无下载固定身份复核，并在全新隔离 data-root/ES namespace 中依次重跑 quick、release、full 和原版 UI 真实叉车门禁。四项均通过、失败路径和最终清理证据完整后再归档；旧 dataset 结果不得替代本次验收。归档完成后继续长期运行监控、容量与保留策略。

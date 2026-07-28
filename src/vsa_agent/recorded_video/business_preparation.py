@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import signal
 import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +26,8 @@ from vsa_agent.recorded_video.business_manifest import (
 )
 
 _COPY_CHUNK_BYTES = 1024 * 1024
+_DOWNLOAD_TIMEOUT_SEC = 30.0 * 60.0
+_MEDIA_TOOL_TIMEOUT_SEC = 10.0 * 60.0
 
 
 class DatasetPreparationError(RuntimeError):
@@ -38,7 +43,7 @@ class PreparedDataset:
     clip_paths: dict[str, Path]
 
 
-CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def sha256_file(path: Path) -> str:
@@ -49,13 +54,38 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _default_runner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(arguments, check=False, capture_output=True, text=True)
-
-
-def _run(arguments: list[str], operation: str, runner: CommandRunner) -> subprocess.CompletedProcess[str]:
+def _default_runner(arguments: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        arguments,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name != "nt",
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
     try:
-        result = runner(arguments)
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(arguments, timeout, output=stdout, stderr=stderr) from error
+    return subprocess.CompletedProcess(arguments, process.returncode, stdout=stdout, stderr=stderr)
+
+
+def _run(
+    arguments: list[str],
+    operation: str,
+    runner: CommandRunner,
+    *,
+    timeout_sec: float,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = runner(arguments, timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        raise DatasetPreparationError(f"{operation} timed out after {timeout_sec:g} seconds") from None
     except OSError as error:
         raise DatasetPreparationError(f"{operation} could not start: {error}") from None
     if result.returncode != 0:
@@ -79,17 +109,61 @@ def _verify_identity(path: Path, *, expected_size: int | None, expected_sha256: 
         raise DatasetPreparationError(f"{label} sha256 mismatch: expected {expected_sha256}, observed {observed_hash}")
 
 
-def _download_source(source: VideoSource, target: Path) -> None:
+def _content_length(response: httpx.Response, source: VideoSource) -> int | None:
+    value = response.headers.get("Content-Length")
+    if value is None:
+        return None
+    try:
+        observed = int(value)
+    except ValueError:
+        raise DatasetPreparationError(f"source {source.source_id} returned an invalid Content-Length") from None
+    if observed < 0:
+        raise DatasetPreparationError(f"source {source.source_id} returned an invalid Content-Length")
+    if observed != source.size_bytes:
+        raise DatasetPreparationError(
+            f"source {source.source_id} Content-Length mismatch: expected {source.size_bytes}, observed {observed}"
+        )
+    return observed
+
+
+def _download_source(source: VideoSource, target: Path, *, timeout_sec: float) -> None:
     temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
     target.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout_sec
     try:
-        timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
+        timeout = httpx.Timeout(
+            connect=min(30.0, timeout_sec),
+            read=min(60.0, timeout_sec),
+            write=min(30.0, timeout_sec),
+            pool=min(30.0, timeout_sec),
+        )
         with httpx.Client(follow_redirects=True, timeout=timeout) as client:
             with client.stream("GET", source.download_url) as response:
                 response.raise_for_status()
+                _content_length(response, source)
+                observed_size = 0
                 with temporary.open("xb") as output:
                     for chunk in response.iter_bytes(_COPY_CHUNK_BYTES):
+                        if time.monotonic() >= deadline:
+                            raise DatasetPreparationError(
+                                f"source {source.source_id} download timed out after {timeout_sec:g} seconds"
+                            )
+                        observed_size += len(chunk)
+                        if observed_size > source.size_bytes:
+                            raise DatasetPreparationError(
+                                f"source {source.source_id} exceeded manifest size: "
+                                f"expected {source.size_bytes}, observed at least {observed_size}"
+                            )
                         output.write(chunk)
+                    if time.monotonic() >= deadline:
+                        raise DatasetPreparationError(
+                            f"source {source.source_id} download timed out after {timeout_sec:g} seconds"
+                        )
+                    if observed_size != source.size_bytes:
+                        raise DatasetPreparationError(
+                            f"source {source.source_id} download size mismatch at EOF: "
+                            f"expected {source.size_bytes}, observed {observed_size}"
+                        )
                     output.flush()
                     os.fsync(output.fileno())
         _verify_identity(
@@ -105,7 +179,14 @@ def _download_source(source: VideoSource, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _probe_source(path: Path, source: VideoSource, ffprobe_path: str, runner: CommandRunner) -> None:
+def _probe_source(
+    path: Path,
+    source: VideoSource,
+    ffprobe_path: str,
+    runner: CommandRunner,
+    *,
+    timeout_sec: float,
+) -> None:
     result = _run(
         [
             ffprobe_path,
@@ -123,6 +204,7 @@ def _probe_source(path: Path, source: VideoSource, ffprobe_path: str, runner: Co
         ],
         f"probe source {source.source_id}",
         runner,
+        timeout_sec=timeout_sec,
     )
     try:
         payload = json.loads(result.stdout)
@@ -205,8 +287,15 @@ def prepare_business_dataset(
     ffmpeg_path: str = "ffmpeg",
     ffprobe_path: str = "ffprobe",
     runner: CommandRunner | None = None,
+    download_timeout_sec: float = _DOWNLOAD_TIMEOUT_SEC,
+    media_tool_timeout_sec: float = _MEDIA_TOOL_TIMEOUT_SEC,
 ) -> PreparedDataset:
     """Materialize only manifest-pinned sources and clips under one external data root."""
+
+    if not math.isfinite(download_timeout_sec) or download_timeout_sec <= 0:
+        raise ValueError("download_timeout_sec must be a positive finite number")
+    if not math.isfinite(media_tool_timeout_sec) or media_tool_timeout_sec <= 0:
+        raise ValueError("media_tool_timeout_sec must be a positive finite number")
 
     manifest = load_business_manifest(manifest_path)
     dataset_root = Path(root).resolve(strict=False)
@@ -222,14 +311,20 @@ def prepare_business_dataset(
         if not target.exists():
             if not download_missing:
                 raise DatasetPreparationError(f"source {source.source_id} is missing and downloads are disabled")
-            _download_source(source, target)
+            _download_source(source, target, timeout_sec=download_timeout_sec)
         _verify_identity(
             target,
             expected_size=source.size_bytes,
             expected_sha256=source.sha256,
             label=f"source {source.source_id}",
         )
-        _probe_source(target, source, ffprobe_path, command_runner)
+        _probe_source(
+            target,
+            source,
+            ffprobe_path,
+            command_runner,
+            timeout_sec=media_tool_timeout_sec,
+        )
         source_paths[source.source_id] = target.resolve()
 
     clip_paths: dict[str, Path] = {}
@@ -242,6 +337,7 @@ def prepare_business_dataset(
                     _clip_command(ffmpeg_path, source_paths[case.source_id], case, temporary),
                     f"derive clip {case.case_id}",
                     command_runner,
+                    timeout_sec=media_tool_timeout_sec,
                 )
                 _verify_identity(
                     temporary,

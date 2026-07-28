@@ -75,10 +75,6 @@ class AssetNotFoundError(Exception):
     pass
 
 
-class AssetDeletionConflictError(Exception):
-    pass
-
-
 class DeletionService:
     def __init__(self, repository: DeletionRepository, asset_store: DeletionAssetStore) -> None:
         self.repository = repository
@@ -96,8 +92,6 @@ class DeletionService:
             raise AssetNotFoundError(asset_id) from exc
         if asset.status is AssetStatus.DELETED:
             return DeleteResult(pending=False)
-        if asset.status is AssetStatus.UPLOADING:
-            raise AssetDeletionConflictError("uploading assets cannot be deleted")
         if has_running_jobs:
             return DeleteResult(pending=True)
 
@@ -506,8 +500,6 @@ async def delete_recorded_video(asset_id: str, request: Request) -> Response:
         result = await DeletionService(repository, store).delete(asset_id, projection_store)
     except AssetNotFoundError as exc:
         raise HTTPException(status_code=404, detail="asset not found") from exc
-    except AssetDeletionConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         if owns_projection_store:
             close = getattr(projection_store, "close", None)

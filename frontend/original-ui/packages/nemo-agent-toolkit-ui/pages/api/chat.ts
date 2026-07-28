@@ -278,15 +278,25 @@ const handler = async (req: Request): Promise<Response> => {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
+  let processedResponse: Response;
   if (chatCompletionURL.includes(generateStreamEndpoint)) {
-    return new Response(await processGenerateStream(response, encoder, decoder, additionalProps));
+    processedResponse = new Response(
+      await processGenerateStream(response, encoder, decoder, additionalProps),
+    );
   } else if (chatCompletionURL.includes(chatStreamEndpoint)) {
-    return new Response(await processChatStream(response, encoder, decoder, additionalProps));
+    processedResponse = new Response(
+      await processChatStream(response, encoder, decoder, additionalProps),
+    );
   } else if (chatCompletionURL.includes(generateEndpoint)) {
-    return await processGenerate(response);
+    processedResponse = await processGenerate(response);
   } else {
-    return await processChat(response);
+    processedResponse = await processChat(response);
   }
+  const traceId = response.headers.get('x-vsa-trace-id');
+  if (traceId) {
+    processedResponse.headers.set('x-vsa-trace-id', traceId);
+  }
+  return processedResponse;
 };
 
 export default handler;

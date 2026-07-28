@@ -577,9 +577,11 @@ def test_production_api_client_rejects_complete_identity_mismatch(tmp_path: Path
         ]
     )
     client = module.ProductionApiClient("http://127.0.0.1:8000", client=http)
+    created_assets: list[str] = []
 
     with pytest.raises(module.ValidationError, match="asset identity"):
-        client.create_and_complete(_acceptance_case(video))
+        client.create_and_complete(_acceptance_case(video), on_asset_created=created_assets.append)
+    assert created_assets == [asset_id]
 
 
 def test_create_jobs_concurrently_uses_three_workers_and_preserves_case_order(tmp_path: Path) -> None:

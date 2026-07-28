@@ -97,6 +97,16 @@ class _AssetRun:
     job: JobIdentity
 
 
+@dataclass(slots=True)
+class _CleanupCandidate:
+    key: str
+    path: Path
+    sha256: str
+    anchor: datetime
+    asset_id: str
+    job_id: str | None = None
+
+
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -213,6 +223,61 @@ def _request(
     raise AssertionError("unreachable request retry state")
 
 
+def _load_provider_evidence(client: httpx.Client, options: BusinessRegressionOptions) -> dict[str, Any]:
+    response, retries = _request(
+        client,
+        "GET",
+        f"{options.api_url}/api/v1/runtime/evidence",
+        attempts=options.request_attempts,
+        expected={200},
+    )
+    payload = _response_json(response, "runtime provider evidence")
+    fingerprint = payload.get("config_fingerprint")
+    roles = payload.get("roles")
+    search = payload.get("search")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("real_provider_ready") is not True
+        or not isinstance(fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        or not isinstance(roles, dict)
+        or not isinstance(search, dict)
+    ):
+        raise BusinessRegressionError("pipeline_error", "runtime provider evidence is incomplete or not ready")
+    safe_roles: dict[str, dict[str, Any]] = {}
+    for role_name in ("llm", "vlm", "embedding"):
+        role = roles.get(role_name)
+        if not isinstance(role, dict) or role.get("is_mock") is not False:
+            raise BusinessRegressionError("pipeline_error", f"runtime {role_name} provider is missing or mock")
+        safe_role: dict[str, Any] = {}
+        for field in ("backend", "provider", "model"):
+            value = role.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise BusinessRegressionError("pipeline_error", f"runtime {role_name} {field} is missing")
+            safe_role[field] = value
+        for field in ("api_key_required", "api_key_configured", "is_mock"):
+            value = role.get(field)
+            if not isinstance(value, bool):
+                raise BusinessRegressionError("pipeline_error", f"runtime {role_name} {field} is invalid")
+            safe_role[field] = value
+        safe_roles[role_name] = safe_role
+    if search.get("allow_mock_fallback") is not False or search.get("force_mock_embedding") is not False:
+        raise BusinessRegressionError("pipeline_error", "runtime search mock controls are not disabled")
+    return {
+        "schema_version": 1,
+        "active_profile": payload.get("active_profile"),
+        "recorded_video_enabled": payload.get("recorded_video_enabled"),
+        "roles": safe_roles,
+        "search": {
+            "allow_mock_fallback": False,
+            "force_mock_embedding": False,
+        },
+        "real_provider_ready": True,
+        "config_fingerprint": fingerprint,
+        "http_retries": retries,
+    }
+
+
 def _search(
     client: httpx.Client,
     options: BusinessRegressionOptions,
@@ -251,13 +316,14 @@ def _expected_window(asset: _AssetRun, case: BusinessCase, profile: RegressionPr
     return asset.anchor + timedelta(seconds=start_offset), asset.anchor + timedelta(seconds=end_offset)
 
 
-def _matched_result(output: SearchOutput, asset_id: str, segment_id: str | None) -> dict[str, Any]:
+def _matched_result(output: SearchOutput, asset_id: str, job_id: str, segment_id: str) -> dict[str, Any]:
     for result in output.data:
-        if (result.asset_id or result.sensor_id) == asset_id and (
-            segment_id is None or result.segment_id == segment_id
-        ):
+        if result.asset_id == asset_id and result.job_id == job_id and result.segment_id == segment_id:
             return result.model_dump(mode="json")
-    raise BusinessRegressionError("accuracy_failure", f"search result for asset {asset_id} is unavailable")
+    raise BusinessRegressionError(
+        "accuracy_failure",
+        f"search result identity for asset {asset_id}, job {job_id}, segment {segment_id} is unavailable",
+    )
 
 
 def _check_media(
@@ -308,7 +374,7 @@ def _chat(
     case: BusinessCase,
     asset: _AssetRun,
     match: dict[str, Any],
-) -> tuple[str, str, int, str, str]:
+) -> tuple[str, str, int, str, str, str]:
     context = {
         "assetId": asset.job.asset_id,
         "segmentId": match["segment_id"],
@@ -326,7 +392,7 @@ def _chat(
         client,
         "POST",
         f"{options.ui_url}/api/chat",
-        attempts=options.request_attempts,
+        attempts=1,
         expected={200},
         headers={"Conversation-Id": conversation_id, "User-Message-ID": message_id},
         json={
@@ -344,17 +410,81 @@ def _chat(
     ).strip()
     if not answer or re.search(r"(?i)(^|\b)error\s*:", answer):
         raise BusinessRegressionError("pipeline_error", "selected-video Chat returned no usable answer")
-    return answer, raw_response, retries, conversation_id, message_id
+    trace_id = response.headers.get("X-VSA-Trace-ID", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,255}", trace_id) is None:
+        raise BusinessRegressionError("pipeline_error", "selected-video Chat returned no valid trace id")
+    return answer, raw_response, retries, conversation_id, message_id, trace_id
 
 
-def _cleanup_asset(client: httpx.Client, options: BusinessRegressionOptions, asset: _AssetRun) -> dict[str, Any]:
+def _chat_trace_evidence(
+    client: httpx.Client,
+    options: BusinessRegressionOptions,
+    *,
+    trace_id: str,
+    conversation_id: str,
+    message_id: str,
+    asset_id: str,
+    segment_id: str,
+) -> tuple[dict[str, Any], int]:
+    response, retries = _request(
+        client,
+        "GET",
+        f"{options.api_url}/api/v1/runtime/chat-traces/{trace_id}/evidence",
+        attempts=options.request_attempts,
+        expected={200},
+    )
+    payload = _response_json(response, "chat trace evidence")
+    required_events = {
+        "original_ui.chat.request",
+        "top_agent.tool.call",
+        "video_understanding.result",
+        "top_agent.tool.result",
+        "top_agent.final",
+    }
+    event_types = payload.get("event_types")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("trace_id") != trace_id
+        or payload.get("conversation_id") != conversation_id
+        or payload.get("user_message_id") != message_id
+        or payload.get("selected_asset_id") != asset_id
+        or payload.get("selected_segment_id") != segment_id
+        or not isinstance(event_types, list)
+        or not required_events.issubset(event_types)
+        or payload.get("missing_event_types") != []
+        or payload.get("video_tool_call_count") != 1
+        or payload.get("final_count") != 1
+        or payload.get("final_nonempty") is not True
+        or payload.get("error_event_types") != []
+    ):
+        raise BusinessRegressionError(
+            "pipeline_error", "selected-video Chat trace evidence is incomplete or mismatched"
+        )
+    request_ids = payload.get("provider_request_ids")
+    if not isinstance(request_ids, list) or any(not isinstance(value, str) for value in request_ids):
+        raise BusinessRegressionError("pipeline_error", "selected-video Chat provider request ids are invalid")
+    return {
+        "trace_id": trace_id,
+        "event_types": event_types,
+        "video_tool_call_count": 1,
+        "final_count": 1,
+        "final_nonempty": True,
+        "provider_request_ids": request_ids,
+    }, retries
+
+
+def _cleanup_asset(
+    client: httpx.Client,
+    options: BusinessRegressionOptions,
+    asset: _CleanupCandidate,
+) -> dict[str, Any]:
     deadline = time.monotonic() + min(options.timeout, 120.0)
     retries = 0
     while True:
         response, request_retries = _request(
             client,
             "DELETE",
-            f"{options.ui_url}/api/v1/videos/{asset.job.asset_id}",
+            f"{options.ui_url}/api/v1/videos/{asset.asset_id}",
             attempts=options.request_attempts,
             expected={202, 204, 404, 410},
         )
@@ -362,18 +492,20 @@ def _cleanup_asset(client: httpx.Client, options: BusinessRegressionOptions, ass
         if response.status_code in {204, 404, 410}:
             break
         if time.monotonic() >= deadline:
-            raise BusinessRegressionError("cleanup_error", f"asset {asset.job.asset_id} deletion timed out")
+            raise BusinessRegressionError("cleanup_error", f"asset {asset.asset_id} deletion timed out")
         time.sleep(options.poll_interval)
     media, media_retries = _request(
         client,
         "GET",
-        f"{options.ui_url}/api/v1/vst/v1/storage/file/{asset.job.asset_id}",
+        f"{options.ui_url}/api/v1/vst/v1/storage/file/{asset.asset_id}",
         attempts=options.request_attempts,
         expected={404, 410},
         headers={"Range": "bytes=0-0"},
     )
     return {
-        "asset_id": asset.job.asset_id,
+        "asset_id": asset.asset_id,
+        "job_id": asset.job_id,
+        "key": asset.key,
         "status": "passed",
         "delete_status": response.status_code,
         "media_status": media.status_code,
@@ -387,18 +519,26 @@ def _write_attempt(path: Path, payload: dict[str, Any]) -> None:
 
 def _write_junit(path: Path, report: dict[str, Any]) -> None:
     cases = list(report.get("cases", []))
-    failure_category = report.get("failure_category")
-    if (
-        report.get("status") != "passed"
-        and failure_category
-        and not any(case.get("failure_category") == failure_category for case in cases)
+    primary_failure = report.get("primary_failure")
+    if isinstance(primary_failure, dict) and not any(
+        case.get("failure_category") == primary_failure.get("category") for case in cases
     ):
         cases.append(
             {
-                "case_id": "regression-setup",
+                "case_id": "regression-primary",
                 "status": "failed",
-                "failure_category": failure_category,
-                "error": report.get("error"),
+                "failure_category": primary_failure.get("category"),
+                "error": primary_failure.get("error"),
+            }
+        )
+    cleanup_failures = report.get("cleanup_failures")
+    if isinstance(cleanup_failures, list) and cleanup_failures:
+        cases.append(
+            {
+                "case_id": "regression-cleanup",
+                "status": "failed",
+                "failure_category": "cleanup_error",
+                "error": "; ".join(str(item.get("error", "cleanup failed")) for item in cleanup_failures),
             }
         )
     failures = sum(1 for case in cases if case.get("status") != "passed")
@@ -446,6 +586,7 @@ def _execute_attempt(
     asset: _AssetRun,
     number: int,
     started: float,
+    provider_fingerprint: str,
 ) -> tuple[dict[str, Any], Any | None]:
     output, search_retries = _search(client, options, case, profile, asset)
     expected_start, expected_end = _expected_window(asset, case, profile)
@@ -471,13 +612,29 @@ def _execute_attempt(
             },
             None,
         )
-    match = _matched_result(output, asset.job.asset_id, search_evaluation.matched_segment_id)
+    match = _matched_result(
+        output,
+        asset.job.asset_id,
+        search_evaluation.matched_job_id,
+        search_evaluation.matched_segment_id,
+    )
     media = _check_media(client, options, asset, match)
-    answer, raw_response, chat_retries, conversation_id, message_id = _chat(client, options, case, asset, match)
+    answer, raw_response, chat_retries, conversation_id, message_id, trace_id = _chat(
+        client, options, case, asset, match
+    )
+    trace_evidence, trace_retries = _chat_trace_evidence(
+        client,
+        options,
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        asset_id=asset.job.asset_id,
+        segment_id=match["segment_id"],
+    )
     answer_evaluation = evaluate_business_answer(
         answer,
         case.required_concept_groups,
-        case.forbidden_concepts,
+        case.forbidden_concept_groups,
         minimum_coverage=profile.minimum_concept_coverage,
     )
     return (
@@ -496,9 +653,11 @@ def _execute_attempt(
                 "user_message_id": message_id,
                 "raw_response": raw_response,
                 "answer": answer,
+                "config_fingerprint": provider_fingerprint,
+                "trace": trace_evidence,
             },
             "answer_evaluation": answer_evaluation.model_dump(mode="json"),
-            "http_retries": search_retries + media["http_retries"] + chat_retries,
+            "http_retries": search_retries + media["http_retries"] + chat_retries + trace_retries,
             "duration_sec": time.monotonic() - started,
         },
         answer_evaluation,
@@ -512,6 +671,7 @@ def _run_case(
     case: BusinessCase,
     asset: _AssetRun,
     run_dir: Path,
+    provider_fingerprint: str,
 ) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     answer_evaluations = []
@@ -526,6 +686,7 @@ def _run_case(
                 asset,
                 number,
                 started,
+                provider_fingerprint,
             )
         except BusinessRegressionError as error:
             payload = {
@@ -594,10 +755,14 @@ def run_business_regression(
         "cases": [],
         "assets": [],
         "cleanup": [],
+        "cleanup_failures": [],
+        "primary_failure": None,
+        "provider_evidence": None,
     }
     owns_client = client is None
     shared_client = client or httpx.Client(timeout=options.timeout, follow_redirects=False)
     assets: dict[str, _AssetRun] = {}
+    cleanup_candidates: dict[str, _CleanupCandidate] = {}
     exit_code = EXIT_CODES["pipeline_error"]
     try:
         manifest = load_business_manifest(options.manifest)
@@ -610,6 +775,8 @@ def run_business_regression(
             "manifest": str(options.manifest),
         }
         selected = _validate_dataset(manifest, options.data_root, profile)
+        provider_evidence = _load_provider_evidence(shared_client, options)
+        report["provider_evidence"] = provider_evidence
         LOGGER.info(
             "business_regression.start run_id=%s profile=%s cases=%d assets=%d",
             run_id,
@@ -625,7 +792,23 @@ def run_business_regression(
         )
         for key, (path, sha256) in selected.items():
             anchor = datetime.now(UTC)
-            job = api_client.create_and_complete(AcceptanceCase(path=path, query="business regression", sha256=sha256))
+
+            def register_cleanup(
+                asset_id: str, *, key: str = key, path: Path = path, sha256: str = sha256, anchor: datetime = anchor
+            ) -> None:
+                cleanup_candidates[asset_id] = _CleanupCandidate(
+                    key=key,
+                    path=path,
+                    sha256=sha256,
+                    anchor=anchor,
+                    asset_id=asset_id,
+                )
+
+            job = api_client.create_and_complete(
+                AcceptanceCase(path=path, query="business regression", sha256=sha256),
+                on_asset_created=register_cleanup,
+            )
+            cleanup_candidates[job.asset_id].job_id = job.job_id
             snapshot = api_client.wait_job(job, options.timeout)
             assets[key] = _AssetRun(key=key, path=path, sha256=sha256, anchor=anchor, job=job)
             report["assets"].append(
@@ -648,6 +831,7 @@ def run_business_regression(
                     case=case,
                     asset=assets[_asset_key(case, profile)],
                     run_dir=run_dir,
+                    provider_fingerprint=provider_evidence["config_fingerprint"],
                 )
             except BusinessRegressionError as error:
                 report["cases"].append(
@@ -673,34 +857,44 @@ def run_business_regression(
         report["status"] = "passed"
         exit_code = 0
     except BusinessRegressionError as error:
+        report["primary_failure"] = {"category": error.category, "error": error.message}
         report["failure_category"] = error.category
         report["error"] = error.message
         exit_code = EXIT_CODES[error.category]
         LOGGER.exception("business_regression.failed category=%s", error.category)
     except (OSError, ValueError) as error:
+        report["primary_failure"] = {"category": "dataset_error", "error": str(error)}
         report["failure_category"] = "dataset_error"
         report["error"] = str(error)
         exit_code = EXIT_CODES["dataset_error"]
         LOGGER.exception("business_regression.failed category=dataset_error")
     except (ValidationError, httpx.HTTPError) as error:
+        report["primary_failure"] = {"category": "pipeline_error", "error": str(error)}
         report["failure_category"] = "pipeline_error"
         report["error"] = str(error)
         exit_code = EXIT_CODES["pipeline_error"]
         LOGGER.exception("business_regression.failed category=pipeline_error")
-    except Exception:
+    except Exception as error:
+        report["primary_failure"] = {
+            "category": "pipeline_error",
+            "error": "unexpected regression error; inspect runner.log",
+            "error_type": error.__class__.__name__,
+        }
         report["failure_category"] = "pipeline_error"
         report["error"] = "unexpected regression error; inspect runner.log"
         exit_code = EXIT_CODES["pipeline_error"]
         LOGGER.exception("business_regression.failed category=pipeline_error")
     finally:
         cleanup_errors: list[str] = []
-        for asset in reversed(tuple(assets.values())):
+        for asset in reversed(tuple(cleanup_candidates.values())):
             try:
                 report["cleanup"].append(_cleanup_asset(shared_client, options, asset))
             except Exception as error:
-                cleanup_errors.append(f"{asset.job.asset_id}: {error}")
-                report["cleanup"].append({"asset_id": asset.job.asset_id, "status": "failed", "error": str(error)})
-                LOGGER.exception("business_regression.cleanup_failed asset_id=%s", asset.job.asset_id)
+                cleanup_errors.append(f"{asset.asset_id}: {error}")
+                failure = {"asset_id": asset.asset_id, "status": "failed", "error": str(error)}
+                report["cleanup_failures"].append(failure)
+                report["cleanup"].append(failure)
+                LOGGER.exception("business_regression.cleanup_failed asset_id=%s", asset.asset_id)
         if cleanup_errors:
             report["status"] = "failed"
             report["failure_category"] = "cleanup_error"

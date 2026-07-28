@@ -1,6 +1,6 @@
-schema_version: 1
+schema_version: 2
 dataset_id: vsa-industrial-safety-real
-dataset_version: 1.0.1
+dataset_version: 1.1.0
 license_policy:
   allowed_license_ids:
     - CC-BY-3.0
@@ -100,17 +100,20 @@ cases:
     required_concept_groups:
       - group_id: forklift
         alternatives: [forklift, lift truck, 叉车]
+        negated_alternatives: [no forklift, no lift truck, 没有叉车]
       - group_id: person
         alternatives: [person, worker, pedestrian, 人员, 工人, 行人]
+        negated_alternatives: [no person, no worker, no pedestrian, 没有人员, 没有工人, 没有行人, 无人]
       - group_id: proximity
         alternatives: [near, close, proximity, shared area, 接近, 靠近, 同一区域]
-    forbidden_concepts:
-      - no forklift is present
-      - no person is present
-      - forklift and pedestrians are completely separated
-      - 没有叉车
-      - 没有人员
-      - 叉车与行人完全隔离
+        negated_alternatives: [not near, not close, far apart, completely separated, 不接近, 不靠近, 远离, 完全隔离]
+    forbidden_concept_groups:
+      - group_id: no_forklift
+        alternatives: [no forklift is present, no lift truck is present, 没有叉车]
+      - group_id: no_person
+        alternatives: [no person is present, no worker is present, no pedestrian is present, 没有人员, 现场无人]
+      - group_id: complete_separation
+        alternatives: [forklift and pedestrians are completely separated, 叉车与行人完全隔离]
     expected_window: {start_sec: 274.0, end_sec: 296.0}
     required: true
     tags: [real-video, forklift, proximity, risk-positive]
@@ -123,7 +126,7 @@ cases:
       filename: forklift-safe-separation.mp4
       sha256: e57f125cad38c1607e2a3c8e6b122768cf8fd1c636c940840f812030ee1d96ad
     search_queries:
-      - forklift pedestrian separation and safe operating guidance
+      - forklift safety training make eye contact give forklifts room look both ways
       - 叉车与行人的安全隔离
     chat_queries:
       - Describe the visible forklift safety controls or separation guidance.
@@ -131,15 +134,19 @@ cases:
     required_concept_groups:
       - group_id: forklift
         alternatives: [forklift, lift truck, 叉车]
+        negated_alternatives: [no forklift, no lift truck, 没有叉车]
       - group_id: person
         alternatives: [person, worker, pedestrian, 人员, 工人, 行人]
+        negated_alternatives: [no person, no worker, no pedestrian, 没有人员, 没有工人, 没有行人, 无人]
       - group_id: separation
         alternatives: [separation, safe distance, restricted area, barrier, 隔离, 安全距离, 限制区域, 护栏]
-    forbidden_concepts:
-      - a worker has been struck
-      - a collision is occurring
-      - 人员已被撞击
-      - 正在发生碰撞
+        negated_alternatives: [no separation, not separated, no safe distance, unsafe proximity, 没有隔离, 未隔离, 无安全距离]
+    forbidden_concept_groups:
+      - group_id: worker_struck
+        alternatives: [a worker has been struck, a person has been struck, 人员已被撞击]
+      - group_id: collision
+        alternatives: [a collision is occurring, 正在发生碰撞]
+        negated_alternatives: [no collision is occurring, no collision is visible, 未见正在发生碰撞, 未发生碰撞]
     expected_window: {start_sec: 504.0, end_sec: 526.0}
     required: true
     tags: [real-video, forklift, separation, risk-negative]
@@ -152,7 +159,7 @@ cases:
       filename: worker-close-collaboration.mp4
       sha256: 408c430048edd7b9c4d93f0128bcc0c54a673ddf95be5f172eb485e2586fdd73
     search_queries:
-      - workers collaborating at close range on a surveying task
+      - three survey workers hammering a stake while holding a surveying rod beside a road
       - 多名人员近距离协同作业
     chat_queries:
       - Describe how the visible workers are collaborating and any proximity risk.
@@ -160,8 +167,10 @@ cases:
     required_concept_groups:
       - group_id: multiple_people
         alternatives: [people, workers, crew, team, 多人, 多名人员, 团队]
+        negated_alternatives: [only one person, no people, no workers, 只有一人, 现场无人]
       - group_id: close_range
         alternatives: [close, nearby, together, near each other, 近距离, 靠近, 一起]
+        negated_alternatives: [not close, far apart, separated, 不靠近, 相距很远, 相互隔离]
       - group_id: collaboration
         alternatives:
           - collaborating
@@ -175,11 +184,12 @@ cases:
           - 协同
           - 合作
           - 共同作业
-    forbidden_concepts:
-      - only one person is present
-      - no people are present
-      - 只有一人
-      - 现场无人
+        negated_alternatives: [not collaborating, working independently, no coordination, 未协同, 各自独立作业]
+    forbidden_concept_groups:
+      - group_id: only_one_person
+        alternatives: [only one person is present, only one worker is present, 只有一人]
+      - group_id: no_people
+        alternatives: [no people are present, no workers are present, 现场无人]
     expected_window: {start_sec: 420.0, end_sec: 440.0}
     required: true
     tags: [real-video, workers, proximity, collaboration, risk-positive]
@@ -200,47 +210,62 @@ cases:
     required_concept_groups:
       - group_id: person
         alternatives: [person, worker, surveyor, 人员, 工人, 测量员]
+        negated_alternatives: [no person, no worker, no surveyor, 没有人员, 没有工人, 现场无人]
       - group_id: work
         alternatives: [working, surveying, task, activity, 作业, 测量, 工作]
+        negated_alternatives: [not working, no work, no activity, 未在作业, 没有工作]
       - group_id: routine
         alternatives: [routine, normal, ordinary, no clear incident, 正常, 常规, 未见明确事故]
-    forbidden_concepts:
-      - a collision has occurred
-      - a severe accident is occurring
-      - 已发生碰撞
-      - 正在发生严重事故
+        negated_alternatives:
+          - not routine
+          - abnormal emergency
+          - a clear incident is occurring
+          - a severe accident is occurring
+          - 非常规
+          - 正在发生明确事故
+          - 正在发生严重事故
+    forbidden_concept_groups:
+      - group_id: collision
+        alternatives: [a collision has occurred, 已发生碰撞]
+        negated_alternatives: [no collision has occurred, no collision is visible, 未见发生碰撞, 未发生碰撞]
+      - group_id: severe_accident
+        alternatives: [a severe accident is occurring, 正在发生严重事故]
+        negated_alternatives: [no severe accident is occurring, no severe accident is visible, 未见正在发生严重事故, 未发生严重事故]
     expected_window: {start_sec: 170.0, end_sec: 192.0}
     required: true
     tags: [real-video, workers, routine, risk-negative]
-  - case_id: ppe-compliant
+  - case_id: ppe-respiratory-controls
     source_id: auto-body-ppe
-    scenario: ppe_compliant
+    scenario: ppe_respiratory_controls
     clip:
       start_sec: 78.0
       end_sec: 102.0
-      filename: ppe-compliant.mp4
+      filename: ppe-respiratory-controls.mp4
       sha256: 29e130fe2c712730ea1514836db5cfa9b51e4b6530e351e5614aca8e3d0a4b01
     search_queries:
-      - auto body worker correctly using personal protective equipment
-      - 汽修人员正确使用个人防护装备
+      - worker wearing a respirator while sanding a car with a dust-extraction hose
+      - 工人佩戴呼吸防护并使用吸尘软管打磨汽车
     chat_queries:
-      - Identify the visible personal protective equipment and whether it is being used correctly.
-      - 识别可见的个人防护装备并判断是否正确使用。
+      - Identify the visible respiratory protection and dust-control equipment used while sanding.
+      - 识别打磨作业中可见的呼吸防护和粉尘控制设备。
     required_concept_groups:
       - group_id: person
         alternatives: [person, worker, operator, 人员, 工人, 操作员]
-      - group_id: ppe
-        alternatives: [PPE, protective equipment, respirator, eye protection, gloves, 防护装备, 呼吸防护, 护目镜, 手套]
-      - group_id: compliant_use
-        alternatives: [properly worn, correctly used, protected, compliant, 正确佩戴, 正确使用, 防护到位, 合规]
-    forbidden_concepts:
-      - no personal protective equipment is worn
-      - the worker has no protection
-      - 未佩戴任何个人防护装备
-      - 工人没有任何防护
+        negated_alternatives: [no person, no worker, no operator, 没有人员, 没有工人, 现场无人]
+      - group_id: respirator
+        alternatives: [respirator, respiratory protection, mask, 呼吸防护, 呼吸器, 口罩]
+        negated_alternatives: [no respirator, no respiratory protection, no mask, 没有呼吸防护, 未佩戴呼吸器, 未戴口罩]
+      - group_id: dust_control
+        alternatives: [dust extraction, extraction hose, vacuum hose, dust-control equipment, 吸尘, 抽尘软管, 吸尘软管, 粉尘控制]
+        negated_alternatives: [no dust extraction, no extraction hose, no dust control, 没有吸尘, 没有粉尘控制]
+    forbidden_concept_groups:
+      - group_id: no_respiratory_protection
+        alternatives: [the worker has no respiratory protection, no respirator is worn, 工人没有呼吸防护, 未佩戴呼吸器]
+      - group_id: no_dust_control
+        alternatives: [there is no dust-control equipment, no extraction hose is used, 没有粉尘控制设备, 未使用吸尘软管]
     expected_window: {start_sec: 78.0, end_sec: 102.0}
     required: true
-    tags: [real-video, ppe, compliant, positive-control]
+    tags: [real-video, ppe, respiratory-protection, dust-control, positive-control]
   - case_id: ppe-noncompliant
     source_id: surveying-safety
     scenario: ppe_noncompliant
@@ -250,7 +275,7 @@ cases:
       filename: ppe-noncompliant.mp4
       sha256: 73b91f6073222cc3599fe836f1f208013c46a87950e4b69e168e35fb56fba718
     search_queries:
-      - worker missing or incorrectly using required personal protective equipment
+      - survey workers without PPE using a post driver near a roadside
       - 人员缺失或错误使用个人防护装备
     chat_queries:
       - Identify any missing or incorrectly used personal protective equipment visible in the clip.
@@ -258,15 +283,20 @@ cases:
     required_concept_groups:
       - group_id: person
         alternatives: [person, worker, surveyor, 人员, 工人, 测量员]
+        negated_alternatives: [no person, no worker, no surveyor, 没有人员, 没有工人, 现场无人]
       - group_id: ppe
         alternatives: [PPE, protective equipment, hard hat, high visibility, 防护装备, 安全帽, 高可见度]
+        negated_alternatives: [no PPE issue can be assessed, no protective equipment is relevant, 无法判断防护装备]
       - group_id: noncompliance
         alternatives: [missing, not wearing, incorrectly used, inadequate, 缺失, 未佩戴, 使用不当, 防护不足]
-    forbidden_concepts:
-      - all required PPE is correctly worn
-      - PPE use is fully compliant
-      - 所有必需防护装备均正确佩戴
-      - 个人防护装备完全合规
+        negated_alternatives: [nothing is missing, properly worn, correctly used, fully compliant, 未缺失, 正确佩戴, 正确使用, 完全合规]
+    forbidden_concept_groups:
+      - group_id: fully_compliant
+        alternatives:
+          - all required PPE is correctly worn
+          - PPE use is fully compliant
+          - 所有必需防护装备均正确佩戴
+          - 个人防护装备完全合规
     expected_window: {start_sec: 450.0, end_sec: 474.0}
     required: true
     tags: [real-video, ppe, noncompliant, risk-positive]

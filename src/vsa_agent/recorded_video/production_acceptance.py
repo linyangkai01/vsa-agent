@@ -802,7 +802,12 @@ class ProductionApiClient:
         except httpx.HTTPError as error:
             raise _api_error(f"GET {url} failed: {error}") from None
 
-    def create_and_complete(self, case: AcceptanceCase) -> JobIdentity:
+    def create_and_complete(
+        self,
+        case: AcceptanceCase,
+        *,
+        on_asset_created: Callable[[str], None] | None = None,
+    ) -> JobIdentity:
         if _sha256(case.path) != case.sha256:
             raise ValidationError("input", f"video changed after acceptance input validation: {case.path}")
         create = _expect_status(
@@ -811,6 +816,8 @@ class ProductionApiClient:
             "create upload",
         )
         asset_id = _canonical_response_uuid(create.get("asset_id"), "asset_id")
+        if on_asset_created is not None:
+            on_asset_created(asset_id)
         upload_session_id = _canonical_response_uuid(create.get("upload_session_id"), "upload_session_id")
         upload_path = create.get("url")
         if not isinstance(upload_path, str) or not upload_path.startswith("/"):

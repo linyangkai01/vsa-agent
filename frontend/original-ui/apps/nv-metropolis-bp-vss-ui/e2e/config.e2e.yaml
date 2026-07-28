@@ -5,6 +5,7 @@ backends:
     base_url: http://127.0.0.1:8399/v1
     api_key_env: PLAYWRIGHT_PROVIDER_API_KEY
     api_key_required: true
+    test_only: true
 profiles:
   playwright_e2e:
     llm:

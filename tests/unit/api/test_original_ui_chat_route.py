@@ -18,8 +18,12 @@ async def fake_build_graph():
     return FakeGraph()
 
 
-def test_chat_stream_route_returns_original_ui_compatible_stream(monkeypatch: pytest.MonkeyPatch):
+def test_chat_stream_route_returns_original_ui_compatible_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
     monkeypatch.setattr(original_ui_chat, "build_default_graph_for_original_ui", fake_build_graph, raising=False)
+    monkeypatch.setenv(original_ui_chat.ORIGINAL_UI_TRACE_ROOT_ENV, str(tmp_path))
     client = TestClient(app)
 
     response = client.post(
@@ -30,6 +34,8 @@ def test_chat_stream_route_returns_original_ui_compatible_stream(monkeypatch: py
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    trace_id = response.headers["x-vsa-trace-id"]
+    assert (tmp_path / trace_id / "trace.jsonl").is_file()
     assert "intermediate_data: " in response.text
     assert '"answer for inspect video"' in response.text
     assert "data: [DONE]" in response.text

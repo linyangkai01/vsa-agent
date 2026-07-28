@@ -26,7 +26,270 @@ const CHAT_TRACE_ROOT =
     ".runtime/es-stack/latest/chat-traces"
   );
 
+type RequiredConceptGroup = {
+  groupId: string;
+  alternatives: readonly string[];
+  negatedAlternatives: readonly string[];
+};
+
+type ForbiddenConceptGroup = {
+  groupId: string;
+  alternatives: readonly string[];
+  negatedAlternatives?: readonly string[];
+};
+
+type BusinessAnswerEvaluation = {
+  coverage: number;
+  matchedGroupIds: string[];
+  missedGroupIds: string[];
+  forbiddenMatches: string[];
+  passed: boolean;
+};
+
+const CLAUSE_BOUNDARY = /[.!?;|\n\r\u3002\uff01\uff1f\uff1b]+/u;
+const CJK_CHARACTER = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
+
+function normalizeBusinessText(value: string): string {
+  return value.toLowerCase().trim().split(/\s+/u).filter(Boolean).join(" ");
+}
+
+function splitBusinessClauses(value: string): string[] {
+  return value
+    .split(CLAUSE_BOUNDARY)
+    .map(normalizeBusinessText)
+    .filter(Boolean);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsBusinessPhrase(text: string, phrase: string): boolean {
+  const normalizedPhrase = normalizeBusinessText(phrase);
+  if (!normalizedPhrase) return false;
+  if (CJK_CHARACTER.test(normalizedPhrase)) {
+    return text.includes(normalizedPhrase);
+  }
+  return new RegExp(
+    `(?<![a-z0-9_])${escapeRegExp(normalizedPhrase)}(?![a-z0-9_])`,
+    "iu"
+  ).test(text);
+}
+
+function evaluateBusinessAnswer(
+  answer: string,
+  requiredGroups: readonly RequiredConceptGroup[],
+  forbiddenGroups: readonly ForbiddenConceptGroup[],
+  minimumCoverage: number
+): BusinessAnswerEvaluation {
+  if (!requiredGroups.length) {
+    throw new Error("At least one required concept group is required");
+  }
+  if (minimumCoverage < 0 || minimumCoverage > 1) {
+    throw new Error("minimumCoverage must be between zero and one");
+  }
+  const clauses = splitBusinessClauses(answer);
+  const matchedGroupIds = requiredGroups
+    .filter((group) =>
+      clauses.some(
+        (clause) =>
+          group.alternatives.some((alternative) =>
+            containsBusinessPhrase(clause, alternative)
+          ) &&
+          !group.negatedAlternatives.some((alternative) =>
+            containsBusinessPhrase(clause, alternative)
+          )
+      )
+    )
+    .map((group) => group.groupId);
+  const matchedGroupIdSet = new Set(matchedGroupIds);
+  const missedGroupIds = requiredGroups
+    .filter((group) => !matchedGroupIdSet.has(group.groupId))
+    .map((group) => group.groupId);
+  const forbiddenMatches = forbiddenGroups
+    .filter((group) =>
+      clauses.some(
+        (clause) =>
+          group.alternatives.some((alternative) =>
+            containsBusinessPhrase(clause, alternative)
+          ) &&
+          !(group.negatedAlternatives || []).some((alternative) =>
+            containsBusinessPhrase(clause, alternative)
+          )
+      )
+    )
+    .map((group) => group.groupId);
+  const coverage = matchedGroupIds.length / requiredGroups.length;
+  return {
+    coverage,
+    matchedGroupIds,
+    missedGroupIds,
+    forbiddenMatches,
+    passed: coverage >= minimumCoverage && forbiddenMatches.length === 0,
+  };
+}
+
+const FORKLIFT_REQUIRED_CONCEPT_GROUPS: readonly RequiredConceptGroup[] = [
+  {
+    groupId: "forklift",
+    alternatives: ["forklift", "lift truck", "叉车"],
+    negatedAlternatives: ["no forklift", "no lift truck", "没有叉车"],
+  },
+  {
+    groupId: "person",
+    alternatives: ["person", "worker", "pedestrian", "人员", "工人", "行人"],
+    negatedAlternatives: [
+      "no person",
+      "no worker",
+      "no pedestrian",
+      "没有人员",
+      "没有工人",
+      "没有行人",
+      "无人",
+    ],
+  },
+  {
+    groupId: "proximity",
+    alternatives: [
+      "near",
+      "close",
+      "proximity",
+      "shared area",
+      "接近",
+      "靠近",
+      "同一区域",
+    ],
+    negatedAlternatives: [
+      "not near",
+      "not close",
+      "far apart",
+      "completely separated",
+      "不接近",
+      "不靠近",
+      "远离",
+      "完全隔离",
+    ],
+  },
+];
+
+const FORKLIFT_FORBIDDEN_CONCEPT_GROUPS: readonly ForbiddenConceptGroup[] = [
+  {
+    groupId: "no_forklift",
+    alternatives: [
+      "no forklift is present",
+      "no lift truck is present",
+      "没有叉车",
+    ],
+  },
+  {
+    groupId: "no_person",
+    alternatives: [
+      "no person is present",
+      "no worker is present",
+      "no pedestrian is present",
+      "没有人员",
+      "现场无人",
+    ],
+  },
+  {
+    groupId: "complete_separation",
+    alternatives: [
+      "forklift and pedestrians are completely separated",
+      "叉车与行人完全隔离",
+    ],
+  },
+];
+
 if (process.env.JEST_WORKER_ID) {
+  describe("business answer concept gate", () => {
+    it("does not match person inside personal", () => {
+      const evaluation = evaluateBusinessAnswer(
+        "Personal protective equipment is visible.",
+        FORKLIFT_REQUIRED_CONCEPT_GROUPS,
+        FORKLIFT_FORBIDDEN_CONCEPT_GROUPS,
+        0.8
+      );
+
+      expect(evaluation.matchedGroupIds).toEqual([]);
+      expect(evaluation.forbiddenMatches).toEqual([]);
+      expect(evaluation.passed).toBe(false);
+    });
+
+    it("rejects negated concepts and grouped forbidden conclusions", () => {
+      const evaluation = evaluateBusinessAnswer(
+        "No person is present and no forklift is present; they are not near each other.",
+        FORKLIFT_REQUIRED_CONCEPT_GROUPS,
+        FORKLIFT_FORBIDDEN_CONCEPT_GROUPS,
+        0.8
+      );
+
+      expect(evaluation.matchedGroupIds).toEqual([]);
+      expect(evaluation.forbiddenMatches).toEqual(["no_forklift", "no_person"]);
+      expect(evaluation.passed).toBe(false);
+    });
+
+    it("accepts later positive evidence in a separate clause", () => {
+      const evaluation = evaluateBusinessAnswer(
+        "Initially no person is visible; a person then enters near a forklift.",
+        FORKLIFT_REQUIRED_CONCEPT_GROUPS,
+        FORKLIFT_FORBIDDEN_CONCEPT_GROUPS,
+        1
+      );
+
+      expect(evaluation.matchedGroupIds).toEqual([
+        "forklift",
+        "person",
+        "proximity",
+      ]);
+      expect(evaluation.passed).toBe(true);
+    });
+
+    it("matches explicit CJK phrases with clause-level negation", () => {
+      const evaluation = evaluateBusinessAnswer(
+        "起初没有工人；随后人员靠近叉车。",
+        FORKLIFT_REQUIRED_CONCEPT_GROUPS,
+        FORKLIFT_FORBIDDEN_CONCEPT_GROUPS,
+        1
+      );
+
+      expect(evaluation.matchedGroupIds).toEqual([
+        "forklift",
+        "person",
+        "proximity",
+      ]);
+      expect(evaluation.passed).toBe(true);
+    });
+
+    it("ignores a forbidden conclusion negated in the same clause", () => {
+      const evaluation = evaluateBusinessAnswer(
+        "A person performs routine work; 未见正在发生碰撞。",
+        [
+          {
+            groupId: "person",
+            alternatives: ["person"],
+            negatedAlternatives: ["no person"],
+          },
+          {
+            groupId: "routine",
+            alternatives: ["routine"],
+            negatedAlternatives: ["not routine"],
+          },
+        ],
+        [
+          {
+            groupId: "collision",
+            alternatives: ["正在发生碰撞"],
+            negatedAlternatives: ["未见正在发生碰撞"],
+          },
+        ],
+        1
+      );
+
+      expect(evaluation.forbiddenMatches).toEqual([]);
+      expect(evaluation.passed).toBe(true);
+    });
+  });
+
   describe.skip("recorded-video Playwright acceptance", () => {
     it("runs only through the Playwright runner", () => undefined);
   });
@@ -80,6 +343,107 @@ if (process.env.JEST_WORKER_ID) {
     return result;
   }
 
+  type PageDiagnostics = {
+    assertClean: () => void;
+    dispose: () => void;
+  };
+
+  function capturePageDiagnostics(page: Page): PageDiagnostics {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    const networkFailures: string[] = [];
+    const serverErrors: string[] = [];
+    const mediaAborts: Array<{ path: string; message: string }> = [];
+    const mediaStatuses = new Map<string, Set<number>>();
+    const mediaPathPattern = /^\/api\/v1\/vst\/v1\/storage\/file\/[^/]+$/;
+    const captureConsoleError = (message: ConsoleMessage) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    };
+    const capturePageError = (error: Error) => pageErrors.push(error.message);
+    const captureRequestFailure = (request: Request) => {
+      const failure = request.failure()?.errorText || "unknown failure";
+      const url = new URL(request.url());
+      const message = `${request.method()} ${request.url()}: ${failure}`;
+      if (
+        request.method() === "GET" &&
+        failure === "net::ERR_ABORTED" &&
+        mediaPathPattern.test(url.pathname)
+      ) {
+        mediaAborts.push({ path: url.pathname, message });
+        return;
+      }
+      networkFailures.push(message);
+    };
+    const captureResponse = (response: Response) => {
+      if (response.status() >= 500) {
+        serverErrors.push(`${response.status()} ${response.url()}`);
+      }
+      const path = new URL(response.url()).pathname;
+      if (
+        mediaPathPattern.test(path) &&
+        [200, 206].includes(response.status())
+      ) {
+        const statuses = mediaStatuses.get(path) || new Set<number>();
+        statuses.add(response.status());
+        mediaStatuses.set(path, statuses);
+      }
+    };
+
+    page.on("console", captureConsoleError);
+    page.on("pageerror", capturePageError);
+    page.on("requestfailed", captureRequestFailure);
+    page.on("response", captureResponse);
+    return {
+      assertClean: () => {
+        const unexplainedMediaAborts = mediaAborts
+          .filter(({ path }) => {
+            const statuses = mediaStatuses.get(path);
+            return !statuses?.has(200) && !statuses?.has(206);
+          })
+          .map(({ message }) => message);
+        expect(consoleErrors).toEqual([]);
+        expect(pageErrors).toEqual([]);
+        expect(networkFailures).toEqual([]);
+        expect(serverErrors).toEqual([]);
+        expect(unexplainedMediaAborts).toEqual([]);
+      },
+      dispose: () => {
+        page.off("console", captureConsoleError);
+        page.off("pageerror", capturePageError);
+        page.off("requestfailed", captureRequestFailure);
+        page.off("response", captureResponse);
+      },
+    };
+  }
+
+  async function verifyRealProviderEvidence(
+    request: APIRequestContext,
+    runtimeBaseUrl: string
+  ): Promise<void> {
+    const response = await request.get(
+      `${runtimeBaseUrl}/api/v1/runtime/evidence`
+    );
+    expect(response.status()).toBe(200);
+    const evidence = (await response.json()) as {
+      real_provider_ready?: unknown;
+      config_fingerprint?: unknown;
+      roles?: Record<string, { is_mock?: unknown } | null>;
+      search?: {
+        allow_mock_fallback?: unknown;
+        force_mock_embedding?: unknown;
+      };
+    };
+    expect(evidence.real_provider_ready).toBe(true);
+    expect(
+      requiredString(evidence.config_fingerprint, "config_fingerprint")
+    ).toMatch(/^[0-9a-f]{64}$/);
+    for (const role of ["llm", "vlm", "embedding"]) {
+      expect(evidence.roles?.[role]?.is_mock).toBe(false);
+    }
+    expect(evidence.search?.allow_mock_fallback).toBe(false);
+    expect(evidence.search?.force_mock_embedding).toBe(false);
+  }
+
   async function parseCompletedUpload(
     response: Response
   ): Promise<CompletedUploadEvidence> {
@@ -114,16 +478,31 @@ if (process.env.JEST_WORKER_ID) {
   async function captureCompletedUploads(
     page: Page,
     count: number,
-    action: () => Promise<void>
+    action: () => Promise<void>,
+    onAssetCreated?: (assetId: string) => void
   ): Promise<CompletedUploadEvidence[]> {
     const responses: Response[] = [];
+    const assetRegistrations: Promise<void>[] = [];
     const capture = (response: Response) => {
+      const pathname = new URL(response.url()).pathname;
+      if (
+        onAssetCreated &&
+        response.request().method() === "POST" &&
+        response.ok() &&
+        pathname === "/api/v1/videos"
+      ) {
+        assetRegistrations.push(
+          response.json().then((payload: { asset_id?: unknown }) => {
+            onAssetCreated(
+              requiredString(payload.asset_id, "created asset_id")
+            );
+          })
+        );
+      }
       if (
         response.request().method() === "POST" &&
         response.status() === 202 &&
-        /^\/api\/v1\/videos\/[^/]+\/complete$/.test(
-          new URL(response.url()).pathname
-        )
+        /^\/api\/v1\/videos\/[^/]+\/complete$/.test(pathname)
       ) {
         responses.push(response);
       }
@@ -137,6 +516,7 @@ if (process.env.JEST_WORKER_ID) {
         .toBe(count);
     } finally {
       page.off("response", capture);
+      await Promise.all(assetRegistrations);
     }
 
     return Promise.all(responses.map(parseCompletedUpload));
@@ -258,14 +638,12 @@ if (process.env.JEST_WORKER_ID) {
   }
 
   async function verifyChatTrace(
+    traceId: string,
     expectedAssetId: string,
     expectedSegmentId: string
   ): Promise<void> {
-    const latestTrace = (
-      await readNonEmptyFile(path.join(CHAT_TRACE_ROOT, "latest.txt"), 30_000)
-    ).trim();
-    const traceDirectoryName = path.basename(latestTrace.replaceAll("\\", "/"));
-    const traceDirectory = path.join(CHAT_TRACE_ROOT, traceDirectoryName);
+    expect(traceId).toMatch(/^[A-Za-z0-9_-]{1,255}$/);
+    const traceDirectory = path.join(CHAT_TRACE_ROOT, traceId);
     const requestPayload = JSON.parse(
       await readNonEmptyFile(path.join(traceDirectory, "request.json"), 30_000)
     ) as Record<string, unknown>;
@@ -345,131 +723,181 @@ if (process.env.JEST_WORKER_ID) {
     });
     await expect(result).toHaveCount(1);
 
-    const consoleErrors: string[] = [];
-    const pageErrors: string[] = [];
-    const networkFailures: string[] = [];
-    const serverErrors: string[] = [];
-    const captureConsoleError = (message: ConsoleMessage) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    };
-    const capturePageError = (error: Error) => pageErrors.push(error.message);
-    const captureRequestFailure = (request: Request) => {
-      networkFailures.push(
-        `${request.method()} ${request.url()}: ${
-          request.failure()?.errorText || "unknown failure"
-        }`
-      );
-    };
-    const captureServerError = (response: Response) => {
-      if (response.status() >= 500) {
-        serverErrors.push(`${response.status()} ${response.url()}`);
-      }
-    };
+    const addToChat = result.getByRole("button", {
+      name: "+ Chat",
+      exact: true,
+    });
+    await expect(addToChat).toBeVisible({ timeout: 30_000 });
+    await addToChat.click();
+    await expect(
+      result.getByRole("button", { name: "Added", exact: true })
+    ).toBeVisible();
 
-    page.on("console", captureConsoleError);
-    page.on("pageerror", capturePageError);
-    page.on("requestfailed", captureRequestFailure);
-    page.on("response", captureServerError);
-    try {
-      const addToChat = result.getByRole("button", {
-        name: "+ Chat",
-        exact: true,
+    const openChat = page.getByTestId("chat-sidebar-open");
+    if (await openChat.isVisible()) await openChat.click();
+
+    await expect(
+      page.getByTitle(`${filename} (media/video)`, { exact: true })
+    ).toBeVisible();
+    const textarea = page.locator('[data-testid="chat-textarea"]:visible');
+    await expect(textarea).toBeVisible();
+    await textarea.fill(CHAT_QUESTION);
+
+    const chatResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/chat"
+    );
+    await textarea.press("Enter");
+    const chatResponse = await chatResponsePromise;
+
+    expect(chatResponse.status()).toBe(200);
+    expect(new URL(chatResponse.url()).origin).toBe(
+      new URL(runtimeBaseUrl).origin
+    );
+    const requestBody = chatResponse.request().postDataJSON() as {
+      messages?: Array<{ role?: unknown; content?: unknown }>;
+    };
+    const latestUserMessage = requestBody.messages
+      ?.filter((message) => message.role === "user")
+      .at(-1);
+    const userContent = requiredString(
+      latestUserMessage?.content,
+      "Chat user message content"
+    );
+    const contextMatch = /^\[Context: (.+)\]\n\n([^]+)$/.exec(userContent);
+    expect(contextMatch).not.toBeNull();
+    const contextItems = JSON.parse(contextMatch![1]) as Array<
+      Record<string, unknown>
+    >;
+    expect(contextItems).toHaveLength(1);
+    const context = contextItems[0];
+    expect(context.assetId).toBe(expectedAssetId);
+    const selectedSegmentId = requiredString(context.segmentId, "segmentId");
+    expect(selectedSegmentId).not.toBe("");
+    expect(context.jobId).toBe(expectedJobId);
+    expect(context.videoName).toBe(filename);
+    expect(requiredString(context.startTime, "startTime")).not.toBe("");
+    expect(requiredString(context.endTime, "endTime")).not.toBe("");
+    expect(context).not.toHaveProperty("video_path");
+    expect(context).not.toHaveProperty("videoPath");
+    expect(contextMatch![2]).toBe(CHAT_QUESTION);
+
+    const assistantMessages = page.locator(
+      '[data-testid="chat-message-assistant"]:visible'
+    );
+    if (LIVE_PROVIDER) {
+      await expect
+        .poll(
+          async () =>
+            ((await assistantMessages.last().textContent()) || "").trim(),
+          { timeout: 180_000 }
+        )
+        .not.toBe("");
+    } else {
+      const answer = assistantMessages.filter({
+        hasText: CHAT_FINAL_ANSWER,
       });
-      await expect(addToChat).toBeVisible({ timeout: 30_000 });
-      await addToChat.click();
-      await expect(
-        result.getByRole("button", { name: "Added", exact: true })
-      ).toBeVisible();
+      await expect(answer).toHaveCount(1, { timeout: 120_000 });
+      await expect(answer).toBeVisible();
+    }
+    await expect(
+      page.locator('[data-testid="chat-loading-spinner"]:visible')
+    ).toBeHidden({ timeout: LIVE_PROVIDER ? 180_000 : 30_000 });
+    const finalRenderedAnswer = (
+      (await assistantMessages.last().textContent()) || ""
+    ).trim();
+    expect(finalRenderedAnswer).not.toBe("");
+    expect(finalRenderedAnswer).not.toMatch(
+      /(?:^|\b)(?:error|failed to fetch|api_key)(?:\b|:)/i
+    );
+    const traceId = requiredString(
+      chatResponse.headers()["x-vsa-trace-id"],
+      "X-VSA-Trace-ID"
+    );
+    await verifyChatTrace(traceId, expectedAssetId, selectedSegmentId);
+  }
 
-      const openChat = page.getByTestId("chat-sidebar-open");
-      if (await openChat.isVisible()) await openChat.click();
+  async function deleteAssetAndVerifyRemoval(
+    request: APIRequestContext,
+    runtimeBaseUrl: string,
+    assetId: string,
+    searchQuery: string
+  ): Promise<void> {
+    const deleteUrl = `${runtimeBaseUrl}/api/v1/videos/${encodeURIComponent(
+      assetId
+    )}`;
+    await expect
+      .poll(
+        async () => {
+          const response = await request.delete(deleteUrl);
+          expect([202, 204]).toContain(response.status());
+          return response.status();
+        },
+        { timeout: 120_000 }
+      )
+      .toBe(204);
 
-      await expect(
-        page.getByTitle(`${filename} (media/video)`, { exact: true })
-      ).toBeVisible();
-      const textarea = page.locator('[data-testid="chat-textarea"]:visible');
-      await expect(textarea).toBeVisible();
-      await textarea.fill(CHAT_QUESTION);
+    const mediaResponse = await request.get(
+      `${runtimeBaseUrl}/api/v1/vst/v1/storage/file/${encodeURIComponent(
+        assetId
+      )}`,
+      { headers: { Range: "bytes=0-9" } }
+    );
+    expect([404, 410]).toContain(mediaResponse.status());
 
-      const chatResponsePromise = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          new URL(response.url()).pathname === "/api/chat"
-      );
-      await textarea.press("Enter");
-      const chatResponse = await chatResponsePromise;
+    await expect
+      .poll(
+        async () => {
+          const response = await request.post(
+            `${runtimeBaseUrl}/api/v1/search`,
+            {
+              data: {
+                query: searchQuery,
+                source_type: "video_file",
+                top_k: 20,
+                agent_mode: false,
+              },
+            }
+          );
+          expect(response.status()).toBe(200);
+          const payload = (await response.json()) as {
+            data?: Array<{ asset_id?: unknown }>;
+          };
+          return (payload.data || []).some(
+            (result) => result.asset_id === assetId
+          );
+        },
+        { timeout: 120_000, intervals: [1_000, 2_000, 5_000] }
+      )
+      .toBe(false);
+  }
 
-      expect(chatResponse.status()).toBe(200);
-      expect(new URL(chatResponse.url()).origin).toBe(
-        new URL(runtimeBaseUrl).origin
-      );
-      const requestBody = chatResponse.request().postDataJSON() as {
-        messages?: Array<{ role?: unknown; content?: unknown }>;
-      };
-      const latestUserMessage = requestBody.messages
-        ?.filter((message) => message.role === "user")
-        .at(-1);
-      const userContent = requiredString(
-        latestUserMessage?.content,
-        "Chat user message content"
-      );
-      const contextMatch = /^\[Context: (.+)\]\n\n([^]+)$/.exec(userContent);
-      expect(contextMatch).not.toBeNull();
-      const contextItems = JSON.parse(contextMatch![1]) as Array<
-        Record<string, unknown>
-      >;
-      expect(contextItems).toHaveLength(1);
-      const context = contextItems[0];
-      expect(context.assetId).toBe(expectedAssetId);
-      const selectedSegmentId = requiredString(context.segmentId, "segmentId");
-      expect(selectedSegmentId).not.toBe("");
-      expect(context.jobId).toBe(expectedJobId);
-      expect(context.videoName).toBe(filename);
-      expect(requiredString(context.startTime, "startTime")).not.toBe("");
-      expect(requiredString(context.endTime, "endTime")).not.toBe("");
-      expect(context).not.toHaveProperty("video_path");
-      expect(context).not.toHaveProperty("videoPath");
-      expect(contextMatch![2]).toBe(CHAT_QUESTION);
-
-      const assistantMessages = page.locator(
-        '[data-testid="chat-message-assistant"]:visible'
-      );
-      if (LIVE_PROVIDER) {
-        await expect
-          .poll(
-            async () =>
-              ((await assistantMessages.last().textContent()) || "").trim(),
-            { timeout: 180_000 }
-          )
-          .not.toBe("");
-      } else {
-        const answer = assistantMessages.filter({
-          hasText: CHAT_FINAL_ANSWER,
-        });
-        await expect(answer).toHaveCount(1, { timeout: 120_000 });
-        await expect(answer).toBeVisible();
+  async function cleanupCreatedAssets(
+    request: APIRequestContext,
+    runtimeBaseUrl: string,
+    assetIds: ReadonlySet<string>,
+    searchQuery: string
+  ): Promise<void> {
+    const failures: string[] = [];
+    for (const assetId of assetIds) {
+      try {
+        await deleteAssetAndVerifyRemoval(
+          request,
+          runtimeBaseUrl,
+          assetId,
+          searchQuery
+        );
+      } catch (error) {
+        failures.push(
+          `${assetId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       }
-      await expect(
-        page.locator('[data-testid="chat-loading-spinner"]:visible')
-      ).toBeHidden({ timeout: LIVE_PROVIDER ? 180_000 : 30_000 });
-      const finalRenderedAnswer = (
-        (await assistantMessages.last().textContent()) || ""
-      ).trim();
-      expect(finalRenderedAnswer).not.toBe("");
-      expect(finalRenderedAnswer).not.toMatch(
-        /(?:^|\b)(?:error|failed to fetch|api_key)(?:\b|:)/i
-      );
-      await verifyChatTrace(expectedAssetId, selectedSegmentId);
-
-      expect(consoleErrors).toEqual([]);
-      expect(pageErrors).toEqual([]);
-      expect(networkFailures).toEqual([]);
-      expect(serverErrors).toEqual([]);
-    } finally {
-      page.off("console", captureConsoleError);
-      page.off("pageerror", capturePageError);
-      page.off("requestfailed", captureRequestFailure);
-      page.off("response", captureServerError);
+    }
+    if (failures.length) {
+      throw new Error(`Recorded-video cleanup failed:\n${failures.join("\n")}`);
     }
   }
 
@@ -479,62 +907,70 @@ if (process.env.JEST_WORKER_ID) {
     runtimeBaseUrl,
   }, testInfo) => {
     const media = await createRecordedVideoFixtures(testInfo.outputDir);
+    const diagnostics = capturePageDiagnostics(page);
 
-    await page.goto(runtimeBaseUrl);
-    const completedUploads = await captureCompletedUploads(page, 2, () =>
-      chooseRecordedVideos(page, [media.mp4, media.mkv])
-    );
-    const mp4Upload = completedUploads.find(
-      (upload) => upload.filename === path.basename(media.mp4)
-    );
-    const mkvUpload = completedUploads.find(
-      (upload) => upload.filename === path.basename(media.mkv)
-    );
-    expect(mp4Upload).toBeDefined();
-    expect(mkvUpload).toBeDefined();
-    if (!mp4Upload || !mkvUpload) {
-      throw new Error("MP4 and MKV completion responses must both be captured");
+    try {
+      await page.goto(runtimeBaseUrl);
+      const completedUploads = await captureCompletedUploads(page, 2, () =>
+        chooseRecordedVideos(page, [media.mp4, media.mkv])
+      );
+      const mp4Upload = completedUploads.find(
+        (upload) => upload.filename === path.basename(media.mp4)
+      );
+      const mkvUpload = completedUploads.find(
+        (upload) => upload.filename === path.basename(media.mkv)
+      );
+      expect(mp4Upload).toBeDefined();
+      expect(mkvUpload).toBeDefined();
+      if (!mp4Upload || !mkvUpload) {
+        throw new Error(
+          "MP4 and MKV completion responses must both be captured"
+        );
+      }
+      expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
+      expect(mp4Upload.jobId).not.toBe(mkvUpload.jobId);
+
+      await expect(page.getByText("Processing...").first()).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(page.getByText("Completed")).toHaveCount(2, {
+        timeout: 600_000,
+      });
+
+      await page.getByTestId("sidebar-tab-search").click();
+      const searchInput = page
+        .getByTestId("search-input")
+        .getByPlaceholder("Search Files");
+      await expect(searchInput).toBeEnabled();
+      await searchInput.fill("forklift");
+      await page.getByTestId("search-button").click();
+
+      const mp4AssetId = await verifySearchResultMedia(
+        page,
+        request,
+        runtimeBaseUrl,
+        media.mp4
+      );
+      const mkvAssetId = await verifySearchResultMedia(
+        page,
+        request,
+        runtimeBaseUrl,
+        media.mkv
+      );
+      expect(mp4AssetId).toBe(mp4Upload.assetId);
+      expect(mkvAssetId).toBe(mkvUpload.assetId);
+      expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
+      await verifySearchResultChat(
+        page,
+        runtimeBaseUrl,
+        media.mp4,
+        mp4Upload.assetId,
+        mp4Upload.jobId
+      );
+      diagnostics.assertClean();
+    } finally {
+      diagnostics.dispose();
     }
-    expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
-    expect(mp4Upload.jobId).not.toBe(mkvUpload.jobId);
-
-    await expect(page.getByText("Processing...").first()).toBeVisible({
-      timeout: 120_000,
-    });
-    await expect(page.getByText("Completed")).toHaveCount(2, {
-      timeout: 600_000,
-    });
-
-    await page.getByTestId("sidebar-tab-search").click();
-    const searchInput = page
-      .getByTestId("search-input")
-      .getByPlaceholder("Search Files");
-    await expect(searchInput).toBeEnabled();
-    await searchInput.fill("forklift");
-    await page.getByTestId("search-button").click();
-
-    const mp4AssetId = await verifySearchResultMedia(
-      page,
-      request,
-      runtimeBaseUrl,
-      media.mp4
-    );
-    const mkvAssetId = await verifySearchResultMedia(
-      page,
-      request,
-      runtimeBaseUrl,
-      media.mkv
-    );
-    expect(mp4AssetId).toBe(mp4Upload.assetId);
-    expect(mkvAssetId).toBe(mkvUpload.assetId);
-    expect(mp4Upload.assetId).not.toBe(mkvUpload.assetId);
-    await verifySearchResultChat(
-      page,
-      runtimeBaseUrl,
-      media.mp4,
-      mp4Upload.assetId,
-      mp4Upload.jobId
-    );
   });
 
   test("validates a real forklift business video through the original UI", async ({
@@ -547,13 +983,21 @@ if (process.env.JEST_WORKER_ID) {
       "Set PLAYWRIGHT_REAL_VIDEO and PLAYWRIGHT_LIVE_PROVIDER=1 to run the real-provider UI gate."
     );
 
-    await page.goto(runtimeBaseUrl);
-    const [upload] = await captureCompletedUploads(page, 1, () =>
-      chooseRecordedVideos(page, [REAL_BUSINESS_VIDEO])
-    );
-    expect(upload.filename).toBe(path.basename(REAL_BUSINESS_VIDEO));
+    const diagnostics = capturePageDiagnostics(page);
+    let upload: CompletedUploadEvidence | undefined;
+    const createdAssetIds = new Set<string>();
 
     try {
+      await verifyRealProviderEvidence(request, runtimeBaseUrl);
+      await page.goto(runtimeBaseUrl);
+      [upload] = await captureCompletedUploads(
+        page,
+        1,
+        () => chooseRecordedVideos(page, [REAL_BUSINESS_VIDEO]),
+        (assetId) => createdAssetIds.add(assetId)
+      );
+      expect(upload.filename).toBe(path.basename(REAL_BUSINESS_VIDEO));
+      expect(createdAssetIds.has(upload.assetId)).toBe(true);
       await expect(page.getByText("Processing...")).toBeVisible({
         timeout: 120_000,
       });
@@ -584,55 +1028,36 @@ if (process.env.JEST_WORKER_ID) {
         upload.jobId
       );
 
-      const answer = (
+      const answer =
         (await page
           .locator('[data-testid="chat-message-assistant"]:visible')
           .last()
-          .textContent()) || ""
-      ).toLocaleLowerCase();
-      for (const alternatives of [
-        ["forklift", "lift truck", "叉车"],
-        ["person", "worker", "pedestrian", "人员", "工人", "行人"],
-        [
-          "near",
-          "close",
-          "proximity",
-          "shared area",
-          "接近",
-          "靠近",
-          "同一区域",
-        ],
-      ]) {
-        expect(
-          alternatives.some((alternative) =>
-            answer.includes(alternative.toLocaleLowerCase())
-          )
-        ).toBe(true);
-      }
-      for (const forbidden of [
-        "no forklift is present",
-        "no person is present",
-        "forklift and pedestrians are completely separated",
-        "没有叉车",
-        "没有人员",
-        "叉车与行人完全隔离",
-      ]) {
-        expect(answer).not.toContain(forbidden.toLocaleLowerCase());
-      }
+          .textContent()) || "";
+      const answerEvaluation = evaluateBusinessAnswer(
+        answer,
+        FORKLIFT_REQUIRED_CONCEPT_GROUPS,
+        FORKLIFT_FORBIDDEN_CONCEPT_GROUPS,
+        1
+      );
+      expect(answerEvaluation).toMatchObject({
+        coverage: 1,
+        matchedGroupIds: ["forklift", "person", "proximity"],
+        missedGroupIds: [],
+        forbiddenMatches: [],
+        passed: true,
+      });
+      diagnostics.assertClean();
     } finally {
-      const deleteUrl = `${runtimeBaseUrl}/api/v1/videos/${encodeURIComponent(
-        upload.assetId
-      )}`;
-      await expect
-        .poll(
-          async () => {
-            const response = await request.delete(deleteUrl);
-            expect([202, 204]).toContain(response.status());
-            return response.status();
-          },
-          { timeout: 120_000 }
-        )
-        .toBe(204);
+      try {
+        await cleanupCreatedAssets(
+          request,
+          runtimeBaseUrl,
+          createdAssetIds,
+          REAL_BUSINESS_QUERY
+        );
+      } finally {
+        diagnostics.dispose();
+      }
     }
   });
 

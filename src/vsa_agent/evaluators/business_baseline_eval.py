@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vsa_agent.recorded_video.business_manifest import ConceptGroup
+from vsa_agent.recorded_video.business_manifest import ForbiddenConceptGroup, RequiredConceptGroup
 from vsa_agent.tools.search import SearchOutput
 
 
@@ -26,6 +27,7 @@ class BusinessSearchEvaluation(_ResultModel):
     asset_found: bool
     temporal_match: bool
     matched_rank: int | None = Field(default=None, ge=1)
+    matched_job_id: str | None = None
     matched_segment_id: str | None = None
     passed: bool
 
@@ -42,10 +44,50 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+_CLAUSE_BOUNDARY = re.compile(r"[.!?;|\n\r\u3002\uff01\uff1f\uff1b]+")
+_CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _split_clauses(value: str) -> tuple[str, ...]:
+    return tuple(clause for part in _CLAUSE_BOUNDARY.split(value) if (clause := _normalize_text(part)))
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    """Match CJK literally and ASCII on whole word or phrase boundaries."""
+
+    normalized_phrase = _normalize_text(phrase)
+    if not normalized_phrase:
+        return False
+    if _CJK.search(normalized_phrase):
+        return normalized_phrase in text
+    pattern = rf"(?<![a-z0-9_]){re.escape(normalized_phrase)}(?![a-z0-9_])"
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def _required_group_matches(clauses: tuple[str, ...], group: RequiredConceptGroup) -> bool:
+    for clause in clauses:
+        if not any(_contains_phrase(clause, alternative) for alternative in group.alternatives):
+            continue
+        if any(_contains_phrase(clause, negated) for negated in group.negated_alternatives):
+            continue
+        return True
+    return False
+
+
+def _forbidden_group_matches(clauses: tuple[str, ...], group: ForbiddenConceptGroup) -> bool:
+    for clause in clauses:
+        if not any(_contains_phrase(clause, alternative) for alternative in group.alternatives):
+            continue
+        if any(_contains_phrase(clause, negated) for negated in group.negated_alternatives):
+            continue
+        return True
+    return False
+
+
 def evaluate_business_answer(
     answer: str,
-    required_concept_groups: tuple[ConceptGroup, ...],
-    forbidden_concepts: tuple[str, ...],
+    required_concept_groups: tuple[RequiredConceptGroup, ...],
+    forbidden_concept_groups: tuple[ForbiddenConceptGroup, ...],
     *,
     minimum_coverage: float,
 ) -> BusinessAnswerEvaluation:
@@ -55,15 +97,11 @@ def evaluate_business_answer(
         raise ValueError("minimum_coverage must be between 0 and 1")
     if not required_concept_groups:
         raise ValueError("at least one required concept group is required")
-    normalized = _normalize_text(answer)
-    matched = tuple(
-        group.group_id
-        for group in required_concept_groups
-        if any(_normalize_text(alternative) in normalized for alternative in group.alternatives)
-    )
+    clauses = _split_clauses(answer)
+    matched = tuple(group.group_id for group in required_concept_groups if _required_group_matches(clauses, group))
     matched_set = set(matched)
     missed = tuple(group.group_id for group in required_concept_groups if group.group_id not in matched_set)
-    forbidden = tuple(concept for concept in forbidden_concepts if _normalize_text(concept) in normalized)
+    forbidden = tuple(group.group_id for group in forbidden_concept_groups if _forbidden_group_matches(clauses, group))
     coverage = len(matched) / len(required_concept_groups)
     return BusinessAnswerEvaluation(
         coverage=coverage,
@@ -100,9 +138,9 @@ def evaluate_business_search(
     expanded_start = expected_start - timedelta(seconds=tolerance_sec)
     expanded_end = expected_end + timedelta(seconds=tolerance_sec)
     asset_found = False
+    temporal_candidate: tuple[int, str | None, str | None] | None = None
     for rank, result in enumerate(output.data[:top_k], start=1):
-        candidate_asset_id = result.asset_id or result.sensor_id
-        if candidate_asset_id != expected_asset_id:
+        if not result.asset_id or result.asset_id != expected_asset_id:
             continue
         asset_found = True
         actual_start = _parse_timestamp(result.start_time)
@@ -115,13 +153,30 @@ def evaluate_business_search(
             and actual_start <= expanded_end
         )
         if temporal_match:
+            job_id = result.job_id or None
+            segment_id = result.segment_id or None
+            if temporal_candidate is None:
+                temporal_candidate = (rank, job_id, segment_id)
+            if not job_id or not segment_id:
+                continue
             return BusinessSearchEvaluation(
                 asset_found=True,
                 temporal_match=True,
                 matched_rank=rank,
-                matched_segment_id=result.segment_id or None,
+                matched_job_id=job_id,
+                matched_segment_id=segment_id,
                 passed=True,
             )
+    if temporal_candidate is not None:
+        rank, job_id, segment_id = temporal_candidate
+        return BusinessSearchEvaluation(
+            asset_found=True,
+            temporal_match=True,
+            matched_rank=rank,
+            matched_job_id=job_id,
+            matched_segment_id=segment_id,
+            passed=False,
+        )
     return BusinessSearchEvaluation(
         asset_found=asset_found,
         temporal_match=False,

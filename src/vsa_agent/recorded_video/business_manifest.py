@@ -16,7 +16,7 @@ CORE_SCENARIOS = frozenset(
         "forklift_safe_separation",
         "worker_close_collaboration",
         "ordinary_worker_activity",
-        "ppe_compliant",
+        "ppe_respiratory_controls",
         "ppe_noncompliant",
     }
 )
@@ -142,8 +142,42 @@ class ConceptGroup(_StrictModel):
     @classmethod
     def validate_alternatives(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         normalized = tuple(_non_blank(value, "concept alternative") for value in values)
-        if len({value.casefold() for value in normalized}) != len(normalized):
+        if len({" ".join(value.casefold().split()) for value in normalized}) != len(normalized):
             raise ValueError("concept alternatives must be unique")
+        return normalized
+
+
+class RequiredConceptGroup(ConceptGroup):
+    negated_alternatives: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("negated_alternatives")
+    @classmethod
+    def validate_negated_alternatives(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(_non_blank(value, "negated concept alternative") for value in values)
+        normalized_keys = {" ".join(value.casefold().split()) for value in normalized}
+        if len(normalized_keys) != len(normalized):
+            raise ValueError("negated concept alternatives must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_positive_and_negated_alternatives(self) -> RequiredConceptGroup:
+        alternatives = {" ".join(value.casefold().split()) for value in self.alternatives}
+        negated = {" ".join(value.casefold().split()) for value in self.negated_alternatives}
+        if alternatives & negated:
+            raise ValueError("concept alternatives and negated alternatives must not overlap")
+        return self
+
+
+class ForbiddenConceptGroup(ConceptGroup):
+    negated_alternatives: tuple[str, ...] = ()
+
+    @field_validator("negated_alternatives")
+    @classmethod
+    def validate_negated_alternatives(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(_non_blank(value, "negated forbidden alternative") for value in values)
+        normalized_keys = {" ".join(value.casefold().split()) for value in normalized}
+        if len(normalized_keys) != len(normalized):
+            raise ValueError("negated forbidden alternatives must be unique")
         return normalized
 
 
@@ -154,13 +188,13 @@ class BusinessCase(_StrictModel):
     clip: ClipSpec
     search_queries: tuple[str, ...] = Field(min_length=1)
     chat_queries: tuple[str, ...] = Field(min_length=1)
-    required_concept_groups: tuple[ConceptGroup, ...] = Field(min_length=1)
-    forbidden_concepts: tuple[str, ...] = ()
+    required_concept_groups: tuple[RequiredConceptGroup, ...] = Field(min_length=1)
+    forbidden_concept_groups: tuple[ForbiddenConceptGroup, ...] = Field(min_length=1)
     expected_window: ExpectedWindow
     required: bool = True
     tags: tuple[str, ...] = Field(min_length=1)
 
-    @field_validator("search_queries", "chat_queries", "forbidden_concepts", "tags")
+    @field_validator("search_queries", "chat_queries", "tags")
     @classmethod
     def validate_string_lists(cls, values: tuple[str, ...], info) -> tuple[str, ...]:
         normalized = tuple(_non_blank(value, info.field_name) for value in values)
@@ -170,14 +204,17 @@ class BusinessCase(_StrictModel):
 
     @model_validator(mode="after")
     def validate_concept_groups(self) -> BusinessCase:
-        group_ids = [group.group_id for group in self.required_concept_groups]
-        if len(set(group_ids)) != len(group_ids):
+        required_ids = [group.group_id for group in self.required_concept_groups]
+        if len(set(required_ids)) != len(required_ids):
             raise ValueError("required concept group ids must be unique")
+        forbidden_ids = [group.group_id for group in self.forbidden_concept_groups]
+        if len(set(forbidden_ids)) != len(forbidden_ids):
+            raise ValueError("forbidden concept group ids must be unique")
         return self
 
 
 class BusinessBaselineManifest(_StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     dataset_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     dataset_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
     license_policy: LicensePolicy
@@ -266,8 +303,10 @@ __all__ = [
     "ClipSpec",
     "ConceptGroup",
     "ExpectedWindow",
+    "ForbiddenConceptGroup",
     "LicensePolicy",
     "RegressionProfile",
+    "RequiredConceptGroup",
     "VideoSource",
     "load_business_manifest",
 ]

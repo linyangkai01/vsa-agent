@@ -71,6 +71,7 @@ class BackendConfig(BaseModel):
     api_key_env: str | None = None
     api_key: str = ""
     api_key_required: bool = True
+    test_only: bool = False
 
 
 class RoleBindingConfig(BaseModel):

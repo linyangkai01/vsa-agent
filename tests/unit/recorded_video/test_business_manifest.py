@@ -34,7 +34,7 @@ def _manifest_payload() -> dict[str, object]:
         "forklift_safe_separation",
         "worker_close_collaboration",
         "ordinary_worker_activity",
-        "ppe_compliant",
+        "ppe_respiratory_controls",
         "ppe_noncompliant",
     )
     cases = []
@@ -53,19 +53,32 @@ def _manifest_payload() -> dict[str, object]:
                 "search_queries": ["forklift near worker"],
                 "chat_queries": ["Describe the safety situation."],
                 "required_concept_groups": [
-                    {"group_id": "person", "alternatives": ["person", "worker"]},
-                    {"group_id": "vehicle", "alternatives": ["forklift", "lift truck"]},
+                    {
+                        "group_id": "person",
+                        "alternatives": ["person", "worker"],
+                        "negated_alternatives": ["no person", "no worker"],
+                    },
+                    {
+                        "group_id": "vehicle",
+                        "alternatives": ["forklift", "lift truck"],
+                        "negated_alternatives": ["no forklift", "no lift truck"],
+                    },
                 ],
-                "forbidden_concepts": ["no people are present"],
+                "forbidden_concept_groups": [
+                    {
+                        "group_id": "no_people",
+                        "alternatives": ["no people are present", "nobody is present"],
+                    }
+                ],
                 "expected_window": {"start_sec": float(index * 10), "end_sec": float(index * 10 + 8)},
                 "required": True,
                 "tags": ["real-video", scenario],
             }
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset_id": "vsa-industrial-safety-real",
-        "dataset_version": "1.0.0",
+        "dataset_version": "1.1.0",
         "license_policy": {
             "allowed_license_ids": ["CC-BY-3.0"],
             "attribution_required": True,
@@ -107,7 +120,7 @@ def _manifest_payload() -> dict[str, object]:
 def test_manifest_accepts_the_six_required_business_scenarios() -> None:
     manifest = BusinessBaselineManifest.model_validate(_manifest_payload())
 
-    assert manifest.schema_version == 1
+    assert manifest.schema_version == 2
     assert len(manifest.cases) == 6
     assert manifest.profiles["release"].required_passes == 2
 
@@ -149,6 +162,43 @@ def test_manifest_rejects_invalid_sha256() -> None:
     payload["sources"][0]["sha256"] = "not-a-hash"
 
     with pytest.raises(ValidationError, match="sha256"):
+        BusinessBaselineManifest.model_validate(payload)
+
+
+def test_manifest_rejects_schema_v1_and_flat_forbidden_concepts() -> None:
+    payload = _manifest_payload()
+    payload["schema_version"] = 1
+    case = payload["cases"][0]
+    case["forbidden_concepts"] = ["no people are present"]
+    case.pop("forbidden_concept_groups")
+
+    with pytest.raises(ValidationError, match="schema_version|forbidden_concepts"):
+        BusinessBaselineManifest.model_validate(payload)
+
+
+def test_manifest_requires_negated_alternatives_for_every_required_group() -> None:
+    payload = _manifest_payload()
+    payload["cases"][0]["required_concept_groups"][0].pop("negated_alternatives")
+
+    with pytest.raises(ValidationError, match="negated_alternatives"):
+        BusinessBaselineManifest.model_validate(payload)
+
+
+def test_manifest_rejects_empty_forbidden_concept_group() -> None:
+    payload = _manifest_payload()
+    payload["cases"][0]["forbidden_concept_groups"][0]["alternatives"] = []
+
+    with pytest.raises(ValidationError, match="alternatives"):
+        BusinessBaselineManifest.model_validate(payload)
+
+
+def test_manifest_rejects_duplicate_forbidden_group_ids() -> None:
+    payload = _manifest_payload()
+    duplicate = copy.deepcopy(payload["cases"][0]["forbidden_concept_groups"][0])
+    duplicate["alternatives"] = ["the work area is empty"]
+    payload["cases"][0]["forbidden_concept_groups"].append(duplicate)
+
+    with pytest.raises(ValidationError, match="forbidden concept group ids must be unique"):
         BusinessBaselineManifest.model_validate(payload)
 
 
