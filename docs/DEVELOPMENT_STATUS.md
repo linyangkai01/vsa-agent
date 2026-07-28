@@ -1,15 +1,26 @@
 # Development Status
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
 
 ## Current State
 
-- Active development track: recorded-video production acceptance completed; operational hardening is the next track.
-- Integration target: local and remote `master`; the feature implementation is complete.
-- Phase: accepted on the approved Ubuntu server with real DashScope VLM/embedding and the original UI business flow.
+- Active development track: real business video regression baseline design accepted; implementation planning is next.
+- Integration target: local and remote `master`; the existing recorded-video feature is complete, while the accepted real-video baseline has not yet been implemented.
+- Phase: the existing chain is accepted on the approved Ubuntu server with real DashScope VLM/embedding and the original UI business flow; the new baseline is at the design gate.
 - Goal: deliver original-UI recorded-video upload, durable analysis, Elasticsearch search, selected-video understanding Q&A, thumbnail and time-range playback without NVIDIA runtime services.
 - Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
 - Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
+
+## Latest Accepted Design
+
+`real-business-video-regression-baseline`
+
+- Use a manifest-driven external dataset: public network videos remain on the Ubuntu server, while Git stores source, license, attribution, SHA-256, clip lineage and expected business conclusions.
+- The first baseline contains six positive/negative cases covering forklift proximity, safe separation, close worker collaboration, ordinary work, PPE compliance and PPE misuse.
+- Fast validation runs 20-60 second clips once; release validation runs each case three times and requires 2/3 concept coverage passes with no forbidden conclusion in any attempt. Full-source runs validate long-video segmentation and event retrieval.
+- Every core search must hit the correct run-scoped asset in Top-5 within a five-second boundary tolerance. Required-concept coverage is at least 80%; output language is not a contract and LLM-as-judge is diagnostic only.
+- A representative real forklift Playwright flow verifies original-UI upload, processing, search, playback, `+ Chat` context and final answer. Synthetic fixtures remain only for fast deterministic UI behavior tests.
+- Accepted Chinese specification: `docs/specs/real-business-video-regression-baseline.md`.
 
 ## Git Policy
 
@@ -153,4 +164,4 @@ Server validation status: Ubuntu fake-provider browser E2E and the 2026-07-24 re
 
 ## Next Recommended Work
 
-进入生产化后续：补充长期运行监控、容量与保留策略、真实业务视频基线集，并定期用全新隔离 data-root/alias 重跑三视频恢复 gate，避免生产 backlog 污染验收结论。
+为已确认的真实业务视频回归基线编写实施计划，然后在全新隔离 data-root/alias 中完成六场景快速层、发布层、完整视频层和原版 UI 真实叉车验收。长期运行监控、容量与保留策略在该基线之后继续。
