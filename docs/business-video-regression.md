@@ -131,7 +131,7 @@ conda run --no-capture-output -n vsa-agent python \
 
 报告顶层保存 redacted `provider_evidence`，每次成功 Chat 保存相同 `config_fingerprint`。搜索结果必须同时匹配本次运行的 `asset_id`、`job_id` 和 `segment_id`；仅文件名、相似内容或历史资产命中都不能通过。缩略图必须是非空同源响应，媒体必须返回合法 HTTP 206 单字节 Range。
 
-每次 Chat 成功响应必须携带由 API 生成并经原版 UI proxy 透传的 `X-VSA-Trace-ID`。runner 随后访问 `/api/v1/runtime/chat-traces/<trace-id>/evidence`，要求 conversation/message/asset/segment 与当前 attempt 完全一致，且 trace 同时包含 `original_ui.chat.request`、`top_agent.tool.call`、`video_understanding.result`、`top_agent.tool.result` 和 `top_agent.final`。`video_understanding` 工具调用和非空 final 都必须恰好一次，不能存在 error 事件；端点只返回脱敏字段和安全的 Provider request ID，不返回提示词、回答正文、路径或密钥。
+每次 Chat 成功响应必须携带由 API 生成并经原版 UI proxy 透传的 `X-VSA-Trace-ID`。runner 随后访问 `/api/v1/runtime/chat-traces/<trace-id>/evidence`，要求 conversation/message/asset/segment 与当前 attempt 完全一致，且 trace 同时包含 `original_ui.chat.request`、`top_agent.tool.call`、`video_understanding.result`、`top_agent.tool.result` 和 `top_agent.final`。实际 `video_understanding.result` 和非空 final 都必须恰好一次，不能存在 error 事件。模型若重复发起工具调用，额外调用的参数必须与首次完全相同，并逐一对应 `top_agent.tool.cached_result`；任何第二次实际视频理解、不同参数调用或无缓存对应的重复调用都为 `pipeline_error`。端点只返回脱敏字段和安全的 Provider request ID，不返回提示词、回答正文、路径或密钥。
 
 退出码：`0` 通过，`2` 数据集或参数错误，`3` 流水线/Provider/基础设施错误，`4` 业务准确性失败，`5` 清理失败。搜索、缩略图、媒体和 runtime-evidence 的瞬时 HTTP 重试记录在当前 attempt 中，不会增加 Provider attempt 数。每个 Provider attempt 的选中片段 Chat 固定只发送一次，不使用 HTTP 重试；Chat 超时、非 200、空回答或错误回答立即成为 `pipeline_error`，防止一次 attempt 实际消耗多次模型输出。
 

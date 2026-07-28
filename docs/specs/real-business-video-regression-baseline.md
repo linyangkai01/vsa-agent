@@ -308,7 +308,7 @@ API Key 不得进入命令参数、报告、日志或测试附件。终端摘要
 
 ### 13.4 原版 UI E2E
 
-普通合成 fixture 继续用于快速 UI 行为测试；代表性真实叉车用例作为独立、显式启用的真实 Provider E2E。两者报告分开，避免把真实 Provider 波动归因于 UI 回归。真实用例还必须验证全流程页面诊断、脱敏 Provider 证据、五类 Chat trace 事件、唯一 video tool call、资产删除和 Elasticsearch 文档清零。
+普通合成 fixture 继续用于快速 UI 行为测试；代表性真实叉车用例作为独立、显式启用的真实 Provider E2E。两者报告分开，避免把真实 Provider 波动归因于 UI 回归。真实用例还必须验证全流程页面诊断、脱敏 Provider 证据、五类 Chat trace 事件、恰好一次实际 video tool 结果、资产删除和 Elasticsearch 文档清零。模型重复发起同参数 video tool 调用时只允许命中 TopAgent 缓存，不能产生第二次实际执行。
 
 ## 14. 发布验收标准
 

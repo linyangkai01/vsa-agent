@@ -452,7 +452,11 @@ def _chat_trace_evidence(
         or not isinstance(event_types, list)
         or not required_events.issubset(event_types)
         or payload.get("missing_event_types") != []
-        or payload.get("video_tool_call_count") != 1
+        or not isinstance(payload.get("video_tool_call_count"), int)
+        or payload["video_tool_call_count"] < 1
+        or payload.get("video_tool_execution_count") != 1
+        or payload.get("video_tool_cached_result_count") != payload["video_tool_call_count"] - 1
+        or payload.get("video_tool_calls_consistent") is not True
         or payload.get("final_count") != 1
         or payload.get("final_nonempty") is not True
         or payload.get("error_event_types") != []
@@ -466,7 +470,10 @@ def _chat_trace_evidence(
     return {
         "trace_id": trace_id,
         "event_types": event_types,
-        "video_tool_call_count": 1,
+        "video_tool_call_count": payload["video_tool_call_count"],
+        "video_tool_execution_count": 1,
+        "video_tool_cached_result_count": payload["video_tool_cached_result_count"],
+        "video_tool_calls_consistent": True,
         "final_count": 1,
         "final_nonempty": True,
         "provider_request_ids": request_ids,

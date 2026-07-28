@@ -63,6 +63,9 @@ class ChatTraceEvidence(BaseModel):
     event_types: tuple[str, ...]
     missing_event_types: tuple[str, ...]
     video_tool_call_count: int
+    video_tool_execution_count: int
+    video_tool_cached_result_count: int
+    video_tool_calls_consistent: bool
     final_count: int
     final_nonempty: bool
     error_event_types: tuple[str, ...]
@@ -195,6 +198,26 @@ async def chat_trace_evidence(trace_id: str) -> ChatTraceEvidence:
         and isinstance(event.get("payload"), dict)
         and event["payload"].get("tool_name") == "video_understanding"
     ]
+    video_tool_results = [event for event in events if event.get("event_type") == "video_understanding.result"]
+    video_tool_cached_results = [
+        event
+        for event in events
+        if event.get("event_type") == "top_agent.tool.cached_result"
+        and isinstance(event.get("payload"), dict)
+        and event["payload"].get("tool_name") == "video_understanding"
+    ]
+    call_payloads = [event["payload"] for event in video_tool_calls]
+    call_ids = [payload.get("tool_call_id") for payload in call_payloads]
+    cached_call_ids = [event["payload"].get("tool_call_id") for event in video_tool_cached_results]
+    first_args = call_payloads[0].get("tool_args") if call_payloads else None
+    video_tool_calls_consistent = (
+        isinstance(first_args, dict)
+        and all(payload.get("tool_args") == first_args for payload in call_payloads)
+        and all(isinstance(call_id, str) and call_id for call_id in call_ids)
+        and len(set(call_ids)) == len(call_ids)
+        and all(isinstance(call_id, str) and call_id in call_ids for call_id in cached_call_ids)
+        and len(set(cached_call_ids)) == len(cached_call_ids)
+    )
     final_events = [event for event in events if event.get("event_type") == "top_agent.final"]
     final_nonempty = len(final_events) == 1 and bool(
         str(final_events[0].get("payload", {}).get("final_answer", "")).strip()
@@ -214,6 +237,9 @@ async def chat_trace_evidence(trace_id: str) -> ChatTraceEvidence:
         event_types=event_types,
         missing_event_types=missing,
         video_tool_call_count=len(video_tool_calls),
+        video_tool_execution_count=len(video_tool_results),
+        video_tool_cached_result_count=len(video_tool_cached_results),
+        video_tool_calls_consistent=video_tool_calls_consistent,
         final_count=len(final_events),
         final_nonempty=final_nonempty,
         error_event_types=error_event_types,

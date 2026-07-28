@@ -687,7 +687,40 @@ if (process.env.JEST_WORKER_ID) {
         (event.payload as Record<string, unknown> | undefined)?.tool_name ===
           "video_understanding"
     );
-    expect(videoToolCalls).toHaveLength(1);
+    expect(videoToolCalls.length).toBeGreaterThanOrEqual(1);
+    const callPayloads = videoToolCalls.map(
+      (event) => event.payload as Record<string, unknown>
+    );
+    const firstToolArgs = callPayloads[0].tool_args;
+    expect(firstToolArgs).toBeDefined();
+    for (const payload of callPayloads) {
+      expect(payload.tool_args).toEqual(firstToolArgs);
+    }
+    const callIds = callPayloads.map((payload) =>
+      requiredString(payload.tool_call_id, "video tool_call_id")
+    );
+    expect(new Set(callIds).size).toBe(callIds.length);
+    const videoToolResults = events.filter(
+      (event) => event.event_type === "video_understanding.result"
+    );
+    expect(videoToolResults).toHaveLength(1);
+    const cachedVideoToolResults = events.filter(
+      (event) =>
+        event.event_type === "top_agent.tool.cached_result" &&
+        (event.payload as Record<string, unknown> | undefined)?.tool_name ===
+          "video_understanding"
+    );
+    expect(cachedVideoToolResults).toHaveLength(videoToolCalls.length - 1);
+    const cachedCallIds = cachedVideoToolResults.map((event) =>
+      requiredString(
+        (event.payload as Record<string, unknown>).tool_call_id,
+        "cached video tool_call_id"
+      )
+    );
+    expect(new Set(cachedCallIds).size).toBe(cachedCallIds.length);
+    for (const cachedCallId of cachedCallIds) {
+      expect(callIds).toContain(cachedCallId);
+    }
     const finalEvents = events.filter(
       (event) => event.event_type === "top_agent.final"
     );

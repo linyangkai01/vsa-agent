@@ -122,7 +122,14 @@ def test_chat_trace_evidence_is_redacted_and_correlated(tmp_path, monkeypatch):
     )
     events = [
         {"event_type": "original_ui.chat.request", "payload": {}},
-        {"event_type": "top_agent.tool.call", "payload": {"tool_name": "video_understanding"}},
+        {
+            "event_type": "top_agent.tool.call",
+            "payload": {
+                "tool_name": "video_understanding",
+                "tool_call_id": "call-1",
+                "tool_args": {"video_path": "/safe/video.mp4", "query": "describe"},
+            },
+        },
         {"event_type": "video_understanding.result", "payload": {"request_id": "provider-123"}},
         {"event_type": "top_agent.tool.result", "payload": {}},
         {"event_type": "top_agent.final", "payload": {"final_answer": "A safe answer"}},
@@ -148,12 +155,68 @@ def test_chat_trace_evidence_is_redacted_and_correlated(tmp_path, monkeypatch):
         "event_types": [event["event_type"] for event in events],
         "missing_event_types": [],
         "video_tool_call_count": 1,
+        "video_tool_execution_count": 1,
+        "video_tool_cached_result_count": 0,
+        "video_tool_calls_consistent": True,
         "final_count": 1,
         "final_nonempty": True,
         "error_event_types": [],
         "provider_request_ids": ["provider-123"],
     }
     assert "must not be returned" not in response.text
+
+
+def test_chat_trace_evidence_accepts_same_argument_cached_tool_call(tmp_path, monkeypatch):
+    from vsa_agent.api import runtime_evidence
+    from vsa_agent.api.original_ui_chat import ORIGINAL_UI_TRACE_ROOT_ENV
+
+    trace_id = "cached-video-call"
+    trace_dir = tmp_path / trace_id
+    trace_dir.mkdir()
+    (trace_dir / "request.json").write_text(
+        json.dumps(
+            {
+                "conversation_id": "conversation-1",
+                "user_message_id": "message-1",
+                "selected_asset_id": "asset-1",
+                "selected_segment_id": "segment-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    tool_args = {"video_path": "/safe/video.mp4", "query": "describe"}
+    events = [
+        {"event_type": "original_ui.chat.request", "payload": {}},
+        {
+            "event_type": "top_agent.tool.call",
+            "payload": {"tool_name": "video_understanding", "tool_call_id": "call-1", "tool_args": tool_args},
+        },
+        {"event_type": "video_understanding.result", "payload": {}},
+        {"event_type": "top_agent.tool.result", "payload": {"tool_name": "video_understanding"}},
+        {
+            "event_type": "top_agent.tool.call",
+            "payload": {"tool_name": "video_understanding", "tool_call_id": "call-2", "tool_args": tool_args},
+        },
+        {
+            "event_type": "top_agent.tool.cached_result",
+            "payload": {"tool_name": "video_understanding", "tool_call_id": "call-2"},
+        },
+        {"event_type": "top_agent.final", "payload": {"final_answer": "A safe answer"}},
+    ]
+    (trace_dir / "trace.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(ORIGINAL_UI_TRACE_ROOT_ENV, str(tmp_path))
+    app = FastAPI()
+    app.include_router(runtime_evidence.router)
+
+    payload = TestClient(app).get(f"/api/v1/runtime/chat-traces/{trace_id}/evidence").json()
+
+    assert payload["video_tool_call_count"] == 2
+    assert payload["video_tool_execution_count"] == 1
+    assert payload["video_tool_cached_result_count"] == 1
+    assert payload["video_tool_calls_consistent"] is True
 
 
 def test_chat_trace_evidence_rejects_missing_or_unsafe_trace(tmp_path, monkeypatch):

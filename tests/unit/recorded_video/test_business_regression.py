@@ -54,6 +54,8 @@ class _BusinessApi:
         fail_cleanup: bool = False,
         provider_ready: bool = True,
         incomplete_chat_trace: bool = False,
+        cached_chat_tool_call: bool = False,
+        duplicate_chat_tool_execution: bool = False,
     ) -> None:
         payload = yaml.safe_load(manifest.read_text(encoding="utf-8"))
         self.file_sizes = {
@@ -73,6 +75,8 @@ class _BusinessApi:
         self.fail_cleanup = fail_cleanup
         self.provider_ready = provider_ready
         self.incomplete_chat_trace = incomplete_chat_trace
+        self.cached_chat_tool_call = cached_chat_tool_call
+        self.duplicate_chat_tool_execution = duplicate_chat_tool_execution
         self.chat_traces: dict[str, dict[str, object]] = {}
 
     def _json(self, request: httpx.Request) -> dict[str, object]:
@@ -230,11 +234,20 @@ class _BusinessApi:
                 "event_types": event_types,
                 "missing_event_types": (["video_understanding.result"] if self.incomplete_chat_trace else []),
                 "video_tool_call_count": 1,
+                "video_tool_execution_count": 1,
+                "video_tool_cached_result_count": 0,
+                "video_tool_calls_consistent": True,
                 "final_count": 1,
                 "final_nonempty": True,
                 "error_event_types": [],
                 "provider_request_ids": [f"request-{trace_id}"],
             }
+            if self.cached_chat_tool_call:
+                self.chat_traces[trace_id]["video_tool_call_count"] = 2
+                self.chat_traces[trace_id]["video_tool_cached_result_count"] = 1
+            if self.duplicate_chat_tool_execution:
+                self.chat_traces[trace_id]["video_tool_call_count"] = 2
+                self.chat_traces[trace_id]["video_tool_execution_count"] = 2
             headers = {"X-VSA-Trace-ID": trace_id}
             if self.intermediate_only_concepts:
                 return httpx.Response(
@@ -404,6 +417,46 @@ def test_incomplete_chat_trace_is_a_pipeline_failure(tmp_path: Path) -> None:
     report = json.loads((tmp_path / "reports" / "run-quick" / "report.json").read_text(encoding="utf-8"))
     assert report["primary_failure"]["category"] == "pipeline_error"
     assert "trace evidence is incomplete" in report["primary_failure"]["error"]
+
+
+def test_same_argument_cached_chat_tool_call_is_not_a_second_execution(tmp_path: Path) -> None:
+    manifest, root = _dataset(tmp_path)
+    api = _BusinessApi(manifest, root, cached_chat_tool_call=True)
+
+    exit_code = run_business_regression(
+        _options(tmp_path, manifest, root, "quick"),
+        client=httpx.Client(transport=httpx.MockTransport(api)),
+    )
+
+    assert exit_code == 0
+    report = json.loads((tmp_path / "reports" / "run-quick" / "report.json").read_text(encoding="utf-8"))
+    assert all(
+        attempt["chat"]["trace"]["video_tool_call_count"] == 2
+        for case in report["cases"]
+        for attempt in case["attempts"]
+    )
+    assert all(
+        attempt["chat"]["trace"]["video_tool_execution_count"] == 1
+        for case in report["cases"]
+        for attempt in case["attempts"]
+    )
+
+
+def test_second_chat_tool_execution_is_a_pipeline_failure(tmp_path: Path) -> None:
+    manifest, root = _dataset(tmp_path)
+    api = _BusinessApi(manifest, root, duplicate_chat_tool_execution=True)
+
+    exit_code = run_business_regression(
+        _options(tmp_path, manifest, root, "quick"),
+        client=httpx.Client(transport=httpx.MockTransport(api)),
+    )
+
+    assert exit_code == 3
+    report = json.loads((tmp_path / "reports" / "run-quick" / "report.json").read_text(encoding="utf-8"))
+    assert report["primary_failure"] == {
+        "category": "pipeline_error",
+        "error": "selected-video Chat trace evidence is incomplete or mismatched",
+    }
 
 
 def test_chunk_upload_failure_still_cleans_the_created_asset(tmp_path: Path) -> None:

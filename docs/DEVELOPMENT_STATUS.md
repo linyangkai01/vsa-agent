@@ -48,11 +48,11 @@ Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 - 固定 manifest 升级为严格 schema v2、dataset `1.1.0`，继续固定三个 CC BY 3.0 来源、三个源文件和六个派生片段的身份、许可与哈希；required groups 新增同 clause 的 `negated_alternatives`，forbidden conclusions 改为稳定分组。
 - 数据准备器对已有文件同时验证大小和 SHA-256；下载使用临时文件和原子替换，默认总 deadline 为 30 分钟；每次 ffprobe/FFmpeg 调用默认 deadline 为 10 分钟，超时会终止工具进程组并删除未完成片段。
 - 业务 runner 在任何上传前执行 redacted runtime-evidence 硬门禁，并把角色、模型、mock 控制和配置指纹写入报告。搜索、缩略图和媒体请求可按瞬时 HTTP 策略重试；每个 Provider attempt 的 Chat 只发送一次，失败即 `pipeline_error`，不得用重试改变 2/3 统计。
-- 每次成功 Chat 必须由 API 经原版 UI proxy 返回精确 `X-VSA-Trace-ID`；runner 再读取该 trace 的脱敏证据，强校验 conversation/message/asset/segment 身份、唯一 `video_understanding` 调用、唯一非空 final、五类关键事件和无 error 事件。
+- 每次成功 Chat 必须由 API 经原版 UI proxy 返回精确 `X-VSA-Trace-ID`；runner 再读取该 trace 的脱敏证据，强校验 conversation/message/asset/segment 身份、恰好一次实际 `video_understanding.result`、唯一非空 final、五类关键事件和无 error 事件。模型若重复发起完全相同的工具调用，只允许由 TopAgent 缓存命中，不能产生第二次实际视频理解结果。
 - 搜索命中必须同时匹配本次运行的 `asset_id`、`job_id` 和 `segment_id`；缩略图必须同源且非空，媒体必须返回合法 HTTP 206 单字节 Range。
 - 资产一创建就登记清理候选，因此上传/complete/Job/搜索/Chat 任一阶段失败仍会尝试删除。报告分别保留 `primary_failure` 与 `cleanup_failures`；清理失败使用退出码 `5`，不会覆盖丢失原始故障证据。
 - 原版 UI 真实叉车门禁在上传前检查相同 runtime evidence，使用与 Python evaluator 对齐的 clause-level 门禁，并从响应头关联精确 Chat trace。所有路径都清理 create 后已登记的资产；204 后还必须验证媒体 404/410、搜索不再命中，并释放页面诊断。服务器若缺少 Chromium 系统库，浏览器使用版本匹配的官方 Playwright 容器，测试 runner 和输出仍由宿主用户管理。
-- 本地验证：排除两个只能在 Ubuntu 运行的 launcher 环境文件后，Python 单元集 `1458 passed, 1 skipped`；原版 UI focused Jest `5 passed, 1 skipped`，Chat header Jest `1 passed`，应用 typecheck、相关 Prettier 检查和真实用例 Playwright discovery 均通过。
+- 本地验证：排除两个只能在 Ubuntu 运行的 launcher 环境文件后，Python 单元集 `1461 passed, 1 skipped`；原版 UI focused Jest `5 passed, 1 skipped`，Chat header Jest `1 passed`，应用 typecheck、相关 Prettier 检查和真实用例 Playwright discovery 均通过。
 
 Pending final verification:
 
