@@ -380,3 +380,13 @@ def test_live_provider_waits_for_the_stream_to_finish() -> None:
     spec = RECORDED_VIDEO_SPEC.read_text(encoding="utf-8")
 
     assert "toBeHidden({ timeout: LIVE_PROVIDER ? 180_000 : 30_000 })" in spec
+
+
+def test_real_business_video_ui_gate_is_explicit_and_cleans_up() -> None:
+    spec = RECORDED_VIDEO_SPEC.read_text(encoding="utf-8")
+
+    assert 'process.env.PLAYWRIGHT_REAL_VIDEO' in spec
+    assert 'process.env.PLAYWRIGHT_REAL_QUERY' in spec
+    assert 'PLAYWRIGHT_LIVE_PROVIDER === "1"' in spec
+    assert 'validates a real forklift business video through the original UI' in spec
+    assert 'request.delete(deleteUrl)' in spec

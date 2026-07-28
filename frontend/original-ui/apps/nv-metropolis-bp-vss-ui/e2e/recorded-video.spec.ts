@@ -14,6 +14,10 @@ const CHAT_QUESTION = "What safety risk is visible in the selected segment?";
 const CHAT_FINAL_ANSWER =
   "The selected segment shows a forklift operating near a worker in an industrial area.";
 const LIVE_PROVIDER = process.env.PLAYWRIGHT_LIVE_PROVIDER === "1";
+const REAL_BUSINESS_VIDEO = (process.env.PLAYWRIGHT_REAL_VIDEO || "").trim();
+const REAL_BUSINESS_QUERY =
+  (process.env.PLAYWRIGHT_REAL_QUERY || "").trim() ||
+  "forklift operating close to a pedestrian";
 const CHAT_TRACE_ROOT =
   process.env.PLAYWRIGHT_CHAT_TRACE_ROOT ||
   path.resolve(
@@ -531,6 +535,105 @@ if (process.env.JEST_WORKER_ID) {
       mp4Upload.assetId,
       mp4Upload.jobId
     );
+  });
+
+  test("validates a real forklift business video through the original UI", async ({
+    page,
+    request,
+    runtimeBaseUrl,
+  }) => {
+    test.skip(
+      !REAL_BUSINESS_VIDEO || !LIVE_PROVIDER,
+      "Set PLAYWRIGHT_REAL_VIDEO and PLAYWRIGHT_LIVE_PROVIDER=1 to run the real-provider UI gate."
+    );
+
+    await page.goto(runtimeBaseUrl);
+    const [upload] = await captureCompletedUploads(page, 1, () =>
+      chooseRecordedVideos(page, [REAL_BUSINESS_VIDEO])
+    );
+    expect(upload.filename).toBe(path.basename(REAL_BUSINESS_VIDEO));
+
+    try {
+      await expect(page.getByText("Processing...")).toBeVisible({
+        timeout: 120_000,
+      });
+      await expect(page.getByText("Completed")).toBeVisible({
+        timeout: 600_000,
+      });
+
+      await page.getByTestId("sidebar-tab-search").click();
+      const searchInput = page
+        .getByTestId("search-input")
+        .getByPlaceholder("Search Files");
+      await expect(searchInput).toBeEnabled();
+      await searchInput.fill(REAL_BUSINESS_QUERY);
+      await page.getByTestId("search-button").click();
+
+      const assetId = await verifySearchResultMedia(
+        page,
+        request,
+        runtimeBaseUrl,
+        REAL_BUSINESS_VIDEO
+      );
+      expect(assetId).toBe(upload.assetId);
+      await verifySearchResultChat(
+        page,
+        runtimeBaseUrl,
+        REAL_BUSINESS_VIDEO,
+        upload.assetId,
+        upload.jobId
+      );
+
+      const answer = (
+        (await page
+          .locator('[data-testid="chat-message-assistant"]:visible')
+          .last()
+          .textContent()) || ""
+      ).toLocaleLowerCase();
+      for (const alternatives of [
+        ["forklift", "lift truck", "叉车"],
+        ["person", "worker", "pedestrian", "人员", "工人", "行人"],
+        [
+          "near",
+          "close",
+          "proximity",
+          "shared area",
+          "接近",
+          "靠近",
+          "同一区域",
+        ],
+      ]) {
+        expect(
+          alternatives.some((alternative) =>
+            answer.includes(alternative.toLocaleLowerCase())
+          )
+        ).toBe(true);
+      }
+      for (const forbidden of [
+        "no forklift is present",
+        "no person is present",
+        "forklift and pedestrians are completely separated",
+        "没有叉车",
+        "没有人员",
+        "叉车与行人完全隔离",
+      ]) {
+        expect(answer).not.toContain(forbidden.toLocaleLowerCase());
+      }
+    } finally {
+      const deleteUrl = `${runtimeBaseUrl}/api/v1/videos/${encodeURIComponent(
+        upload.assetId
+      )}`;
+      await expect
+        .poll(
+          async () => {
+            const response = await request.delete(deleteUrl);
+            expect([202, 204]).toContain(response.status());
+            return response.status();
+          },
+          { timeout: 120_000 }
+        )
+        .toBe(204);
+    }
   });
 
   test("shows a real failed job and retries the same recorded-video job", async ({
