@@ -41,10 +41,13 @@ class BusinessAttemptEvaluation(_ResultModel):
 
 
 _CANONICAL_TOKEN_ALIASES = {
+    "absence": "missing",
+    "absent": "missing",
     "man": "person",
     "men": "people",
     "woman": "person",
     "women": "people",
+    "worn": "wearing",
     "closely": "close",
     "closer": "close",
     "closest": "close",

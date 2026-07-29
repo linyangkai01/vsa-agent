@@ -56,6 +56,7 @@ Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 - Ubuntu dataset `1.1.0` 的首个隔离 quick run 已证明 VLM 和 embedding 正常，但默认 LLM `qwen3.7-plus` 返回 `403 AllocationQuota.FreeTierOnly`。随后 `qwen-plus` 的完整真实 API 探测通过；release 又暴露出旧 VLM `qwen3-vl-flash-2025-10-15` 无响应，当前真实 DashScope profile 已切换为 `qwen-plus` + 有额度的 `qwen-vl-plus`，并为 OpenAI-compatible 请求补上 180 秒 timeout。此前 quick/release 结果仍是历史排障证据，最终 quick/release/full/UI 必须在新 stamp 上从头重跑。
 - `qwen-vl-plus` 隔离 quick run 的 6 个真实链路均完成且无 pipeline 错误，但 evaluator 未把 `woman` 视为 person、未把 `closely/closer` 视为 close，造成两个准确性假阴性。通用 clause 归一化已补充这些明确词形，同时保留 whole-word 与同 clause 否定规则；两条真实回答离线重评均为 100% coverage 且无 forbidden。最终报告仍需在包含该修复的新 commit 和新 stamp 上重新生成。
 - evaluator 修复后的 quick 已 6/6 通过；release 的 18 次真实 Chat 中仅 `ppe-respiratory-controls` 为 1/3，其三次均正确识别 respirator 与 dust control，但两次回答未显式提到佩戴设备的人员。生产 TopAgent 提示现要求画面存在人员时先明确识别 people/workers 及其动作，再给出设备与安全结论；固定 dataset manifest 和 80% 门禁保持不变，仍需新 commit/stamp 全量重跑。
+- 主体明确化提示使 `ppe-respiratory-controls` quick 通过，但 `ppe-noncompliant` 回答使用 `absent/not worn/complete absence`，旧 evaluator 只识别 `missing/not wearing`。通用归一化现统一这些明确词形，并同步归一化 `properly worn` 等否定/合规短语，避免错误放行；manifest 与门禁仍不变。
 
 Pending final verification:
 

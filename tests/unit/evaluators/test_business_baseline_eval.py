@@ -106,6 +106,32 @@ def test_answer_evaluation_preserves_negation_after_word_form_normalization() ->
     assert result.passed is False
 
 
+def test_answer_evaluation_normalizes_missing_and_wearing_word_forms() -> None:
+    result = evaluate_business_answer(
+        "PPE is absent and hard hats are not worn by the workers.",
+        required_concept_groups=(
+            _required("noncompliance", ("missing", "not wearing"), ("nothing is missing", "properly worn")),
+        ),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("noncompliance",)
+    assert result.passed is True
+
+
+def test_answer_evaluation_preserves_properly_worn_negation_after_normalization() -> None:
+    result = evaluate_business_answer(
+        "The required PPE is properly worn.",
+        required_concept_groups=(_required("noncompliance", ("wearing",), ("properly worn",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
 def test_answer_evaluation_fails_on_forbidden_conclusion_even_with_full_coverage() -> None:
     result = evaluate_business_answer(
         "A forklift and worker are close, but no worker is present.",
