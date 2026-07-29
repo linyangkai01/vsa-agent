@@ -57,10 +57,29 @@ _CANONICAL_TOKEN_ALIASES = {
 _CANONICAL_TOKEN_PATTERN = re.compile(
     rf"(?<![a-z0-9_])({'|'.join(map(re.escape, _CANONICAL_TOKEN_ALIASES))})(?![a-z0-9_])"
 )
+_CANONICAL_PHRASE_ALIASES = (
+    (
+        re.compile(
+            r"(?<![a-z0-9_])(?:no visible|no specific|lack of specific) "
+            r"(?:personal protective equipment|ppe)"
+            r"(?![a-z0-9_]|\s+(?:issue|problem|violation)\b)"
+        ),
+        "missing ppe",
+    ),
+)
+_ASCII_PLURAL_FORMS = {
+    "operator": "operators",
+    "pedestrian": "pedestrians",
+    "person": "people",
+    "surveyor": "surveyors",
+    "worker": "workers",
+}
 
 
 def _normalize_text(value: str) -> str:
     normalized = " ".join(value.casefold().split())
+    for pattern, replacement in _CANONICAL_PHRASE_ALIASES:
+        normalized = pattern.sub(replacement, normalized)
     return _CANONICAL_TOKEN_PATTERN.sub(lambda match: _CANONICAL_TOKEN_ALIASES[match.group(1)], normalized)
 
 
@@ -80,7 +99,14 @@ def _contains_phrase(text: str, phrase: str) -> bool:
         return False
     if _CJK.search(normalized_phrase):
         return normalized_phrase in text
-    pattern = rf"(?<![a-z0-9_]){re.escape(normalized_phrase)}(?![a-z0-9_])"
+    alternatives = [normalized_phrase]
+    if plural := _ASCII_PLURAL_FORMS.get(normalized_phrase):
+        alternatives.append(plural)
+    elif normalized_phrase.startswith("no "):
+        singular = normalized_phrase.removeprefix("no ")
+        if plural := _ASCII_PLURAL_FORMS.get(singular):
+            alternatives.append(f"no {plural}")
+    pattern = rf"(?<![a-z0-9_])(?:{'|'.join(map(re.escape, alternatives))})(?![a-z0-9_])"
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 

@@ -136,6 +136,101 @@ def test_answer_evaluation_preserves_individual_negation() -> None:
     assert result.passed is False
 
 
+def test_answer_evaluation_allows_plural_evidence_for_a_singular_actor_group() -> None:
+    result = evaluate_business_answer(
+        "The individuals and workers are performing the outdoor task.",
+        required_concept_groups=(_required("person", ("person", "worker"), ("no person", "no worker")),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("person",)
+    assert result.passed is True
+
+
+def test_answer_evaluation_preserves_plural_negation_for_a_singular_actor_group() -> None:
+    result = evaluate_business_answer(
+        "No workers are present.",
+        required_concept_groups=(_required("person", ("worker",), ("no worker",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
+def test_answer_evaluation_does_not_treat_a_singular_actor_as_multiple_people() -> None:
+    result = evaluate_business_answer(
+        "One worker is performing the task.",
+        required_concept_groups=(_required("multiple_people", ("people", "workers"), ("no people", "no workers")),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
+def test_answer_evaluation_normalizes_explicit_ppe_absence_phrases() -> None:
+    result = evaluate_business_answer(
+        "There is no visible PPE being used, and no specific PPE like gloves is observed.",
+        required_concept_groups=(_required("noncompliance", ("missing",), ("nothing is missing",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("noncompliance",)
+    assert result.passed is True
+
+
+def test_answer_evaluation_does_not_rewrite_unassessable_ppe_phrase() -> None:
+    result = evaluate_business_answer(
+        "No PPE issue can be assessed from this view.",
+        required_concept_groups=(_required("noncompliance", ("missing",), ("nothing is missing",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
+def test_answer_evaluation_does_not_rewrite_absent_ppe_issue_as_missing_equipment() -> None:
+    result = evaluate_business_answer(
+        "No visible PPE issue or violation is present.",
+        required_concept_groups=(_required("noncompliance", ("missing",), ("nothing is missing",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
+def test_real_ppe_noncompliant_answer_meets_dataset_concepts() -> None:
+    manifest = load_business_manifest(Path("tests/fixtures/business_video_baseline/manifest.yaml"))
+    case = next(case for case in manifest.cases if case.case_id == "ppe-noncompliant")
+    answer = (
+        "The video analysis shows that there is no visible personal protective equipment (PPE) being used "
+        "by the individuals in the clip. The workers are dressed in casual clothing, such as t-shirts, "
+        "shorts, and hoodies, but no specific PPE like gloves, safety glasses, or hard hats is observed. "
+        "This indicates a potential lack of adherence to safety protocols requiring appropriate PPE."
+    )
+
+    result = evaluate_business_answer(
+        answer,
+        case.required_concept_groups,
+        case.forbidden_concept_groups,
+        minimum_coverage=0.8,
+    )
+
+    assert result.coverage == 1.0
+    assert result.matched_group_ids == ("person", "ppe", "noncompliance")
+    assert result.forbidden_matches == ()
+    assert result.passed is True
+
+
 def test_answer_evaluation_normalizes_missing_and_wearing_word_forms() -> None:
     result = evaluate_business_answer(
         "PPE is absent and hard hats are not worn by the workers.",
