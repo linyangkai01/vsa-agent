@@ -20,7 +20,7 @@ profiles:
       model: qwen-turbo
     vlm:
       backend: dashscope
-      model: qwen-vl-plus
+      model: qwen3-vl-plus
     embedding:
       backend: dashscope
       model: text-embedding-v4
