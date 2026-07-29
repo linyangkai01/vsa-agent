@@ -76,6 +76,36 @@ def test_answer_evaluation_matches_synonym_groups_without_language_contract() ->
     assert result.matched_group_ids == ("forklift", "person", "proximity")
 
 
+def test_answer_evaluation_normalizes_gender_nouns_and_close_word_forms() -> None:
+    result = evaluate_business_answer(
+        "A woman stands beside the forklift; the workers are collaborating closely and one moves closer.",
+        required_concept_groups=(
+            _required("person", ("person", "people"), ("no person", "no people")),
+            _required("close_range", ("close",), ("not close",)),
+        ),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("person", "close_range")
+    assert result.passed is True
+
+
+def test_answer_evaluation_preserves_negation_after_word_form_normalization() -> None:
+    result = evaluate_business_answer(
+        "No woman is visible; the workers are not closer to each other.",
+        required_concept_groups=(
+            _required("person", ("person",), ("no person",)),
+            _required("close_range", ("close",), ("not close",)),
+        ),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
 def test_answer_evaluation_fails_on_forbidden_conclusion_even_with_full_coverage() -> None:
     result = evaluate_business_answer(
         "A forklift and worker are close, but no worker is present.",

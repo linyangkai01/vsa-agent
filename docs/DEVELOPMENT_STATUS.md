@@ -54,6 +54,7 @@ Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 - 原版 UI 真实叉车门禁在上传前检查相同 runtime evidence，使用与 Python evaluator 对齐的 clause-level 门禁，并从响应头关联精确 Chat trace。所有路径都清理 create 后已登记的资产；204 后还必须验证媒体 404/410、搜索不再命中，并释放页面诊断。服务器若缺少 Chromium 系统库，浏览器使用版本匹配的官方 Playwright 容器，测试 runner 和输出仍由宿主用户管理。
 - 本地验证：排除两个只能在 Ubuntu 运行的 launcher 环境文件后，Python 单元集 `1461 passed, 1 skipped`；原版 UI focused Jest `5 passed, 1 skipped`，Chat header Jest `1 passed`，应用 typecheck、相关 Prettier 检查和真实用例 Playwright discovery 均通过。
 - Ubuntu dataset `1.1.0` 的首个隔离 quick run 已证明 VLM 和 embedding 正常，但默认 LLM `qwen3.7-plus` 返回 `403 AllocationQuota.FreeTierOnly`。随后 `qwen-plus` 的完整真实 API 探测通过；release 又暴露出旧 VLM `qwen3-vl-flash-2025-10-15` 无响应，当前真实 DashScope profile 已切换为 `qwen-plus` + 有额度的 `qwen-vl-plus`，并为 OpenAI-compatible 请求补上 180 秒 timeout。此前 quick/release 结果仍是历史排障证据，最终 quick/release/full/UI 必须在新 stamp 上从头重跑。
+- `qwen-vl-plus` 隔离 quick run 的 6 个真实链路均完成且无 pipeline 错误，但 evaluator 未把 `woman` 视为 person、未把 `closely/closer` 视为 close，造成两个准确性假阴性。通用 clause 归一化已补充这些明确词形，同时保留 whole-word 与同 clause 否定规则；两条真实回答离线重评均为 100% coverage 且无 forbidden。最终报告仍需在包含该修复的新 commit 和新 stamp 上重新生成。
 
 Pending final verification:
 

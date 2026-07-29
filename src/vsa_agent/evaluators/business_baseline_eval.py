@@ -40,8 +40,23 @@ class BusinessAttemptEvaluation(_ResultModel):
     passed: bool
 
 
+_CANONICAL_TOKEN_ALIASES = {
+    "man": "person",
+    "men": "people",
+    "woman": "person",
+    "women": "people",
+    "closely": "close",
+    "closer": "close",
+    "closest": "close",
+}
+_CANONICAL_TOKEN_PATTERN = re.compile(
+    rf"(?<![a-z0-9_])({'|'.join(map(re.escape, _CANONICAL_TOKEN_ALIASES))})(?![a-z0-9_])"
+)
+
+
 def _normalize_text(value: str) -> str:
-    return " ".join(value.casefold().split())
+    normalized = " ".join(value.casefold().split())
+    return _CANONICAL_TOKEN_PATTERN.sub(lambda match: _CANONICAL_TOKEN_ALIASES[match.group(1)], normalized)
 
 
 _CLAUSE_BOUNDARY = re.compile(r"[.!?;|\n\r\u3002\uff01\uff1f\uff1b]+")
