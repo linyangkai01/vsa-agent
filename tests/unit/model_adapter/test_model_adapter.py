@@ -154,6 +154,7 @@ class TestOpenAIModelAdapter:
         assert kwargs["model"] == "override-model"
         assert kwargs["base_url"] == "https://override.example/v1"
         assert kwargs["api_key"] == "override-key"
+        assert kwargs["timeout"] == 180.0
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_blank_api_key_is_treated_as_unset(self, chat_openai_cls, monkeypatch):
@@ -181,6 +182,7 @@ class TestOpenAIModelAdapter:
 
         kwargs = chat_openai_cls.call_args.kwargs
         assert kwargs["api_key"] is None
+        assert kwargs["timeout"] == 180.0
 
     @patch("vsa_agent.model_adapter.openai_adapter.ChatOpenAI")
     def test_runtime_blank_api_key_is_treated_as_unset(self, chat_openai_cls, monkeypatch):

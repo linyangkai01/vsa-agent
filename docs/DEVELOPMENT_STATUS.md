@@ -53,7 +53,7 @@ Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 - 资产一创建就登记清理候选，因此上传/complete/Job/搜索/Chat 任一阶段失败仍会尝试删除。报告分别保留 `primary_failure` 与 `cleanup_failures`；清理失败使用退出码 `5`，不会覆盖丢失原始故障证据。
 - 原版 UI 真实叉车门禁在上传前检查相同 runtime evidence，使用与 Python evaluator 对齐的 clause-level 门禁，并从响应头关联精确 Chat trace。所有路径都清理 create 后已登记的资产；204 后还必须验证媒体 404/410、搜索不再命中，并释放页面诊断。服务器若缺少 Chromium 系统库，浏览器使用版本匹配的官方 Playwright 容器，测试 runner 和输出仍由宿主用户管理。
 - 本地验证：排除两个只能在 Ubuntu 运行的 launcher 环境文件后，Python 单元集 `1461 passed, 1 skipped`；原版 UI focused Jest `5 passed, 1 skipped`，Chat header Jest `1 passed`，应用 typecheck、相关 Prettier 检查和真实用例 Playwright discovery 均通过。
-- Ubuntu dataset `1.1.0` 的首个隔离 quick run 已证明 VLM 和 embedding 正常，但默认 LLM `qwen3.7-plus` 返回 `403 AllocationQuota.FreeTierOnly`。当前真实 DashScope profile 已切换到同一 Provider 下经单请求验证通过的 `qwen-plus`；切换不改变 VLM、embedding、mock 门禁或数据集契约，最终 quick/release/full/UI 仍必须在同一新 stamp 上从头重跑。
+- Ubuntu dataset `1.1.0` 的首个隔离 quick run 已证明 VLM 和 embedding 正常，但默认 LLM `qwen3.7-plus` 返回 `403 AllocationQuota.FreeTierOnly`。随后 `qwen-plus` 的完整真实 API 探测通过；release 又暴露出旧 VLM `qwen3-vl-flash-2025-10-15` 无响应，当前真实 DashScope profile 已切换为 `qwen-plus` + 有额度的 `qwen-vl-plus`，并为 OpenAI-compatible 请求补上 180 秒 timeout。此前 quick/release 结果仍是历史排障证据，最终 quick/release/full/UI 必须在新 stamp 上从头重跑。
 
 Pending final verification:
 

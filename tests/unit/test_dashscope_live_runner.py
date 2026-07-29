@@ -48,7 +48,7 @@ def test_dashscope_live_config_defines_non_secret_llm_and_vlm_defaults(monkeypat
     assert runtime.llm.backend == "dashscope"
     assert runtime.vlm.backend == "dashscope"
     assert runtime.llm.model == "qwen-plus"
-    assert runtime.vlm.model == "qwen3-vl-flash-2025-10-15"
+    assert runtime.vlm.model == "qwen-vl-plus"
 
 
 def test_dashscope_runner_exists_and_is_executable_text():

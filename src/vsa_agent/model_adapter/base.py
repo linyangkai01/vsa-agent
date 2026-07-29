@@ -6,6 +6,8 @@ from openai import AuthenticationError, PermissionDeniedError
 
 from vsa_agent.utils.retry import call_with_async_retry
 
+MODEL_REQUEST_TIMEOUT_SEC = 180.0
+
 
 class BaseModelAdapter(ABC):
     """Abstract base for LLM/VLM adapters."""

@@ -2,7 +2,7 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from vsa_agent.config import get_config
-from vsa_agent.model_adapter.base import BaseModelAdapter
+from vsa_agent.model_adapter.base import BaseModelAdapter, MODEL_REQUEST_TIMEOUT_SEC
 from vsa_agent.observability.live_trace import write_live_trace_event
 
 
@@ -26,8 +26,9 @@ class OpenAIModelAdapter(BaseModelAdapter):
             api_key=resolved_api_key if resolved_api_key else None,
             temperature=0,
             max_retries=0,
-            http_client=httpx.Client(trust_env=False),
-            http_async_client=httpx.AsyncClient(trust_env=False),
+            timeout=MODEL_REQUEST_TIMEOUT_SEC,
+            http_client=httpx.Client(timeout=MODEL_REQUEST_TIMEOUT_SEC, trust_env=False),
+            http_async_client=httpx.AsyncClient(timeout=MODEL_REQUEST_TIMEOUT_SEC, trust_env=False),
         )
 
     async def invoke(self, messages):

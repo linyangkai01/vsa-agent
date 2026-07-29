@@ -20,7 +20,7 @@ profiles:
       model: qwen-plus
     vlm:
       backend: dashscope
-      model: qwen3-vl-flash-2025-10-15
+      model: qwen-vl-plus
     embedding:
       backend: dashscope
       model: text-embedding-v4
