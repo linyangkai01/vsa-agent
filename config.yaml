@@ -17,7 +17,7 @@ profiles:
   dashscope_remote:
     llm:
       backend: dashscope
-      model: qwen-plus
+      model: qwen-turbo
     vlm:
       backend: dashscope
       model: qwen-vl-plus
@@ -27,7 +27,7 @@ profiles:
   hybrid_dashscope_llm_local_vlm:
     llm:
       backend: dashscope
-      model: qwen-plus
+      model: qwen-turbo
     vlm:
       backend: local_vllm
       model: Qwen3-VL-8B-Instruct

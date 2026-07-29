@@ -47,7 +47,7 @@ def test_dashscope_live_config_defines_non_secret_llm_and_vlm_defaults(monkeypat
     assert runtime.active_profile == "dashscope_remote"
     assert runtime.llm.backend == "dashscope"
     assert runtime.vlm.backend == "dashscope"
-    assert runtime.llm.model == "qwen-plus"
+    assert runtime.llm.model == "qwen-turbo"
     assert runtime.vlm.model == "qwen-vl-plus"
 
 

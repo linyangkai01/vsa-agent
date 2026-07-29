@@ -57,6 +57,7 @@ Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 - `qwen-vl-plus` 隔离 quick run 的 6 个真实链路均完成且无 pipeline 错误，但 evaluator 未把 `woman` 视为 person、未把 `closely/closer` 视为 close，造成两个准确性假阴性。通用 clause 归一化已补充这些明确词形，同时保留 whole-word 与同 clause 否定规则；两条真实回答离线重评均为 100% coverage 且无 forbidden。最终报告仍需在包含该修复的新 commit 和新 stamp 上重新生成。
 - evaluator 修复后的 quick 已 6/6 通过；release 的 18 次真实 Chat 中仅 `ppe-respiratory-controls` 为 1/3，其三次均正确识别 respirator 与 dust control，但两次回答未显式提到佩戴设备的人员。生产 TopAgent 提示现要求画面存在人员时先明确识别 people/workers 及其动作，再给出设备与安全结论；固定 dataset manifest 和 80% 门禁保持不变，仍需新 commit/stamp 全量重跑。
 - 主体明确化提示使 `ppe-respiratory-controls` quick 通过，但 `ppe-noncompliant` 回答使用 `absent/not worn/complete absence`，旧 evaluator 只识别 `missing/not wearing`。通用归一化现统一这些明确词形，并同步归一化 `properly worn` 等否定/合规短语，避免错误放行；manifest 与门禁仍不变。
+- evaluator 修复后的最终候选 quick 6/6 通过，release 前 17 个 attempt 均正常，但最后一次文本 LLM 调用使 `qwen-plus` 返回 `403 AllocationQuota.FreeTierOnly`；所有 6 个资产仍完成 `204/404` 清理。`qwen-vl-plus` 不会生成 TopAgent 所需工具调用，不能兼任 LLM；`qwen-turbo` 已分别通过恰好一次 function-calling 探测和完整真实 API `6 passed`，因此生产 profile 改为 `qwen-turbo` + `qwen-vl-plus`。
 
 Pending final verification:
 
