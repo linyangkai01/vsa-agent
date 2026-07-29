@@ -135,6 +135,8 @@ def test_inject_selected_recorded_video_context_uses_server_resolved_path_and_of
     assert "start_timestamp: 5" in prompt
     assert "end_timestamp: 10" in prompt
     assert "Do not call find_video or list_videos" in prompt
+    assert "explicitly identify the visible person or worker" in prompt
+    assert "describe how they wear or use it" in prompt
 
 
 @pytest.mark.asyncio

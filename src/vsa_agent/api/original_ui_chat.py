@@ -199,7 +199,9 @@ def inject_selected_recorded_video_context(
         lines.append(f"end_timestamp: {_format_offset(selected.end_offset_sec)}")
     lines.append(
         "Use video_understanding with exactly this video_path and time range. "
-        "Do not call find_video or list_videos, and do not substitute another video."
+        "Do not call find_video or list_videos, and do not substitute another video. "
+        "When body-worn PPE is visible, the final answer must explicitly identify the visible person or worker "
+        "and describe how they wear or use it before assessing the equipment."
     )
     return "\n".join(lines)
 
