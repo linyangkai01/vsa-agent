@@ -104,6 +104,7 @@ def test_dashscope_live_config_owns_video_runtime_defaults():
     assert config.runtime.video_path == "/data/project/lyk/video/1597042367-1-192.mp4"
     assert config.runtime.trace_dir == "artifacts/live-video-runs"
     assert config.runtime.qa_query
+    assert "explicitly identify them as people or workers" in config.prompts.default_system
 
 
 def test_dashscope_runner_fails_before_pytest_without_api_key():

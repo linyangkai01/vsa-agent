@@ -2,7 +2,10 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from vsa_agent.config import get_config
-from vsa_agent.model_adapter.base import BaseModelAdapter, MODEL_REQUEST_TIMEOUT_SEC
+from vsa_agent.model_adapter.base import (
+    MODEL_REQUEST_TIMEOUT_SEC,
+    BaseModelAdapter,
+)
 from vsa_agent.observability.live_trace import write_live_trace_event
 
 
