@@ -53,6 +53,7 @@ _CANONICAL_TOKEN_ALIASES = {
     "closely": "close",
     "closer": "close",
     "closest": "close",
+    "work": "working",
 }
 _CANONICAL_TOKEN_PATTERN = re.compile(
     rf"(?<![a-z0-9_])({'|'.join(map(re.escape, _CANONICAL_TOKEN_ALIASES))})(?![a-z0-9_])"

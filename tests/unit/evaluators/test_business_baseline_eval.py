@@ -245,6 +245,18 @@ def test_answer_evaluation_normalizes_missing_and_wearing_word_forms() -> None:
     assert result.passed is True
 
 
+def test_answer_evaluation_normalizes_work_word_forms_and_negation() -> None:
+    result = evaluate_business_answer(
+        "The worker performs manual work; no work is visible in the later frame.",
+        required_concept_groups=(_required("work", ("working",), ("no working",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("work",)
+    assert result.passed is True
+
+
 def test_answer_evaluation_preserves_properly_worn_negation_after_normalization() -> None:
     result = evaluate_business_answer(
         "The required PPE is properly worn.",
