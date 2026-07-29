@@ -47,6 +47,8 @@ _CANONICAL_TOKEN_ALIASES = {
     "men": "people",
     "woman": "person",
     "women": "people",
+    "individual": "person",
+    "individuals": "people",
     "worn": "wearing",
     "closely": "close",
     "closer": "close",

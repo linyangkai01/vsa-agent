@@ -106,6 +106,36 @@ def test_answer_evaluation_preserves_negation_after_word_form_normalization() ->
     assert result.passed is False
 
 
+def test_answer_evaluation_normalizes_individual_nouns() -> None:
+    result = evaluate_business_answer(
+        "The individual lacks gloves; two individuals are using the equipment.",
+        required_concept_groups=(
+            _required("person", ("person",), ("no person",)),
+            _required("people", ("people",), ("no people",)),
+        ),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("person", "people")
+    assert result.passed is True
+
+
+def test_answer_evaluation_preserves_individual_negation() -> None:
+    result = evaluate_business_answer(
+        "No individual is visible; no individuals are present.",
+        required_concept_groups=(
+            _required("person", ("person",), ("no person",)),
+            _required("people", ("people",), ("no people",)),
+        ),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
 def test_answer_evaluation_normalizes_missing_and_wearing_word_forms() -> None:
     result = evaluate_business_answer(
         "PPE is absent and hard hats are not worn by the workers.",
