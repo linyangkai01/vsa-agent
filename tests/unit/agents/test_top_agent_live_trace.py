@@ -82,3 +82,42 @@ async def test_top_agent_logs_tool_call_and_result_artifact(trace_dir, monkeypat
     result_event = events[event_types.index("top_agent.tool.result")]
     assert result_event["payload"]["tool_name"] == "video_understanding"
     assert Path(result_event["payload"]["artifact_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_top_agent_trace_records_filled_video_query(trace_dir, monkeypatch):
+    import vsa_agent.agents.top_agent as top_agent
+
+    trace_path = trace_dir / "trace.jsonl"
+    monkeypatch.setenv("VSA_LIVE_TRACE_PATH", str(trace_path))
+    monkeypatch.setenv("VSA_LIVE_ARTIFACT_DIR", str(trace_dir))
+
+    async def fake_tool(video_path: str, query: str):
+        return f"{query}: {video_path}"
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get_all",
+        lambda: {"video_understanding": fake_tool},
+    )
+    monkeypatch.setattr(top_agent, "get_stream_writer", lambda: lambda chunk: None)
+    state = AgentState(
+        current_message=HumanMessage(content="Describe the routine work visible in the clip."),
+        agent_scratchpad=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "video_understanding",
+                        "args": {"video_path": "video.mp4"},
+                        "id": "call-1",
+                    }
+                ],
+            )
+        ],
+    )
+
+    await top_agent.tool_node(state, {})
+
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    call_event = next(event for event in events if event["event_type"] == "top_agent.tool.call")
+    assert call_event["payload"]["tool_args"]["query"] == "Describe the routine work visible in the clip."

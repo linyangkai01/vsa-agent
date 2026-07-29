@@ -371,6 +371,22 @@ def _tool_cache_key(name: str, args: dict) -> str:
     return f"{name}:{args_text}"
 
 
+def _normalize_tool_args(state: AgentState, name: str, args: dict) -> dict:
+    """Fill model-omitted arguments that are already present in agent state."""
+    normalized = dict(args)
+    if name not in _VIDEO_RESULT_TOOL_NAMES:
+        return normalized
+
+    query = normalized.get("query")
+    if isinstance(query, str) and query.strip():
+        return normalized
+
+    current_content = getattr(state.current_message, "content", "")
+    if isinstance(current_content, str) and current_content.strip():
+        normalized["query"] = current_content.strip()
+    return normalized
+
+
 def _find_cached_tool_result(state: AgentState, name: str, args: dict) -> str | None:
     target_key = _tool_cache_key(name, args)
     result_by_call_id = {
@@ -461,7 +477,9 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
         return state
 
     for tc in last_msg.tool_calls:
-        name, args, call_id = tc["name"], tc["args"], tc["id"]
+        name, call_id = tc["name"], tc["id"]
+        args = _normalize_tool_args(state, name, tc["args"])
+        tc["args"] = args
         writer(
             AgentMessageChunk(
                 type=AgentMessageChunkType.TOOL_CALL,

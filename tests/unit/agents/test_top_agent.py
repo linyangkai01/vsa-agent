@@ -1,5 +1,5 @@
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunkType, AgentState
 from vsa_agent.agents.top_agent import (
@@ -189,6 +189,76 @@ async def test_tool_node_reuses_cached_result_for_duplicate_tool_call(monkeypatc
     assert isinstance(state.agent_scratchpad[-1], ToolMessage)
     assert state.agent_scratchpad[-1].tool_call_id == "call-2"
     assert state.agent_scratchpad[-1].content == "cached safety analysis"
+
+
+@pytest.mark.asyncio
+async def test_tool_node_fills_missing_video_query_from_current_message(monkeypatch):
+    import vsa_agent.agents.top_agent as top_agent
+
+    captured = {}
+
+    async def fake_tool(video_path: str, query: str):
+        captured.update(video_path=video_path, query=query)
+        return "routine construction activity"
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get_all",
+        lambda: {"video_understanding": fake_tool},
+    )
+    monkeypatch.setattr(top_agent, "get_stream_writer", lambda: lambda chunk: None)
+
+    tool_call = {"name": "video_understanding", "args": {"video_path": "video.mp4"}, "id": "call-1"}
+    state = AgentState(
+        current_message=HumanMessage(content="Describe the routine work visible in the clip."),
+        agent_scratchpad=[AIMessage(content="", tool_calls=[tool_call])],
+    )
+
+    await top_agent.tool_node(state, {})
+
+    assert captured == {
+        "video_path": "video.mp4",
+        "query": "Describe the routine work visible in the clip.",
+    }
+    assert state.agent_scratchpad[0].tool_calls[0]["args"]["query"] == (
+        "Describe the routine work visible in the clip."
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_node_keeps_model_supplied_video_query(monkeypatch):
+    import vsa_agent.agents.top_agent as top_agent
+
+    captured = {}
+
+    async def fake_tool(video_path: str, query: str):
+        captured.update(video_path=video_path, query=query)
+        return "safety analysis"
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get_all",
+        lambda: {"video_understanding": fake_tool},
+    )
+    monkeypatch.setattr(top_agent, "get_stream_writer", lambda: lambda chunk: None)
+
+    state = AgentState(
+        current_message=HumanMessage(content="Describe everything."),
+        agent_scratchpad=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "video_understanding",
+                        "args": {"video_path": "video.mp4", "query": "Identify PPE violations."},
+                        "id": "call-1",
+                    }
+                ],
+            )
+        ],
+    )
+
+    await top_agent.tool_node(state, {})
+
+    assert captured["query"] == "Identify PPE violations."
 
 
 @pytest.mark.asyncio
