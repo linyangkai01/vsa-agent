@@ -134,14 +134,16 @@ and FastAPI API process.
 - **AND** the search route returns the Elasticsearch result rather than an in-memory fallback
 - **AND** committed and production-style configurations keep `search.force_mock_embedding` disabled by default
 
-#### Scenario: Interactive runtime stack reclaims requested ports
+#### Scenario: Interactive runtime stack safely reclaims project-owned ports
 
 - **GIVEN** a process occupies the selected API, UI, or ES port
 - **WHEN** the all-stack launcher starts
-- **THEN** it logs the target port, PID, and command line before terminating the occupying process
+- **THEN** it MUST terminate the occupying process only when the previous project manifest proves PID, kernel start tick, boot ID, UID, executable, working directory, command fingerprint, SID and PGID ownership
+- **AND** a Compose-managed Elasticsearch occupant may instead be reclaimed only when its Compose project, service, container ID and project labels all match the configured project identity
+- **AND** same UID, process name, repository path or target-port ownership alone MUST NOT authorize termination
+- **AND** it logs the target port and a non-sensitive process summary before reclaiming a proven project process
 - **AND** it waits for the selected port to be released before starting the replacement service
-- **AND** if the port cannot be released, it fails without starting a partial stack
-- **AND** it does not terminate processes that do not occupy a selected target port
+- **AND** if ownership cannot be proven or the port cannot be released, it fails without terminating the occupant or starting a partial stack
 
 ### Requirement: Elasticsearch video segment search retrieval
 

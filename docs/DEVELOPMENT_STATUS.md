@@ -1,17 +1,28 @@
 # Development Status
 
-Last updated: 2026-07-29
+Last updated: 2026-07-30
 
 ## Current State
 
-- Active development track: real business video regression manifest schema v2 hardening and final Ubuntu acceptance.
-- Integration target: local and remote `master`; the manifest schema v2 / dataset `1.1.0` implementation is complete in the current change set, while final verification and server synchronization remain pending.
-- Phase: Ubuntu validation has already established the production recorded-video and original-UI path on earlier dataset revisions. Those runs are historical evidence only; final dataset `1.1.0` quick, release, full-source and real original-UI runs are all pending and must be repeated before archive.
-- Goal: deliver original-UI recorded-video upload, durable analysis, Elasticsearch search, selected-video understanding Q&A, thumbnail and time-range playback without NVIDIA runtime services.
-- Confirmed first-stage runtime: single Ubuntu server, local file storage, SQLite WAL jobs, independent Worker, OpenAI-compatible VLM/embedding, fixed-duration replaceable segmentation, and one stack launcher.
-- Out of scope for this change: RTSP, alerts, Kafka/MDX, multi-node deployment, MinIO/S3, Redis/Celery and full VST emulation.
+- Active development track: local vLLM video privacy, resource admission and full remote-provider egress control.
+- Integration target: local and remote `master`; the Chinese design is accepted and implementation planning is the next gate. No local-vLLM implementation is claimed complete yet.
+- Phase: the existing real recorded-video and original-UI business path is proven. The next change moves visual understanding to an official local AWQ model while retaining DashScope text LLM and embedding behind a strict privacy gateway.
+- Goal: keep video pixels and identifying metadata on the Ubuntu server, reject unsafe startup when GPU/RAM/disk/process ownership is insufficient, and preserve the complete original-UI upload, processing, search, playback and Q&A flow.
+- Confirmed first-stage runtime: one RTX 4090 D, `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` on local vLLM, single VLM concurrency, DashScope LLM/embedding, local ES/SQLite/files and one supervised stack launcher.
+- Out of scope for this change: multi-GPU, remote visual fallback, automatic model downgrade, GPU process preemption, public-network serving and administrator-only installation.
 
 ## Latest Accepted Design
+
+`local-vllm-video-privacy`
+
+- Local visual understanding uses the official `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` revision `536a35794df8831aa814970ee8f89eff577e7718`; bootstrap and daily offline startup are separate.
+- The RTX 4090 D admission floor is dynamic: with `gpu_memory_utilization=0.70`, the initial engine budget is 17,195 MiB and required free VRAM is 21,291 MiB including a 4 GiB reserve. Calibration may raise but never lower the floor.
+- The launcher acquires a single-instance lock before any mutation, only reclaims processes proven by kernel start tick, boot ID and process-group identity, and rejects unknown GPU or port occupants.
+- All DashScope LLM/embedding calls pass through one `RemoteProviderGateway` using closed `RemoteSafe*` DTOs. Raw VLM descriptions, paths, filenames, sensor IDs, absolute timestamps and local search results cannot cross the boundary.
+- Privacy projection is persistent and versioned; segment-level checkpoints support safe recovery without promising impossible provider exactly-once semantics.
+- Accepted Chinese specification: `docs/specs/local-vllm-video-privacy/spec.md`.
+
+## Previous Accepted Design
 
 `real-business-video-regression-baseline`
 
