@@ -45,7 +45,8 @@ async def test_top_agent_logs_agent_request_response_and_final(trace_dir, monkey
     assert "top_agent.agent.request" in event_types
     assert "top_agent.agent.response" in event_types
     assert "top_agent.final" in event_types
-    assert events[event_types.index("top_agent.final")]["payload"]["final_answer"] == "final answer"
+    assert "final_answer" not in events[event_types.index("top_agent.final")]["payload"]
+    assert "final answer" not in trace_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -81,7 +82,8 @@ async def test_top_agent_logs_tool_call_and_result_artifact(trace_dir, monkeypat
     assert "top_agent.tool.result" in event_types
     result_event = events[event_types.index("top_agent.tool.result")]
     assert result_event["payload"]["tool_name"] == "video_understanding"
-    assert Path(result_event["payload"]["artifact_path"]).exists()
+    assert result_event["payload"]["result_length"] == len("tool output")
+    assert "artifact_path" not in result_event["payload"]
 
 
 @pytest.mark.asyncio
@@ -120,4 +122,58 @@ async def test_top_agent_trace_records_filled_video_query(trace_dir, monkeypatch
 
     events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     call_event = next(event for event in events if event["event_type"] == "top_agent.tool.call")
-    assert call_event["payload"]["tool_args"]["query"] == "Describe the routine work visible in the clip."
+    assert "tool_args" not in call_event["payload"]
+    assert "Describe the routine work visible in the clip." not in trace_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_tool_node_injects_local_video_context_without_tracing_it(trace_dir, monkeypatch):
+    import vsa_agent.agents.top_agent as top_agent
+
+    trace_path = trace_dir / "trace.jsonl"
+    monkeypatch.setenv("VSA_LIVE_TRACE_PATH", str(trace_path))
+    monkeypatch.setenv("VSA_LIVE_ARTIFACT_DIR", str(trace_dir))
+    captured = {}
+
+    async def fake_tool(video_path: str, query: str, start_timestamp: float, end_timestamp: float):
+        captured.update(
+            video_path=video_path,
+            query=query,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        return "local evidence canary"
+
+    monkeypatch.setattr(
+        "vsa_agent.registry.ToolRegistry.get_all",
+        lambda: {"video_understanding": fake_tool},
+    )
+    monkeypatch.setattr(top_agent, "get_stream_writer", lambda: lambda chunk: None)
+    state = AgentState(
+        current_message=HumanMessage(content="What happened?"),
+        local_video_context={
+            "video_path": "/private/video-canary.mp4",
+            "start_timestamp": 1.0,
+            "end_timestamp": 2.0,
+        },
+        agent_scratchpad=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "video_understanding", "args": {}, "id": "call-local"}],
+            )
+        ],
+    )
+
+    await top_agent.tool_node(state, {})
+
+    assert captured == {
+        "video_path": "/private/video-canary.mp4",
+        "query": "What happened?",
+        "start_timestamp": 1.0,
+        "end_timestamp": 2.0,
+    }
+    assert state.final_answer == "local evidence canary"
+    assert not (trace_dir / "tool-results" / "call-local-video_understanding.txt").exists()
+    trace_text = trace_path.read_text(encoding="utf-8")
+    assert "/private/video-canary.mp4" not in trace_text
+    assert "local evidence canary" not in trace_text

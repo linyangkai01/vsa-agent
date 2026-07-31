@@ -19,7 +19,8 @@ from vsa_agent.recorded_video.assets import LocalAssetStore, raise_if_disk_full
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Asset, Segment
 
-_MAX_REPRESENTATIVE_FRAMES = 16
+_MAX_REPRESENTATIVE_FRAMES = 24
+_DEFAULT_MAX_FRAME_PIXELS = 448 * 448
 _DEFAULT_FFMPEG_TIMEOUT_SEC = 3_600
 _PROCESS_TERMINATION_TIMEOUT_SEC = 5
 _MP4_FORMAT_NAMES = frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
@@ -59,17 +60,21 @@ class MediaProcessor:
         ffmpeg_path: str = "ffmpeg",
         timeout_sec: float = 60,
         ffmpeg_timeout_sec: float = _DEFAULT_FFMPEG_TIMEOUT_SEC,
+        max_frame_pixels: int = _DEFAULT_MAX_FRAME_PIXELS,
         runner: CommandRunner | None = None,
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
         if ffmpeg_timeout_sec <= 0:
             raise ValueError("ffmpeg_timeout_sec must be positive")
+        if max_frame_pixels <= 0:
+            raise ValueError("max_frame_pixels must be positive")
         self._store = store
         self._ffprobe_path = ffprobe_path
         self._ffmpeg_path = ffmpeg_path
         self._timeout_sec = timeout_sec
         self._ffmpeg_timeout_sec = ffmpeg_timeout_sec
+        self._max_frame_edge = math.isqrt(max_frame_pixels)
         self._runner = runner
         self._playback_encoder: str | None = None
         self._playback_encoder_lock = asyncio.Lock()
@@ -135,6 +140,8 @@ class MediaProcessor:
                         str(source),
                         "-frames:v",
                         "1",
+                        "-vf",
+                        (f"scale={self._max_frame_edge}:{self._max_frame_edge}:force_original_aspect_ratio=decrease"),
                         "-q:v",
                         "2",
                         "-f",

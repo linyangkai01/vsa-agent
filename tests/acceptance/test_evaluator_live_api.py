@@ -82,11 +82,7 @@ def test_format_live_search_diagnostics_includes_key_fields():
 
 
 @pytest.mark.anyio
-async def test_live_api_understanding_quality():
-    if not should_run_live_api_validation():
-        pytest.skip("LIVE_API_KEY or OPENAI_API_KEY not configured for live API validation")
-
-    from vsa_agent.model_adapter.openai_adapter import OpenAIModelAdapter
+async def test_local_understanding_summary_quality():
     from vsa_agent.tools.vss_summarize import summarize_understanding_result
 
     actual = UnderstandingResult(
@@ -96,12 +92,7 @@ async def test_live_api_understanding_quality():
         chunks=[],
         events=[],
     )
-    settings = resolve_live_api_settings()
-    summary = await summarize_understanding_result(
-        actual,
-        "what happened",
-        model_adapter=OpenAIModelAdapter(**settings),
-    )
+    summary = await summarize_understanding_result(actual, "what happened")
     result = evaluate_understanding_result(
         summary.structured_output.model_copy(update={"summary_text": summary.text_output}),
         expected_summary_terms=["person", "forklift"],

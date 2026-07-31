@@ -9,6 +9,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from vsa_agent.privacy.projection import project_ingest_event
+from vsa_agent.privacy.schemas import RemoteSafeIngestEvent, canonical_embedding_text
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Segment
 from vsa_agent.recorded_video.providers import OpenAIEmbeddingProvider, OpenAIVisionProvider
@@ -30,6 +32,17 @@ def _segment() -> Segment:
 
 def _client(handler: httpx.AsyncBaseTransport | httpx.MockTransport) -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url="https://provider.example/v1", transport=handler)
+
+
+def _safe_event(description: str = "forklift") -> RemoteSafeIngestEvent:
+    return project_ingest_event(
+        description=description,
+        tags=(),
+        segment_id="segment-1",
+        job_id="job-1",
+        start_offset_ms=0,
+        end_offset_ms=1_000,
+    )
 
 
 @pytest.mark.asyncio
@@ -101,9 +114,14 @@ async def test_vision_rejects_invalid_structured_output(content: str, tmp_path: 
 
 @pytest.mark.asyncio
 async def test_embedding_returns_finite_vector_with_expected_dimension() -> None:
+    event = _safe_event()
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/embeddings"
-        assert json.loads(request.content) == {"model": "embedding-model", "input": "forklift"}
+        assert json.loads(request.content) == {
+            "model": "embedding-model",
+            "input": canonical_embedding_text(event),
+        }
         return httpx.Response(200, json={"data": [{"embedding": [0.25, -0.5]}]})
 
     async with _client(httpx.MockTransport(handler)) as client:
@@ -114,7 +132,7 @@ async def test_embedding_returns_finite_vector_with_expected_dimension() -> None
             client=client,
         )
         result = await provider.embed(
-            "forklift",
+            event,
             expected_dims=2,
             asset_id="asset-1",
             job_id="job-1",
@@ -135,7 +153,7 @@ async def test_embedding_dimension_mismatch_is_permanent() -> None:
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=4,
                 asset_id="asset-1",
                 job_id="job-1",
@@ -171,7 +189,7 @@ async def test_embedding_rejects_invalid_or_non_finite_vectors(response_content:
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=1,
                 asset_id="asset-1",
                 job_id="job-1",
@@ -203,7 +221,7 @@ async def test_provider_http_transient_failures_are_retryable(status: int, code:
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=2,
                 asset_id="asset-1",
                 job_id="job-1",
@@ -236,7 +254,7 @@ async def test_provider_quota_403_is_classified_permanently_without_leaking_body
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=2,
                 asset_id="asset-1",
                 job_id="job-1",
@@ -272,7 +290,7 @@ async def test_provider_transport_failures_are_retryable(
         with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
             with pytest.raises(RecordedVideoError) as caught:
                 await provider.embed(
-                    "forklift",
+                    _safe_event(),
                     expected_dims=2,
                     asset_id="asset-1",
                     job_id="job-1",
@@ -298,7 +316,7 @@ async def test_non_rate_limit_4xx_is_permanent_configuration_error() -> None:
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=2,
                 asset_id="asset-1",
                 job_id="job-1",
@@ -337,7 +355,7 @@ async def test_provider_semaphore_bounds_concurrent_requests() -> None:
         tasks = [
             asyncio.create_task(
                 provider.embed(
-                    str(index),
+                    _safe_event(str(index)),
                     expected_dims=1,
                     asset_id="asset-1",
                     job_id="job-1",
@@ -400,7 +418,7 @@ async def test_embedding_logs_required_asset_and_job_without_sensitive_data(
         )
         with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
             await provider.embed(
-                "sensitive-embedding-text",
+                _safe_event("sensitive-embedding-text"),
                 expected_dims=1,
                 asset_id="  asset-embedding  ",
                 job_id="  job-embedding  ",
@@ -489,7 +507,7 @@ async def test_embedding_rejects_invalid_expected_dimensions_before_request(expe
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=expected_dims,  # type: ignore[arg-type]
                 asset_id="asset-1",
                 job_id="job-1",
@@ -522,7 +540,7 @@ async def test_embedding_rejects_blank_context_before_request(asset_id: str, job
         )
         with pytest.raises(RecordedVideoError) as caught:
             await provider.embed(
-                "forklift",
+                _safe_event(),
                 expected_dims=1,
                 asset_id=asset_id,
                 job_id=job_id,
@@ -563,7 +581,7 @@ async def test_embedding_rejects_nonstring_and_control_context_before_request_or
         with caplog.at_level(logging.INFO, logger="vsa_agent.recorded_video.providers"):
             with pytest.raises(RecordedVideoError) as caught:
                 await provider.embed(
-                    "forklift",
+                    _safe_event(),
                     expected_dims=1,
                     asset_id=context["asset_id"],  # type: ignore[arg-type]
                     job_id=context["job_id"],  # type: ignore[arg-type]
@@ -699,10 +717,39 @@ async def test_provider_normalizes_trailing_base_path_slashes() -> None:
             client=client,
         )
         await provider.embed(
-            "forklift",
+            _safe_event(),
             expected_dims=1,
             asset_id="asset-1",
             job_id="job-1",
         )
 
     assert captured_path == "/v1/embeddings"
+
+
+@pytest.mark.asyncio
+async def test_embedding_rejects_free_text_before_request() -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://provider.example/v1",
+            api_key=None,
+            model="embedding-model",
+            client=client,
+        )
+        with pytest.raises(RecordedVideoError, match="RemoteSafe DTO") as caught:
+            await provider.embed(
+                "sensitive free text",  # type: ignore[arg-type]
+                expected_dims=1,
+                asset_id="asset-1",
+                job_id="job-1",
+            )
+
+    assert caught.value.code is ErrorCode.CONFIGURATION
+    assert caught.value.retryable is False
+    assert request_count == 0

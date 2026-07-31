@@ -49,6 +49,7 @@ class AgentState(BaseModel):
     conversation_history: list[BaseMessage] = Field(default_factory=list)
     iteration_count: int = Field(default=0)
     final_answer: str = Field(default="")
+    local_video_context: dict[str, object] = Field(default_factory=dict)
 
     # --- Reserved for future features ---
     plan: str = Field(default="")

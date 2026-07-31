@@ -37,6 +37,7 @@ def build_recorded_video_worker(config: AppConfig) -> RecordedVideoWorker:
         asset_store,
         ffmpeg_path=recorded_video.ffmpeg_path,
         ffprobe_path=recorded_video.ffprobe_path,
+        max_frame_pixels=config.video_understanding.max_pixels,
     )
     segmenter = FixedDurationSegmenter(recorded_video.segment_duration_sec)
     vision = OpenAIVisionProvider(

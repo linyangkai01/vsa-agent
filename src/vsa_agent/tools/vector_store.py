@@ -4,6 +4,7 @@ Provides placeholder embed and attribute stores for development.
 In production, these would be backed by Elasticsearch (see NVIDIA original).
 """
 
+import hashlib
 import logging
 
 from vsa_agent.tools.search import SearchOutput
@@ -19,12 +20,21 @@ class InMemoryVectorStore:
 
     async def search(self, query: str, top_k: int = 10) -> SearchOutput:
         """Search by text query (semantic embed search)."""
-        logger.info("InMemoryVectorStore.search: query=%s, top_k=%d (empty store)", query[:80], top_k)
+        logger.info(
+            "InMemoryVectorStore.search: query_sha256=%s query_length=%d top_k=%d (empty store)",
+            hashlib.sha256(query.encode()).hexdigest(),
+            len(query),
+            top_k,
+        )
         return SearchOutput(data=[])
 
     async def search_by_attributes(self, attributes: list[str], top_k: int = 5) -> SearchOutput:
         """Search by visual attributes."""
-        logger.info("InMemoryVectorStore.search_by_attributes: attrs=%s, top_k=%d (empty store)", attributes, top_k)
+        logger.info(
+            "InMemoryVectorStore.search_by_attributes: attribute_count=%d top_k=%d (empty store)",
+            len(attributes),
+            top_k,
+        )
         return SearchOutput(data=[])
 
 

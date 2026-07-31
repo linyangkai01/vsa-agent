@@ -1,7 +1,5 @@
 """Summary layer for dual-track video understanding output."""
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from vsa_agent.data_models.understanding import DetectedEvent, SummaryResult, UnderstandingResult
 from vsa_agent.registry import register_tool
 from vsa_agent.video_analytics.nvschema import Incident
@@ -121,43 +119,19 @@ async def summarize_search_incidents(incidents: list[Incident], query: str) -> s
 async def summarize_understanding_result(
     result: UnderstandingResult,
     query: str,
-    model_adapter=None,
 ) -> SummaryResult:
-    """Generate dual-track output from a structured understanding result."""
-    if model_adapter is not None:
-        prompt_body = (
-            _risk_digest_to_text(result)
-            or result.summary_text
-            or _events_to_text(result.events)
-            or "No notable events detected."
-        )
-        response = await model_adapter.invoke(
-            [
-                SystemMessage(content="You summarize structured video understanding results into concise plain text."),
-                HumanMessage(
-                    content=(
-                        f"User query: {query}\n\n"
-                        f"Structured summary:\n{prompt_body}\n\n"
-                        "Write a concise natural-language answer."
-                    )
-                ),
-            ]
-        )
-        text_output = str(response.content).strip() if response.content is not None else ""
+    """Generate local dual-track output without crossing the remote-provider boundary."""
+    risk_digest_text = _risk_digest_to_text(result)
+    if risk_digest_text:
+        text_output = risk_digest_text
+    elif result.summary_text:
+        text_output = result.summary_text
+    elif result.events:
+        text_output = _events_to_text(result.events)
         if not text_output:
-            text_output = prompt_body
-    else:
-        risk_digest_text = _risk_digest_to_text(result)
-        if risk_digest_text:
-            text_output = risk_digest_text
-        elif result.summary_text:
-            text_output = result.summary_text
-        elif result.events:
-            text_output = _events_to_text(result.events)
-            if not text_output:
-                text_output = "No notable events detected."
-        else:
             text_output = "No notable events detected."
+    else:
+        text_output = "No notable events detected."
     return SummaryResult(
         query=query,
         text_output=text_output,

@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, Field
@@ -92,6 +93,31 @@ class RuntimeConfig(BaseModel):
     qa_query: str = "Describe what happened in this video and identify any safety risks."
 
 
+class LocalVLLMRuntimeConfig(BaseModel):
+    """Pinned local vLLM deployment and capacity contract."""
+
+    enabled: bool = False
+    conda_env: str = "vsa-vllm"
+    model_repository: str = "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"
+    model_revision: str = "536a35794df8831aa814970ee8f89eff577e7718"
+    served_model_name: str = "qwen2.5-vl-local"
+    model_root: Path = Path("/data/project/lyk/models/vsa-agent")
+    host: Literal["127.0.0.1", "localhost", "::1"] = "127.0.0.1"
+    port: int = Field(8001, ge=1, le=65535)
+    gpu_memory_utilization: float = Field(0.70, gt=0.0, lt=1.0)
+    gpu_safety_reserve_mib: int = Field(4096, ge=1024)
+    min_available_ram_gib: int = Field(24, ge=1)
+    warn_available_ram_gib: int = Field(32, ge=1)
+    max_model_len: int = Field(16384, ge=1024)
+    max_num_seqs: int = Field(1, ge=1)
+    max_num_batched_tokens: int = Field(16384, ge=1024)
+    max_images: int = Field(24, ge=1, le=24)
+    min_pixels: int = Field(3136, ge=1)
+    max_pixels: int = Field(200704, ge=3136)
+    dtype: Literal["half"] = "half"
+    quantization: Literal["awq"] = "awq"
+
+
 class ResolvedRoleConfig(BaseModel):
     role: str
     backend: str
@@ -157,8 +183,9 @@ class VideoUnderstandingConfig(BaseModel):
     """Configuration for short-video understanding."""
 
     max_fps: float = 2.0
-    min_pixels: int = 224 * 224
-    max_pixels: int = 1280 * 720
+    max_frames: int = Field(24, ge=1, le=24)
+    min_pixels: int = Field(56 * 56, ge=1)
+    max_pixels: int = Field(448 * 448, ge=56 * 56)
     reasoning_effort: str = "medium"
     filter_thinking: bool = True
     max_retries: int = 3
@@ -207,7 +234,7 @@ class RecordedVideoConfig(BaseModel):
     max_upload_bytes: int = Field(10_737_418_240, gt=0)
     allowed_extensions: set[str] = Field(default_factory=lambda: {"mp4", "mkv"})
     segment_duration_sec: int = Field(30, gt=0)
-    representative_frames: int = Field(4, ge=1, le=16)
+    representative_frames: int = Field(4, ge=1, le=24)
     worker_concurrency: int = Field(3, ge=1, le=5)
     provider_concurrency: int = Field(1, ge=1, le=5)
     lease_sec: int = Field(120, gt=0)
@@ -221,6 +248,7 @@ class AppConfig(BaseModel):
     backends: dict[str, BackendConfig] = Field(default_factory=dict)
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
     runtime: RuntimeConfig = RuntimeConfig()
+    local_vllm: LocalVLLMRuntimeConfig = LocalVLLMRuntimeConfig()
     model: ModelConfig = ModelConfig()
     tools: ToolsConfig = ToolsConfig()
     agent: AgentConfig = AgentConfig()
@@ -385,6 +413,50 @@ def _validate_role_bindings(
     return issues
 
 
+def _validate_local_vllm_runtime(
+    config: AppConfig,
+    backends: dict[str, BackendConfig],
+    profile: ProfileConfig,
+) -> list[ConfigIssue]:
+    local = config.local_vllm
+    if not local.enabled:
+        return []
+
+    issues: list[ConfigIssue] = []
+    binding = profile.vlm
+    backend = backends.get(binding.backend)
+    if backend is None:
+        return issues
+    if backend.provider != "vllm":
+        issues.append(ConfigIssue(message="local_vllm requires the active VLM role to use provider 'vllm'"))
+        return issues
+    if backend.test_only:
+        issues.append(ConfigIssue(message="local_vllm VLM backend cannot be test_only"))
+
+    parsed = urlsplit(backend.base_url)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        issues.append(ConfigIssue(message="local_vllm VLM backend must use an HTTP loopback base_url"))
+    try:
+        backend_port = parsed.port
+    except ValueError:
+        backend_port = None
+    if backend_port != local.port:
+        issues.append(ConfigIssue(message=f"local_vllm VLM backend must use configured port {local.port}"))
+    if local.port == config.server.port:
+        issues.append(ConfigIssue(message="local_vllm port must not conflict with the business API port"))
+    if binding.model != local.served_model_name:
+        issues.append(
+            ConfigIssue(message=(f"local_vllm VLM model must match served_model_name '{local.served_model_name}'"))
+        )
+    if config.video_understanding.max_frames > local.max_images:
+        issues.append(ConfigIssue(message="video_understanding.max_frames exceeds local_vllm.max_images"))
+    if config.video_understanding.max_pixels > local.max_pixels:
+        issues.append(ConfigIssue(message="video_understanding.max_pixels exceeds local_vllm.max_pixels"))
+    if config.recorded_video.representative_frames > local.max_images:
+        issues.append(ConfigIssue(message="recorded_video.representative_frames exceeds local_vllm.max_images"))
+    return issues
+
+
 def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostics:
     app_config = config or get_config()
     backends, profiles, active_profile = _runtime_sources(app_config)
@@ -394,16 +466,16 @@ def validate_runtime_config(config: AppConfig | None = None) -> ConfigDiagnostic
         )
 
     profile = profiles[active_profile]
-    return ConfigDiagnostics(
-        issues=_validate_role_bindings(
-            backends,
-            (
-                ("llm", profile.llm),
-                ("vlm", profile.vlm),
-                ("embedding", profile.embedding),
-            ),
-        )
+    issues = _validate_role_bindings(
+        backends,
+        (
+            ("llm", profile.llm),
+            ("vlm", profile.vlm),
+            ("embedding", profile.embedding),
+        ),
     )
+    issues.extend(_validate_local_vllm_runtime(app_config, backends, profile))
+    return ConfigDiagnostics(issues=issues)
 
 
 def validate_recorded_video_runtime(config: AppConfig) -> ConfigDiagnostics:
@@ -431,4 +503,5 @@ def validate_recorded_video_runtime(config: AppConfig) -> ConfigDiagnostics:
             require_api_key_env=True,
         )
     )
+    issues.extend(_validate_local_vllm_runtime(config, backends, profile))
     return ConfigDiagnostics(issues=issues)

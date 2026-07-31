@@ -15,6 +15,12 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from vsa_agent.privacy.projection import project_ingest_event
+from vsa_agent.privacy.schemas import (
+    CANONICAL_MAPPING_VERSION,
+    PRIVACY_POLICY_VERSION,
+    RemoteSafeIngestEvent,
+)
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.media import MediaProbe
 from vsa_agent.recorded_video.models import Asset, Job, JobStage, JobStatus, JobStep, Segment, segment_id
@@ -471,6 +477,14 @@ class RecordedVideoPipeline:
                     "segment_id": segment.segment_id,
                     "description": description.description,
                     "tags": list(description.tags),
+                    "remote_projection": project_ingest_event(
+                        description=description.description,
+                        tags=description.tags,
+                        segment_id=segment.segment_id,
+                        job_id=job.job_id,
+                        start_offset_ms=segment.start_offset_ms,
+                        end_offset_ms=segment.end_offset_ms,
+                    ).model_dump(mode="json"),
                 }
             )
         return {"artifacts": {}, "segments": outputs}
@@ -478,10 +492,14 @@ class RecordedVideoPipeline:
     async def _embed(self, job: Job, analysis: Mapping[str, Any]) -> dict[str, Any]:
         outputs = []
         for item in analysis["segments"]:
+            try:
+                remote_event = RemoteSafeIngestEvent.model_validate(item["remote_projection"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise _embedding_error("privacy projection is missing or invalid") from error
             vector = await self._fenced_call(
                 job,
                 lambda item=item: self._embedding.embed(
-                    item["description"],
+                    remote_event,
                     expected_dims=self._expected_embedding_dims,
                     asset_id=job.asset_id,
                     job_id=job.job_id,
@@ -645,6 +663,10 @@ class RecordedVideoPipeline:
                 or any(not isinstance(tag, str) for tag in item["tags"])
             ):
                 raise _pipeline_error("analysis manifest is incomplete")
+            try:
+                RemoteSafeIngestEvent.model_validate(item.get("remote_projection"))
+            except (TypeError, ValueError):
+                raise _pipeline_error("analysis privacy projection is incomplete") from None
 
     def _validate_embeddings(self, output: Mapping[str, Any], segments: Sequence[Segment]) -> None:
         items = output.get("segments")
@@ -789,6 +811,8 @@ class RecordedVideoPipeline:
             "representative_frames": self._representative_frames,
             "expected_embedding_dims": self._expected_embedding_dims,
             "prompt_version": self._prompt_version,
+            "privacy_policy_version": PRIVACY_POLICY_VERSION,
+            "canonical_mapping_version": CANONICAL_MAPPING_VERSION,
             "segmenter": {
                 "version": self._segmenter_version,
                 "config": dict(self._segmenter.checkpoint_identity),

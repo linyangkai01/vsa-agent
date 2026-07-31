@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 API_PORT=8000
 ES_PORT=9200
@@ -19,6 +20,13 @@ SECRETS_FILE="${VSA_SECRETS_FILE:-${HOME:-}/.config/vsa-agent/secrets.env}"
 SECRETS_FILE_EXPLICIT=0
 PORT_TERMINATION_GRACE_SEC=5
 PROCESS_SHUTDOWN_GRACE_TICKS=50
+VLLM_SHUTDOWN_GRACE_TICKS=600
+LOCAL_VLLM_MODE="auto"
+LOCAL_VLLM_GPU_INDEX=0
+LOCAL_VLLM_TIMEOUT_SEC=600
+LOCAL_VLLM_PORT=8001
+LOCAL_VLLM_SERVED_MODEL="qwen2.5-vl-local"
+LOCAL_VLLM_RUNTIME_ENV="${VSA_LOCAL_VLLM_RUNTIME_ENV:-${HOME:-}/.local/share/vsa-agent/local-vllm/runtime-env.sh}"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +47,9 @@ Options:
   --conda-env NAME           Run Python through conda run -n NAME.
   --secrets-file PATH        Private KEY=VALUE file. Default: ~/.config/vsa-agent/secrets.env
   --timeout-sec SECONDS      Startup timeout. Default: 90
+  --local-vllm MODE          Local VLM mode: auto, required, or disabled. Default: auto
+  --local-vllm-gpu INDEX     GPU index used by local vLLM. Default: 0
+  --local-vllm-timeout-sec S Local vLLM startup timeout. Default: 600
   --stop-elasticsearch       Stop Elasticsearch on exit only when this run started it.
   -ApiPort PORT              PowerShell-style alias for --api-port.
   -EsPort PORT               PowerShell-style alias for --es-port.
@@ -71,11 +82,19 @@ while [[ $# -gt 0 ]]; do
     --conda-env|-CondaEnv) CONDA_ENV="$2"; shift 2 ;;
     --secrets-file|-SecretsFile) SECRETS_FILE="$2"; SECRETS_FILE_EXPLICIT=1; shift 2 ;;
     --timeout-sec|-TimeoutSec) TIMEOUT_SEC="$2"; shift 2 ;;
+    --local-vllm|-LocalVllm) LOCAL_VLLM_MODE="$2"; shift 2 ;;
+    --local-vllm-gpu|-LocalVllmGpu) LOCAL_VLLM_GPU_INDEX="$2"; shift 2 ;;
+    --local-vllm-timeout-sec|-LocalVllmTimeoutSec) LOCAL_VLLM_TIMEOUT_SEC="$2"; shift 2 ;;
     --stop-elasticsearch|-StopElasticsearch) STOP_ELASTICSEARCH=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$LOCAL_VLLM_MODE" != "auto" && "$LOCAL_VLLM_MODE" != "required" && "$LOCAL_VLLM_MODE" != "disabled" ]]; then
+  echo "ERROR: --local-vllm must be auto, required, or disabled" >&2
+  exit 2
+fi
 
 if [[ "$KEEP_RUNNING" == "1" && "$SMOKE_ONLY" == "1" ]]; then
   echo "ERROR: --keep-running cannot be combined with --smoke-only" >&2
@@ -95,6 +114,43 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_LOG_SUPERVISOR="$SCRIPT_DIR/runtime-log-supervisor.py"
 RUNTIME_DIR="$REPO_ROOT/.runtime/es-stack"
 RUNS_DIR="$RUNTIME_DIR/runs"
+LAUNCHER_LOCK_PATH="$RUNTIME_DIR/launcher.lock"
+LAUNCHER_LOCK_DIR="$RUNTIME_DIR/launcher.lock.d"
+LAUNCHER_LOCK_FD=""
+LAUNCHER_LOCK_FALLBACK=0
+
+release_launcher_lock() {
+  if [[ "$LAUNCHER_LOCK_FALLBACK" == "1" ]]; then
+    rmdir "$LAUNCHER_LOCK_DIR" >/dev/null 2>&1 || true
+    LAUNCHER_LOCK_FALLBACK=0
+  fi
+  if [[ -n "$LAUNCHER_LOCK_FD" ]]; then
+    eval "exec ${LAUNCHER_LOCK_FD}>&-"
+    LAUNCHER_LOCK_FD=""
+  fi
+}
+
+# The lock infrastructure is the only mutation allowed before lock ownership.
+mkdir -p "$RUNTIME_DIR"
+if command -v flock >/dev/null 2>&1; then
+  exec {LAUNCHER_LOCK_FD}>"$LAUNCHER_LOCK_PATH"
+  if ! flock -n "$LAUNCHER_LOCK_FD"; then
+    echo "ERROR: another ES runtime stack launcher holds $LAUNCHER_LOCK_PATH" >&2
+    exit 1
+  fi
+elif [[ "$(uname -s)" != "Linux" ]] && mkdir "$LAUNCHER_LOCK_DIR" 2>/dev/null; then
+  # Git Bash used by deterministic Windows tests has no flock. Ubuntu must fail closed.
+  LAUNCHER_LOCK_FALLBACK=1
+else
+  echo "ERROR: flock is required to serialize ES runtime stack startup" >&2
+  exit 127
+fi
+trap 'release_launcher_lock' EXIT
+
+PREVIOUS_RUN_DIR=""
+if [[ -L "$RUNTIME_DIR/latest" ]]; then
+  PREVIOUS_RUN_DIR="$(readlink -f "$RUNTIME_DIR/latest" 2>/dev/null || true)"
+fi
 
 if [[ -n "$CONDA_ENV" ]]; then
   if ! command -v conda >/dev/null 2>&1; then
@@ -129,6 +185,8 @@ LATEST_LINK="$RUNTIME_DIR/latest"
 CONFIG_PATH="$RUN_DIR/config.yaml"
 VALIDATION_CONFIG_PATH="$RUN_DIR/validation-config.yaml"
 STACK_LOG_PATH="$RUN_DIR/stack.log"
+PREFLIGHT_PATH="$RUN_DIR/preflight.json"
+VLLM_LOG_PATH="$RUN_DIR/vllm.log"
 API_LOG_PATH="$RUN_DIR/api.log"
 WORKER_LOG_PATH="$RUN_DIR/worker.log"
 UI_LOG_PATH="$RUN_DIR/ui.log"
@@ -138,6 +196,7 @@ API_URL="http://127.0.0.1:${API_PORT}"
 API_HEALTH_URL="${API_URL}/health"
 UI_URL="http://127.0.0.1:${UI_PORT}"
 ES_ENDPOINT="http://127.0.0.1:${ES_PORT}"
+VLLM_ENDPOINT="http://127.0.0.1:${LOCAL_VLLM_PORT}"
 VALIDATION_INDEX="validation-${RUN_ID}"
 VALIDATION_SMOKE_INDEX="${VALIDATION_INDEX}-legacy-smoke"
 VALIDATION_DATA_ROOT="$RUN_DIR/$VALIDATION_INDEX"
@@ -145,6 +204,7 @@ API_CONFIG_PATH="$CONFIG_PATH"
 STACK_STARTED_AT=""
 ES_STARTED_BY_RUN=0
 ES_LOG_PID=""
+VLLM_PID=""
 SYNC_SUPERVISOR_PID=""
 STARTED_SUPERVISOR_PID=""
 API_PID=""
@@ -163,7 +223,7 @@ declare -A PROCESS_STATUS_FILES=()
 declare -A PROCESS_PENDING_EXIT_STATUS=()
 
 mkdir -p "$RUN_DIR"
-for path in "$STACK_LOG_PATH" "$API_LOG_PATH" "$WORKER_LOG_PATH" "$UI_LOG_PATH" "$ES_LOG_PATH"; do
+for path in "$STACK_LOG_PATH" "$VLLM_LOG_PATH" "$API_LOG_PATH" "$WORKER_LOG_PATH" "$UI_LOG_PATH" "$ES_LOG_PATH"; do
   : >"$path"
 done
 if [[ -L "$LATEST_LINK" || -f "$LATEST_LINK" ]]; then
@@ -256,7 +316,7 @@ log_stack() {
 publish_status() {
   local component pid status_file
   local -a status_guards=()
-  for component in es api worker ui; do
+  for component in vllm es api worker ui; do
     pid="${PROCESS_PIDS[$component]:-}"
     [[ -z "$pid" ]] && continue
     status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"
@@ -397,16 +457,52 @@ from pathlib import Path
 path = Path(sys.argv[1])
 action, component, value1, value2 = sys.argv[2:6]
 payload = json.loads(path.read_text(encoding="utf-8"))
+
+def process_identity(pid):
+    proc = Path("/proc") / str(pid)
+    if not proc.is_dir():
+        if os.name == "nt":
+            return {"pid": pid, "platform": "windows-test"}
+        raise RuntimeError(f"cannot capture process identity for PID {pid}")
+    stat_text = (proc / "stat").read_text(encoding="ascii")
+    tail = stat_text[stat_text.rfind(")") + 2 :].split()
+    cmdline = (proc / "cmdline").read_bytes()
+    return {
+        "pid": pid,
+        "uid": proc.stat().st_uid,
+        "start_ticks": int(tail[19]),
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip(),
+        "exe": str((proc / "exe").resolve(strict=True)),
+        "cwd": str((proc / "cwd").resolve(strict=True)),
+        "cmdline_sha256": __import__("hashlib").sha256(cmdline).hexdigest(),
+        "sid": os.getsid(pid),
+        "pgid": os.getpgid(pid),
+    }
+
 if action == "add":
+    supervisor_pid = int(value1)
     payload["processes"].append(
         {
             "component": component,
-            "pid": int(value1),
+            "pid": supervisor_pid,
             "command": value2,
             "started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "exit_status": None,
+            "supervisor_identity": process_identity(supervisor_pid),
+            "workload_identity": None,
         }
     )
+elif action == "workload":
+    status = json.loads(Path(value1).read_text(encoding="utf-8"))
+    workload_pid = status.get("workload_pid")
+    if status.get("state") != "running" or not isinstance(workload_pid, int):
+        raise RuntimeError(f"cannot capture workload identity for {component}")
+    for process in reversed(payload["processes"]):
+        if process["component"] == component and process["exit_status"] is None:
+            process["workload_identity"] = process_identity(workload_pid)
+            break
+    else:
+        raise RuntimeError(f"active process manifest entry is missing for {component}")
 elif action == "finish":
     for process in reversed(payload["processes"]):
         if process["component"] == component and process["exit_status"] is None:
@@ -424,6 +520,102 @@ record_process() {
   update_process_manifest add "$component" "$pid" "$safe_command"
 }
 
+record_workload_identity() {
+  local component="$1" status_file="${PROCESS_STATUS_FILES[$1]:-$RUN_DIR/$1.status.json}"
+  update_process_manifest workload "$component" "$status_file"
+}
+
+verified_previous_processes() {
+  local manifest="$1"
+  "${PYTHON_COMMAND[@]:-python}" - "$manifest" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+if not manifest.is_file():
+    raise SystemExit(0)
+payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+def current_identity(pid):
+    proc = Path("/proc") / str(pid)
+    if not proc.is_dir():
+        return None
+    stat_text = (proc / "stat").read_text(encoding="ascii")
+    tail = stat_text[stat_text.rfind(")") + 2 :].split()
+    return {
+        "pid": pid,
+        "uid": proc.stat().st_uid,
+        "start_ticks": int(tail[19]),
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip(),
+        "exe": str((proc / "exe").resolve(strict=True)),
+        "cwd": str((proc / "cwd").resolve(strict=True)),
+        "cmdline_sha256": hashlib.sha256((proc / "cmdline").read_bytes()).hexdigest(),
+        "sid": os.getsid(pid),
+        "pgid": os.getpgid(pid),
+    }
+
+fields = {"pid", "uid", "start_ticks", "boot_id", "exe", "cwd", "cmdline_sha256", "sid", "pgid"}
+for process in payload.get("processes", []):
+    if process.get("exit_status") is not None:
+        continue
+    for identity_name in ("supervisor_identity", "workload_identity"):
+        recorded = process.get(identity_name)
+        if not isinstance(recorded, dict) or not isinstance(recorded.get("pid"), int):
+            continue
+        current = current_identity(recorded["pid"])
+        if current is None:
+            continue
+        if not fields <= recorded.keys() or any(recorded[key] != current[key] for key in fields):
+            print(
+                f"identity mismatch for prior {process.get('component')} {identity_name} PID {recorded['pid']}",
+                file=sys.stderr,
+            )
+            raise SystemExit(3)
+        print(f"{recorded['pid']} {recorded['pgid']}")
+PY
+}
+
+reclaim_previous_run() {
+  [[ -z "$PREVIOUS_RUN_DIR" || "$PREVIOUS_RUN_DIR" == "$RUN_DIR" ]] && return 0
+  local manifest="$PREVIOUS_RUN_DIR/processes.json" processes pid pgid deadline
+  processes="$(verified_previous_processes "$manifest")" || {
+    log_stack_error "refusing to reclaim previous run because process identity could not be proven"
+    return 1
+  }
+  [[ -z "$processes" ]] && return 0
+  log_stack "reclaiming strongly identified processes from previous run $PREVIOUS_RUN_DIR"
+  while read -r pid pgid; do
+    [[ -z "$pid" ]] && continue
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+  done <<<"$processes"
+  deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC))
+  while (( SECONDS < deadline )); do
+    processes="$(verified_previous_processes "$manifest")" || return 1
+    [[ -z "$processes" ]] && return 0
+    sleep 0.25
+  done
+  processes="$(verified_previous_processes "$manifest")" || return 1
+  while read -r pid pgid; do
+    [[ -z "$pid" ]] && continue
+    if [[ "$pgid" == "$pid" && "$pgid" != "$(ps -p "$$" -o pgid= | tr -d '[:space:]')" ]]; then
+      kill -KILL -- "-$pgid" >/dev/null 2>&1 || true
+    else
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done <<<"$processes"
+  deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC))
+  while (( SECONDS < deadline )); do
+    processes="$(verified_previous_processes "$manifest")" || return 1
+    [[ -z "$processes" ]] && return 0
+    sleep 0.25
+  done
+  log_stack_error "strongly identified previous-run processes did not exit"
+  return 1
+}
+
 record_process_exit() {
   local component="$1" status="$2"
   if [[ "${PROCESS_EXIT_RECORDED[$component]:-0}" == "0" ]]; then
@@ -439,6 +631,155 @@ require_command() {
     log_stack_error "required command '$1' was not found on PATH"
     exit 127
   fi
+}
+
+load_local_vllm_environment() {
+  [[ "$LOCAL_VLLM_MODE" == "disabled" ]] && return 0
+  local mode owner current_owner
+  if [[ ! -f "$LOCAL_VLLM_RUNTIME_ENV" || ! -r "$LOCAL_VLLM_RUNTIME_ENV" ]]; then
+    log_stack_error "local vLLM runtime is not bootstrapped: $LOCAL_VLLM_RUNTIME_ENV"
+    return 1
+  fi
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    mode="$(stat -c '%a' -- "$LOCAL_VLLM_RUNTIME_ENV")"
+    owner="$(stat -c '%u' -- "$LOCAL_VLLM_RUNTIME_ENV")"
+    current_owner="$(id -u)"
+    if [[ "$owner" != "$current_owner" || $((8#$mode & 077)) -ne 0 ]]; then
+      log_stack_error "local vLLM runtime environment must be current-user owned and mode 0600: $LOCAL_VLLM_RUNTIME_ENV"
+      return 1
+    fi
+  fi
+  # bootstrap-local-vllm.sh writes shell-escaped assignments only.
+  source "$LOCAL_VLLM_RUNTIME_ENV"
+  for name in VSA_LOCAL_VLLM_ROOT VSA_LOCAL_VLLM_PYTHON VSA_LOCAL_VLLM_MODEL_MANIFEST VSA_LOCAL_VLLM_ENVIRONMENT_MANIFEST HF_HOME; do
+    if [[ -z "${!name:-}" ]]; then
+      log_stack_error "local vLLM runtime environment is missing $name"
+      return 1
+    fi
+  done
+  if [[ ! -x "$VSA_LOCAL_VLLM_PYTHON" ]]; then
+    log_stack_error "local vLLM Python is not executable: $VSA_LOCAL_VLLM_PYTHON"
+    return 1
+  fi
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
+  VLLM_CALIBRATION_PATH="$VSA_LOCAL_VLLM_ROOT/calibration.json"
+  VLLM_MODEL_PATH="$(
+    "$VSA_LOCAL_VLLM_PYTHON" - "$VSA_LOCAL_VLLM_MODEL_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+path = payload.get("snapshot_path")
+if not isinstance(path, str) or not path:
+    raise SystemExit(2)
+print(path)
+PY
+  )"
+  [[ -d "$VLLM_MODEL_PATH" ]] || {
+    log_stack_error "local vLLM model snapshot is unavailable"
+    return 1
+  }
+}
+
+resolve_local_vllm_mode() {
+  [[ "$LOCAL_VLLM_MODE" != "auto" ]] && return 0
+  if "${PYTHON_COMMAND[@]:-python}" - "$SOURCE_CONFIG" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+config = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")) or {}
+profile_name = config.get("active_profile")
+profiles = config.get("profiles") or {}
+profile = profiles.get(profile_name) or {}
+vlm = profile.get("vlm") or {}
+backend_name = vlm.get("backend")
+backend = (config.get("backends") or {}).get(backend_name) or {}
+local = config.get("local_vllm") or {}
+raise SystemExit(0 if local.get("enabled") is True and backend.get("provider") == "vllm" else 1)
+PY
+  then
+    LOCAL_VLLM_MODE="required"
+  else
+    LOCAL_VLLM_MODE="disabled"
+  fi
+  log_stack "resolved local vLLM mode=$LOCAL_VLLM_MODE from active runtime profile"
+}
+
+run_local_vllm_preflight() {
+  [[ "$LOCAL_VLLM_MODE" == "disabled" ]] && return 0
+  require_command nvidia-smi
+  local -a args=(
+    "$SCRIPT_DIR/local_vllm_runtime.py" preflight
+    --model-manifest "$VSA_LOCAL_VLLM_MODEL_MANIFEST"
+    --environment-manifest "$VSA_LOCAL_VLLM_ENVIRONMENT_MANIFEST"
+    --gpu-index "$LOCAL_VLLM_GPU_INDEX"
+    --disk-requirement "data=$DATA_ROOT=15"
+    --disk-requirement "logs=$RUN_DIR=15"
+    --output "$PREFLIGHT_PATH"
+  )
+  if [[ -f "$VLLM_CALIBRATION_PATH" ]]; then
+    args+=(--calibration "$VLLM_CALIBRATION_PATH")
+  fi
+  log_stack "running fail-closed local vLLM resource preflight"
+  run_stack_command "$VSA_LOCAL_VLLM_PYTHON" "${args[@]}"
+}
+
+start_local_vllm() {
+  [[ "$LOCAL_VLLM_MODE" == "disabled" ]] && return 0
+  reclaim_port "$LOCAL_VLLM_PORT"
+  start_supervised_process \
+    vllm \
+    "$VLLM_LOG_PATH" \
+    "local vLLM qwen2.5-vl-local on 127.0.0.1:$LOCAL_VLLM_PORT" \
+    env \
+      CUDA_VISIBLE_DEVICES="$LOCAL_VLLM_GPU_INDEX" \
+      HF_HOME="$HF_HOME" \
+      HF_HUB_OFFLINE=1 \
+      TRANSFORMERS_OFFLINE=1 \
+      HF_HUB_DISABLE_TELEMETRY=1 \
+      DO_NOT_TRACK=1 \
+      VLLM_LOGGING_LEVEL=INFO \
+      "$VSA_LOCAL_VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
+      "$VLLM_MODEL_PATH" \
+      --served-model-name "$LOCAL_VLLM_SERVED_MODEL" \
+      --host 127.0.0.1 \
+      --port "$LOCAL_VLLM_PORT" \
+      --tensor-parallel-size 1 \
+      --quantization awq \
+      --dtype half \
+      --max-model-len 16384 \
+      --max-num-seqs 1 \
+      --max-num-batched-tokens 16384 \
+      --gpu-memory-utilization 0.70 \
+      --limit-mm-per-prompt '{"image":24,"video":0}' \
+      --mm-processor-kwargs '{"min_pixels":3136,"max_pixels":200704}' \
+      --swap-space 0 \
+      --cpu-offload-gb 0 \
+      --mm-processor-cache-gb 0 \
+      --enforce-eager \
+      --disable-log-requests
+  VLLM_PID="$STARTED_SUPERVISOR_PID"
+  wait_component_status_running vllm
+}
+
+wait_local_vllm_ready() {
+  [[ "$LOCAL_VLLM_MODE" == "disabled" ]] && return 0
+  local deadline=$((SECONDS + LOCAL_VLLM_TIMEOUT_SEC))
+  while (( SECONDS < deadline )); do
+    fail_if_managed_process_exited || return $?
+    validate_managed_statuses || return $?
+    if curl -fsS "$VLLM_ENDPOINT/health" >/dev/null 2>&1; then
+      log_stack "local vLLM health endpoint is ready; running model alias and single-frame probe"
+      run_stack_command "$VSA_LOCAL_VLLM_PYTHON" "$SCRIPT_DIR/local_vllm_runtime.py" probe-service \
+        --base-url "$VLLM_ENDPOINT" --served-model "$LOCAL_VLLM_SERVED_MODEL"
+      return 0
+    fi
+    sleep 2
+  done
+  log_stack_error "local vLLM did not become reachable at $VLLM_ENDPOINT within $LOCAL_VLLM_TIMEOUT_SEC seconds"
+  return 1
 }
 
 python_cmd() {
@@ -536,120 +877,24 @@ target.write_text(updated, encoding="utf-8")
 PY
 }
 
-stale_project_ui_pids() {
-  local current_uid protected_pids=" " pid="$LAUNCHER_PID" parent depth=0
-  [[ "$(uname -s)" == "Linux" ]] || return 0
-  current_uid="$(id -u)"
-
-  while [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 && depth < 64 )); do
-    [[ "$protected_pids" == *" $pid "* ]] && break
-    protected_pids+="$pid "
-    parent="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')"
-    pid="$parent"
-    depth=$((depth + 1))
-  done
-
-  ps -eo uid=,pid=,comm=,args= | awk -v uid="$current_uid" -v root="$REPO_ROOT" -v protected="$protected_pids" '
-    $1 == uid && $3 ~ /^(node|npm|turbo|bash|sh)$/ {
-      command_line = $0
-      if (index(protected, " " $2 " ") == 0 &&
-          (index(command_line, root "/frontend/original-ui") > 0 ||
-           index(command_line, root "/scripts/run_original_ui_vss.sh") > 0)) {
-        print $2
-      }
-    }
-  '
-}
-
-reclaim_stale_project_ui_processes() {
-  local pids pid deadline
-  pids="$(stale_project_ui_pids)"
-  [[ -z "$pids" ]] && return 0
-  for pid in $pids; do
-    assert_current_user_pid "$pid" allow-missing || return 1
-    log_stack "reclaiming stale project UI process PID $pid"
-    kill -TERM "$pid" >/dev/null 2>&1 || true
-  done
-  deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC))
-  while [[ -n "$(stale_project_ui_pids)" ]] && (( SECONDS < deadline )); do
-    sleep 0.25
-  done
-  pids="$(stale_project_ui_pids)"
-  for pid in $pids; do
-    assert_current_user_pid "$pid" allow-missing || return 1
-    kill -KILL "$pid" >/dev/null 2>&1 || true
-  done
-  deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC))
-  while [[ -n "$(stale_project_ui_pids)" ]] && (( SECONDS < deadline )); do
-    sleep 0.25
-  done
-  pids="$(stale_project_ui_pids)"
-  if [[ -n "$pids" ]]; then
-    log_stack_error "stale project UI process cleanup did not complete; remaining PID(s): $pids"
-    return 1
-  fi
-}
-
 port_listener_pids() {
   if command -v lsof >/dev/null 2>&1; then
     lsof -ti "TCP:$1" -sTCP:LISTEN 2>/dev/null || true
   elif command -v fuser >/dev/null 2>&1; then
     fuser -n tcp "$1" 2>/dev/null | tr ' ' '\n' || true
   else
-    log_stack_error "lsof or fuser is required to reclaim API/UI ports"
+    log_stack_error "lsof or fuser is required to inspect service ports"
     return 127
   fi
 }
 
-assert_current_user_pid() {
-  local pid="$1" missing_policy="${2:-reject-missing}" owner_uid current_uid
-  owner_uid="$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')"
-  current_uid="$(id -u)"
-  if [[ -z "$owner_uid" ]]; then
-    # The listener may exit between discovery and ownership validation.
-    # Only the stale-UI path has already established current-user ownership.
-    if [[ "$missing_policy" == "allow-missing" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
-      return 0
-    fi
-    log_stack_error "FOREIGN_LISTENER: refusing to terminate PID $pid owned by uid unknown"
-    return 1
-  fi
-  if [[ "$owner_uid" != "$current_uid" ]]; then
-    log_stack_error "FOREIGN_LISTENER: refusing to terminate PID $pid owned by uid ${owner_uid:-unknown}"
-    return 1
-  fi
-}
-
-wait_for_port_free() {
-  local port="$1" deadline=$((SECONDS + TIMEOUT_SEC))
-  local force_deadline=$((SECONDS + PORT_TERMINATION_GRACE_SEC)) pids pid forced=0
-  while true; do
-    pids="$(port_listener_pids "$port")" || return 1
-    [[ -z "$pids" ]] && return 0
-    if (( SECONDS >= deadline )); then
-      log_stack_error "port $port was not released; remaining PID(s): $pids"
-      return 1
-    fi
-    if (( forced == 0 && SECONDS >= force_deadline )); then
-      for pid in $pids; do
-        assert_current_user_pid "$pid" || return 1
-        kill -KILL "$pid" >/dev/null 2>&1 || true
-      done
-      forced=1
-    fi
-    sleep 1
-  done
-}
-
 reclaim_port() {
-  local port="$1" pids pid
+  local port="$1" pids
   pids="$(port_listener_pids "$port")" || return 1
-  for pid in $pids; do
-    assert_current_user_pid "$pid" || return 1
-    log_stack "reclaiming port $port from current-user PID $pid"
-    kill -TERM "$pid" >/dev/null 2>&1 || true
-  done
-  wait_for_port_free "$port"
+  if [[ -n "$pids" ]]; then
+    log_stack_error "UNKNOWN_LISTENER: port $port is occupied by unproven PID(s): $pids"
+    return 1
+  fi
 }
 
 start_es_log_stream() {
@@ -665,7 +910,7 @@ observe_managed_processes() {
   local component pid status finalization_status pending_status
   MANAGED_EXIT_COMPONENT=""
   MANAGED_EXIT_STATUS=0
-  for component in es api worker ui; do
+  for component in vllm es api worker ui; do
     pid="${PROCESS_PIDS[$component]:-}"
     [[ -z "$pid" ]] && continue
     pending_status="${PROCESS_PENDING_EXIT_STATUS[$component]:-}"
@@ -751,7 +996,7 @@ PY
 
 validate_managed_statuses() {
   local component pid status_file error status
-  for component in es api worker ui; do
+  for component in vllm es api worker ui; do
     pid="${PROCESS_PIDS[$component]:-}"
     [[ -z "$pid" ]] && continue
     status_file="${PROCESS_STATUS_FILES[$component]:-$RUN_DIR/$component.status.json}"
@@ -772,6 +1017,7 @@ wait_component_status_running() {
   deadline=$((SECONDS + TIMEOUT_SEC))
   while (( SECONDS < deadline )); do
     if error="$(validate_component_status "$component" "$status_file" "$pid" 2>&1)"; then
+      record_workload_identity "$component"
       return 0
     else
       status=$?
@@ -785,6 +1031,7 @@ wait_component_status_running() {
     else
       process_status=$?
       if error="$(validate_component_status "$component" "$status_file" "$pid" 2>&1)"; then
+        record_workload_identity "$component"
         return 0
       else
         status=$?
@@ -946,7 +1193,7 @@ request_managed_process_stop() {
 }
 
 stop_managed_process() {
-  local component="$1" pid="${PROCESS_PIDS[$1]:-}" pending_status
+  local component="$1" pid="${PROCESS_PIDS[$1]:-}" pending_status original_grace
   [[ -z "$pid" ]] && return 0
   pending_status="${PROCESS_PENDING_EXIT_STATUS[$component]:-}"
   if [[ -n "$pending_status" ]]; then
@@ -955,10 +1202,49 @@ stop_managed_process() {
     PROCESS_PIDS["$component"]=""
     return 0
   fi
-  stop_pid_bounded "$pid" || return 1
+  original_grace="$PROCESS_SHUTDOWN_GRACE_TICKS"
+  if [[ "$component" == "vllm" ]]; then
+    PROCESS_SHUTDOWN_GRACE_TICKS="$VLLM_SHUTDOWN_GRACE_TICKS"
+  fi
+  stop_pid_bounded "$pid" || {
+    PROCESS_SHUTDOWN_GRACE_TICKS="$original_grace"
+    return 1
+  }
+  PROCESS_SHUTDOWN_GRACE_TICKS="$original_grace"
   record_process_exit "$component" "$STOPPED_PROCESS_STATUS" || return $?
   PROCESS_PIDS["$component"]=""
   return 0
+}
+
+wait_vllm_gpu_release() {
+  [[ "$LOCAL_VLLM_MODE" == "disabled" || -z "$VLLM_PID" || ! -f "$PREFLIGHT_PATH" ]] && return 0
+  local baseline gpu_uuid deadline=$((SECONDS + 60)) current process_rows
+  read -r baseline gpu_uuid < <("${PYTHON_COMMAND[@]:-python}" - "$PREFLIGHT_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+gpu = payload["gpu"]
+print(int(gpu["minimum_free_mib"]), gpu["uuid"])
+PY
+  ) || return 1
+  [[ "$baseline" =~ ^[0-9]+$ && -n "$gpu_uuid" ]] || return 1
+  while (( SECONDS < deadline )); do
+    current="$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null |
+      awk -F, -v index="$LOCAL_VLLM_GPU_INDEX" '$1 + 0 == index {gsub(/ /, "", $2); print $2; exit}')"
+    process_rows="$(
+      nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits 2>/dev/null |
+        awk -F, -v uuid="$gpu_uuid" '{gsub(/ /, "", $1); if ($1 == uuid) print}'
+    )" || return 1
+    if [[ "$current" =~ ^[0-9]+$ && -z "$process_rows" && $current -ge $((baseline - 1024)) ]]; then
+      cleanup_log_line "local vLLM GPU workload released baseline_free_mib=$baseline current_free_mib=$current"
+      return 0
+    fi
+    sleep 1
+  done
+  cleanup_log_error "local vLLM GPU workload did not return to the preflight baseline within 60 seconds"
+  return 1
 }
 
 stop_sync_supervisor() {
@@ -1007,10 +1293,13 @@ cleanup() {
   request_managed_process_stop ui
   request_managed_process_stop worker
   request_managed_process_stop api
+  request_managed_process_stop vllm
   request_managed_process_stop es
   if ! run_cleanup_stage "stop ui" stop_managed_process ui; then cleanup_failed=1; fi
   if ! run_cleanup_stage "stop worker" stop_managed_process worker; then cleanup_failed=1; fi
   if ! run_cleanup_stage "stop api" stop_managed_process api; then cleanup_failed=1; fi
+  if ! run_cleanup_stage "stop local vLLM" stop_managed_process vllm; then cleanup_failed=1; fi
+  if ! run_cleanup_stage "verify local vLLM GPU release" wait_vllm_gpu_release; then cleanup_failed=1; fi
   if ! run_cleanup_stage "stop es" stop_managed_process es; then cleanup_failed=1; fi
   if ! run_cleanup_stage "delete validation resources" delete_validation_resources; then cleanup_failed=1; fi
   if [[ "$ES_STARTED_BY_RUN" == "1" && "$STOP_ELASTICSEARCH" == "1" ]]; then
@@ -1039,6 +1328,9 @@ cleanup() {
       [[ "$status" == "0" ]] && status=1
     fi
   fi
+  if ! run_cleanup_stage "release launcher lock" release_launcher_lock; then
+    [[ "$status" == "0" ]] && status=1
+  fi
   exit "$status"
 }
 
@@ -1056,11 +1348,13 @@ run_cleanup_stage() {
 trap 'status=$?; trap "" INT TERM; cleanup "$status"' EXIT
 trap 'handle_interrupt INT' INT
 trap 'handle_interrupt TERM' TERM
+trap 'handle_interrupt HUP' HUP
 
 init_process_manifest
 log_stack "run_id=$RUN_ID evidence=$RUN_DIR"
 log_stack "launcher_pid=$LAUNCHER_PID"
 load_secrets_file "$SECRETS_FILE"
+reclaim_previous_run
 
 if [[ -n "$CONDA_ENV" ]]; then
   require_command bash
@@ -1075,6 +1369,7 @@ if [[ ! -f "$SOURCE_CONFIG" || ! -r "$SOURCE_CONFIG" ]]; then
   exit 2
 fi
 export PYTHONPATH="$REPO_ROOT/src"
+resolve_local_vllm_mode
 
 if [[ "$PROBE_PROVIDERS" == "1" ]]; then
   probe_args=(scripts/runtime-doctor.py --config "$SOURCE_CONFIG" --probe-providers --json)
@@ -1094,7 +1389,9 @@ elif [[ "$DATA_ROOT" != /* ]]; then
 fi
 mkdir -p "$DATA_ROOT"
 
-reclaim_stale_project_ui_processes
+load_local_vllm_environment
+run_local_vllm_preflight
+
 for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done
 
 write_search_config "$SOURCE_CONFIG" "$CONFIG_PATH" "$INDEX" "$DATA_ROOT" production
@@ -1119,6 +1416,9 @@ if [[ -n "$CONDA_ENV" ]]; then
 fi
 log_stack "running static runtime doctor"
 run_python_stack_command "${doctor_args[@]}"
+
+start_local_vllm
+wait_local_vllm_ready
 
 export VSA_ES_PORT="$ES_PORT"
 export VSA_ES_CONTAINER_NAME="vsa-agent-es"

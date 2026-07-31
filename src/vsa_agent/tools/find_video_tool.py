@@ -4,6 +4,7 @@ Maps user-friendly video names ("test1", "warehouse_cam") to local file paths.
 In production, this would query Elasticsearch/Milvus for video metadata.
 """
 
+import hashlib
 import logging
 
 from vsa_agent.registry import register_tool
@@ -29,7 +30,7 @@ async def find_video_tool(name: str) -> str:
     """
     path = find_video(name)
     if path:
-        logger.info("Found video '%s' at: %s", name, path)
+        logger.info("find_video matched name_sha256=%s", hashlib.sha256(name.encode()).hexdigest())
         return path
     available = list_videos()
     names = [v["name"] for v in available]

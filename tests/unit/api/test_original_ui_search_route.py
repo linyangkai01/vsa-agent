@@ -6,6 +6,23 @@ from pytest import MonkeyPatch
 from vsa_agent.config import AppConfig, SearchBackendConfig
 
 
+async def test_original_ui_search_log_excludes_query_text(monkeypatch, caplog):
+    from vsa_agent.api import original_ui_search
+    from vsa_agent.tools.search import SearchInput, SearchOutput
+
+    async def fake_execute_search(_):
+        return SearchOutput(data=[])
+
+    monkeypatch.setattr(original_ui_search, "execute_search", fake_execute_search)
+    with caplog.at_level(logging.INFO, logger=original_ui_search.__name__):
+        result = await original_ui_search.original_ui_search(SearchInput(query="forklift near worker"))
+
+    assert result.data == []
+    assert "query_sha256=" in caplog.text
+    assert "query_length=20" in caplog.text
+    assert "forklift near worker" not in caplog.text
+
+
 def test_original_ui_search_preserves_vss_contract(monkeypatch):
     from vsa_agent.api import original_ui_search
     from vsa_agent.api.routes import app

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_type_hints
 
+from vsa_agent.privacy.schemas import RemoteSafeIngestEvent
 from vsa_agent.recorded_video.models import Asset, Job, JobStage, JobStep, Segment, UploadSession
 from vsa_agent.recorded_video.ports import (
     AssetStore,
@@ -107,12 +108,13 @@ class FakeEmbeddingProvider:
 
     async def embed(
         self,
-        text: str,
+        event: RemoteSafeIngestEvent,
         *,
         expected_dims: int,
         asset_id: str,
         job_id: str,
     ) -> Embedding:
+        del event, asset_id, job_id
         return (0.1,) * expected_dims
 
 
@@ -151,7 +153,7 @@ def test_model_provider_ports_match_pipeline_contract() -> None:
     embedding = inspect.signature(EmbeddingProvider.embed)
     assert list(embedding.parameters) == [
         "self",
-        "text",
+        "event",
         "expected_dims",
         "asset_id",
         "job_id",

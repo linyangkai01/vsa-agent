@@ -12,9 +12,11 @@ import math
 
 import cv2
 
+from vsa_agent.config import get_config
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.frame_store import store_frames
 from vsa_agent.utils.frame_select import select_frame_indices
+from vsa_agent.utils.image_resize import resize_frame_to_pixel_budget
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ def _extract_frames(
     start_timestamp: float,
     end_timestamp: float,
     step_size: float,
+    max_pixels: int = 448 * 448,
 ) -> list[str]:
     """Select frames from an already-opened video at evenly-spaced intervals.
 
@@ -76,6 +79,7 @@ def _extract_frames(
         if not ret:
             raise RuntimeError(f"Could not read frame {frame_idx}")
 
+        frame = resize_frame_to_pixel_budget(frame, max_pixels, cv2_module=cv2)
         _, buffer = cv2.imencode(".jpg", frame)
         base64_frames.append(base64.b64encode(buffer.tobytes()).decode("utf-8"))
 
@@ -154,8 +158,7 @@ async def frame_extract_tool(
         time_window = end_timestamp - start_timestamp
         if time_window <= 0:
             logger.warning(
-                "Empty time window for %s: start=%.2f end=%.2f",
-                video_path,
+                "Empty frame extraction time window: start=%.2f end=%.2f",
                 start_timestamp,
                 end_timestamp,
             )
@@ -178,6 +181,7 @@ async def frame_extract_tool(
             start_timestamp,
             end_timestamp,
             step_size,
+            max_pixels=get_config().video_understanding.max_pixels,
         )
 
         # Store frames in shared store, return reference key

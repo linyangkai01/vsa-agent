@@ -16,7 +16,7 @@ def trace_dir():
 
 
 @pytest.mark.asyncio
-async def test_report_agent_logs_understanding_and_report_artifacts(trace_dir, monkeypatch):
+async def test_report_agent_trace_keeps_only_non_sensitive_metadata(trace_dir, monkeypatch):
     from vsa_agent.agents.report_agent import ReportAgentInput, execute_report_agent
     from vsa_agent.data_models.understanding import UnderstandingResult
 
@@ -51,5 +51,8 @@ async def test_report_agent_logs_understanding_and_report_artifacts(trace_dir, m
     event_types = [event["event_type"] for event in events]
     assert "report_agent.understanding_result" in event_types
     assert "report_agent.result" in event_types
-    assert (trace_dir / "tool-results" / "report-agent-understanding.json").exists()
-    assert (trace_dir / "report.md").exists()
+    assert not (trace_dir / "tool-results" / "report-agent-understanding.json").exists()
+    assert not (trace_dir / "report.md").exists()
+    trace_text = trace_path.read_text(encoding="utf-8")
+    assert "person walks near forklift" not in trace_text
+    assert "video.mp4" not in trace_text

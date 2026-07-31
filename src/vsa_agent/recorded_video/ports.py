@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from vsa_agent.privacy.schemas import RemoteSafeIngestEvent
 from vsa_agent.recorded_video.models import Asset, Job, JobStage, JobStep, Segment, UploadSession
 
 Embedding = tuple[float, ...]
@@ -142,7 +143,7 @@ class EmbeddingProvider(Protocol):
 
     async def embed(
         self,
-        text: str,
+        event: RemoteSafeIngestEvent,
         *,
         expected_dims: int,
         asset_id: str,

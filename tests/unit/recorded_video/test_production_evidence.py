@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -338,7 +339,12 @@ def test_scan_runtime_logs_requires_video_understanding_trace_for_each_asset(tmp
         trace_dir = trace_root / f"trace-{index}"
         trace_dir.mkdir(parents=True)
         (trace_dir / "request.json").write_text(
-            json.dumps({"selected_asset_id": case.asset_id, "selected_segment_id": case.segment_ids[0]}),
+            json.dumps(
+                {
+                    "selected_asset_id_sha256": hashlib.sha256(case.asset_id.encode()).hexdigest(),
+                    "selected_segment_id_sha256": hashlib.sha256(case.segment_ids[0].encode()).hexdigest(),
+                }
+            ),
             encoding="utf-8",
         )
         events = ("original_ui.chat.request", "video_understanding.result")

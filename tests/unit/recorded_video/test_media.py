@@ -571,10 +571,10 @@ async def test_extract_representative_frames_is_evenly_spaced_and_bounded(tmp_pa
     frame_calls = [args for args, _kwargs in runner.calls if args[0] == "ffmpeg"]
     assert [call[call.index("-ss") + 1] for call in frame_calls] == ["2", "4", "6"]
     with pytest.raises(ValueError, match="frame_count"):
-        await processor.extract_representative_frames(source, _segment(), tmp_path / "too-many", frame_count=17)
+        await processor.extract_representative_frames(source, _segment(), tmp_path / "too-many", frame_count=25)
 
 
-@pytest.mark.parametrize("frame_count", [1, 16])
+@pytest.mark.parametrize("frame_count", [1, 24])
 async def test_extract_representative_frames_accepts_contract_boundaries(
     tmp_path: Path,
     frame_count: int,
@@ -596,7 +596,7 @@ async def test_extract_representative_frames_rejects_zero(tmp_path: Path) -> Non
     source = tmp_path / "original.mkv"
     source.write_bytes(b"source")
 
-    with pytest.raises(ValueError, match="1..16"):
+    with pytest.raises(ValueError, match="1..24"):
         await MediaProcessor(runner=FakeRunner()).extract_representative_frames(
             source,
             _segment(),

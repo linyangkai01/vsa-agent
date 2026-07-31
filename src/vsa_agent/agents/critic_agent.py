@@ -143,7 +143,9 @@ async def execute_critic(
     if model_adapter is None:
         from vsa_agent.model_adapter import create_model_adapter
 
-        model_adapter = create_model_adapter()
+        # Critic prompts are evaluated by the local VLM.  They must never fall
+        # back to the remote general LLM, even when the default role changes.
+        model_adapter = create_model_adapter(role="vlm")
 
     video_count = min(
         critic_input.evaluation_count or len(critic_input.videos),
@@ -179,7 +181,7 @@ async def execute_critic(
             )
 
         except Exception as e:
-            logger.error("Critic evaluation failed: %s", e)
+            logger.error("Critic evaluation failed error_type=%s", type(e).__name__)
             video_results.append(
                 VideoResult(
                     video_info=video,

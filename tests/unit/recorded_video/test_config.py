@@ -7,12 +7,14 @@ from pydantic import ValidationError
 from vsa_agent.config import (
     AppConfig,
     BackendConfig,
+    LocalVLLMRuntimeConfig,
     ProfileConfig,
     ProviderRuntimeConfig,
     RecordedVideoConfig,
     ResolvedRoleConfig,
     RoleBindingConfig,
     SearchBackendConfig,
+    ServerConfig,
     validate_recorded_video_runtime,
 )
 
@@ -93,7 +95,7 @@ def test_provider_runtime_config_is_public_resolved_role_alias():
         ("max_upload_bytes", 0),
         ("segment_duration_sec", 0),
         ("representative_frames", 0),
-        ("representative_frames", 17),
+        ("representative_frames", 25),
         ("worker_concurrency", 0),
         ("worker_concurrency", 6),
         ("provider_concurrency", 0),
@@ -239,8 +241,73 @@ def test_main_config_enables_production_recorded_video_without_secrets(monkeypat
     assert config.search.allow_mock_fallback is False
     assert config.search.force_mock_embedding is False
     assert config.profiles[config.active_profile].embedding is not None
+    assert config.active_profile == "local_vlm_hybrid"
+    assert config.local_vllm.enabled is True
+    assert config.backends["local_vllm"].base_url == "http://127.0.0.1:8001/v1"
+    assert config.profiles[config.active_profile].vlm.model == "qwen2.5-vl-local"
     assert config.backends["dashscope"].api_key == ""
     assert diagnostics.ok is True
+
+
+def local_vllm_production_config(*, base_url: str = "http://127.0.0.1:8001/v1") -> AppConfig:
+    return AppConfig(
+        active_profile="local",
+        backends={
+            "remote": BackendConfig(
+                base_url="https://dashscope.example/v1",
+                api_key_required=False,
+            ),
+            "local": BackendConfig(
+                provider="vllm",
+                base_url=base_url,
+                api_key_required=False,
+            ),
+        },
+        profiles={
+            "local": ProfileConfig(
+                llm=RoleBindingConfig(backend="remote", model="llm"),
+                vlm=RoleBindingConfig(backend="local", model="qwen2.5-vl-local"),
+                embedding=RoleBindingConfig(backend="remote", model="embedding"),
+            )
+        },
+        local_vllm=LocalVLLMRuntimeConfig(enabled=True),
+        recorded_video=RecordedVideoConfig(enabled=True),
+        search=SearchBackendConfig(allow_mock_fallback=False, force_mock_embedding=False),
+    )
+
+
+def test_local_vllm_production_config_is_valid():
+    diagnostics = validate_recorded_video_runtime(local_vllm_production_config())
+
+    assert diagnostics.ok is True
+
+
+def test_local_vllm_rejects_non_loopback_endpoint():
+    diagnostics = validate_recorded_video_runtime(local_vllm_production_config(base_url="https://vlm.example/v1"))
+
+    assert diagnostics.ok is False
+    assert any("loopback" in issue.message for issue in diagnostics.issues)
+
+
+def test_local_vllm_rejects_business_api_port_conflict():
+    config = local_vllm_production_config(base_url="http://127.0.0.1:8000/v1")
+    config.local_vllm.port = 8000
+    config.server = ServerConfig(port=8000)
+
+    diagnostics = validate_recorded_video_runtime(config)
+
+    assert diagnostics.ok is False
+    assert any("business API port" in issue.message for issue in diagnostics.issues)
+
+
+def test_local_vllm_requires_served_model_alias():
+    config = local_vllm_production_config()
+    config.profiles["local"].vlm.model = "repository-name-is-not-the-served-alias"
+
+    diagnostics = validate_recorded_video_runtime(config)
+
+    assert diagnostics.ok is False
+    assert any("served_model_name" in issue.message for issue in diagnostics.issues)
 
 
 def test_recorded_video_dependencies_are_declared_in_correct_groups():

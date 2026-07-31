@@ -16,8 +16,6 @@ from vsa_agent.api.original_ui_chat import (
     format_done,
     format_intermediate_data,
     format_openai_delta,
-    inject_configured_video_context,
-    inject_selected_recorded_video_context,
     resolve_selected_recorded_video_context,
     stream_original_ui_chat,
 )
@@ -77,25 +75,6 @@ def test_extract_latest_user_text_rejects_user_message_without_text_content():
         extract_latest_user_text(request)
 
 
-def test_inject_configured_video_context_for_configured_video_request():
-    prompt = inject_configured_video_context(
-        "Analyze the configured video and identify safety risks.",
-        "/data/project/lyk/video/1597042367-1-192.mp4",
-    )
-
-    assert "Configured video_path: /data/project/lyk/video/1597042367-1-192.mp4" in prompt
-    assert "Do not call list_videos" in prompt
-
-
-def test_inject_configured_video_context_ignores_unrelated_text():
-    prompt = inject_configured_video_context(
-        "Say hello from vsa-agent.",
-        "/data/project/lyk/video/1597042367-1-192.mp4",
-    )
-
-    assert prompt == "Say hello from vsa-agent."
-
-
 def test_extract_query_context_preserves_selected_recorded_video_identity():
     text = (
         '[Context: [{"assetId":"asset-1","segmentId":"segment-1",'
@@ -115,28 +94,6 @@ def test_extract_query_context_preserves_selected_recorded_video_identity():
             "endTime": "2026-07-04T08:00:05Z",
         }
     ]
-
-
-def test_inject_selected_recorded_video_context_uses_server_resolved_path_and_offsets():
-    selected = SelectedRecordedVideoContext(
-        asset_id="asset-1",
-        segment_id="segment-1",
-        video_name="yard.mp4",
-        video_path=Path("/srv/vsa-data/assets/asset-1/source/original.mp4"),
-        start_offset_sec=5.0,
-        end_offset_sec=10.0,
-    )
-
-    prompt = inject_selected_recorded_video_context("What happened?", selected)
-
-    assert "asset_id: asset-1" in prompt
-    assert "segment_id: segment-1" in prompt
-    assert f"video_path: {selected.video_path}" in prompt
-    assert "start_timestamp: 5" in prompt
-    assert "end_timestamp: 10" in prompt
-    assert "Do not call find_video or list_videos" in prompt
-    assert "explicitly identify the visible person or worker" in prompt
-    assert "describe how they wear or use it" in prompt
 
 
 @pytest.mark.asyncio
@@ -362,9 +319,12 @@ async def test_stream_original_ui_chat_injects_configured_video_path():
     ]
 
     assert frames[-1] == "data: [DONE]\n\n"
-    assert "Configured video_path: /data/project/lyk/video/1597042367-1-192.mp4" in (
-        fake_graph.received_state.current_message.content
+    assert fake_graph.received_state.current_message.content == (
+        "Analyze the configured video and identify safety risks."
     )
+    assert fake_graph.received_state.local_video_context == {
+        "video_path": "/data/project/lyk/video/1597042367-1-192.mp4"
+    }
 
 
 @pytest.mark.asyncio
@@ -409,9 +369,13 @@ async def test_stream_original_ui_chat_resolves_search_context_before_graph_exec
     assert frames[-1] == "data: [DONE]\n\n"
     assert captured_context == [{"assetId": "asset-1", "segmentId": "segment-1", "videoName": "yard.mp4"}]
     prompt = fake_graph.received_state.current_message.content
-    assert prompt.startswith("What happened in this clip?")
-    assert f"video_path: {selected.video_path}" in prompt
-    assert "start_timestamp: 0" in prompt
+    assert prompt == "What happened in this clip?"
+    assert str(selected.video_path) not in prompt
+    assert fake_graph.received_state.local_video_context == {
+        "video_path": str(selected.video_path),
+        "start_timestamp": 0.0,
+        "end_timestamp": 5.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -442,7 +406,10 @@ async def test_stream_original_ui_chat_writes_conversation_trace():
         assert request_path.exists()
         events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
         assert "original_ui.chat.request" in [event["event_type"] for event in events]
-        assert json.loads(request_path.read_text(encoding="utf-8"))["conversation_id"] == "conversation/1"
+        persisted = trace_path.read_text(encoding="utf-8") + request_path.read_text(encoding="utf-8")
+        assert "inspect video" not in persisted
+        assert "conversation/1" not in persisted
+        assert "message:1" not in persisted
         assert (trace_root / "latest.txt").read_text(encoding="utf-8").strip() == str(run_dirs[0])
     finally:
         shutil.rmtree(trace_root, ignore_errors=True)

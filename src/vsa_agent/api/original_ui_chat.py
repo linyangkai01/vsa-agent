@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -165,64 +166,11 @@ async def resolve_selected_recorded_video_context(
         end_offset_sec=(selected_segment.end_offset_ms / 1000) if selected_segment is not None else None,
     )
     logger.info(
-        "original_ui.chat.context.resolved asset_id=%s segment_id=%s video_name=%r",
-        resolved.asset_id,
-        resolved.segment_id,
-        resolved.video_name,
+        "original_ui.chat.context.resolved context_ref=%s has_segment=%s",
+        hashlib.sha256(f"{resolved.asset_id}\x1f{resolved.segment_id}".encode()).hexdigest()[:16],
+        bool(resolved.segment_id),
     )
     return resolved
-
-
-def _format_offset(value: float | None) -> str:
-    if value is None:
-        return ""
-    return f"{value:g}"
-
-
-def inject_selected_recorded_video_context(
-    user_text: str,
-    selected: SelectedRecordedVideoContext,
-) -> str:
-    """Bind a natural-language question to one server-validated media source."""
-    lines = [
-        user_text,
-        "",
-        "Selected recorded video context (server validated):",
-        f"asset_id: {selected.asset_id}",
-        f"segment_id: {selected.segment_id}",
-        f"video_name: {selected.video_name}",
-        f"video_path: {selected.video_path}",
-    ]
-    if selected.start_offset_sec is not None:
-        lines.append(f"start_timestamp: {_format_offset(selected.start_offset_sec)}")
-    if selected.end_offset_sec is not None:
-        lines.append(f"end_timestamp: {_format_offset(selected.end_offset_sec)}")
-    lines.append(
-        "Use video_understanding with exactly this video_path and time range. "
-        "Do not call find_video or list_videos, and do not substitute another video. "
-        "When body-worn PPE is visible, the final answer must explicitly identify the visible person or worker "
-        "and describe how they wear or use it before assessing the equipment."
-    )
-    return "\n".join(lines)
-
-
-def inject_configured_video_context(user_text: str, configured_video_path: str = "") -> str:
-    video_path = configured_video_path.strip()
-    if not video_path:
-        return user_text
-
-    normalized = user_text.lower()
-    if "configured video" not in normalized and "default video" not in normalized:
-        return user_text
-    if video_path in user_text:
-        return user_text
-
-    return (
-        f"{user_text}\n\n"
-        f"Configured video_path: {video_path}\n"
-        "Use this video_path directly with video_understanding for the user's request. "
-        "Do not call list_videos or ask the user to upload a video."
-    )
 
 
 def _get_configured_video_path() -> str:
@@ -354,19 +302,33 @@ async def stream_original_ui_chat(
         question_text, context_items = extract_query_context(raw_user_text)
         context_resolver = recorded_video_context_resolver or resolve_selected_recorded_video_context
         selected_video = await context_resolver(context_items) if context_items else None
+        local_video_context: dict[str, object] = {}
         if selected_video is not None:
-            user_text = inject_selected_recorded_video_context(question_text, selected_video)
+            user_text = question_text
+            local_video_context = {
+                "video_path": str(selected_video.video_path),
+                "start_timestamp": selected_video.start_offset_sec,
+                "end_timestamp": selected_video.end_offset_sec,
+            }
         else:
             if configured_video_path is None:
                 configured_video_path = _get_configured_video_path()
-            user_text = inject_configured_video_context(question_text, configured_video_path)
+            user_text = question_text
+            normalized_question = question_text.lower()
+            if configured_video_path and (
+                "configured video" in normalized_question or "default video" in normalized_question
+            ):
+                local_video_context = {"video_path": configured_video_path.strip()}
 
         with live_trace_context(
             trace_path=(trace_dir / "trace.jsonl") if trace_dir else None,
             artifact_dir=trace_dir,
         ):
             graph = await graph_builder()
-            state = AgentState(current_message=HumanMessage(content=user_text))
+            state = AgentState(
+                current_message=HumanMessage(content=user_text),
+                local_video_context=local_video_context,
+            )
             config = RunnableConfig(
                 configurable={
                     "thread_id": thread_id,
@@ -375,25 +337,28 @@ async def stream_original_ui_chat(
             )
 
             request_payload = {
-                "conversation_id": conversation_id,
-                "user_message_id": user_message_id,
-                "message": raw_user_text,
-                "resolved_message": user_text,
-                "configured_video_path": configured_video_path,
-                "query_context": context_items,
-                "selected_asset_id": selected_video.asset_id if selected_video else "",
-                "selected_segment_id": selected_video.segment_id if selected_video else "",
-                "trace_dir": str(trace_dir) if trace_dir else "",
+                "conversation_id_sha256": hashlib.sha256(conversation_id.encode()).hexdigest(),
+                "user_message_id_sha256": hashlib.sha256(user_message_id.encode()).hexdigest(),
+                "query_sha256": hashlib.sha256(question_text.encode()).hexdigest(),
+                "selected_asset_id_sha256": hashlib.sha256(
+                    (selected_video.asset_id if selected_video else "").encode()
+                ).hexdigest(),
+                "selected_segment_id_sha256": hashlib.sha256(
+                    (selected_video.segment_id if selected_video else "").encode()
+                ).hexdigest(),
+                "query_length": len(question_text),
+                "context_item_count": len(context_items),
+                "has_selected_video": selected_video is not None,
+                "has_local_video_context": bool(local_video_context),
             }
             write_live_json_artifact("request.json", request_payload)
             write_live_trace_event("original_ui.chat.request", request_payload)
             logger.info(
-                "original_ui.chat.request conversation_id=%r user_message_id=%r selected_asset_id=%s "
-                "selected_segment_id=%s",
-                conversation_id,
-                user_message_id,
-                request_payload["selected_asset_id"],
-                request_payload["selected_segment_id"],
+                "original_ui.chat.request query_sha256=%s query_length=%d context_items=%d selected_video=%s",
+                request_payload["query_sha256"],
+                request_payload["query_length"],
+                request_payload["context_item_count"],
+                request_payload["has_selected_video"],
             )
 
             async for chunk in graph.astream(state, config=config, stream_mode="custom"):
@@ -409,10 +374,7 @@ async def stream_original_ui_chat(
             write_live_trace_event(
                 "original_ui.chat.error",
                 {
-                    "conversation_id": conversation_id,
-                    "user_message_id": user_message_id,
-                    "error": message,
-                    "trace_dir": str(trace_dir) if trace_dir else "",
+                    "error_type": type(exc).__name__,
                 },
             )
         yield format_intermediate_data("Error", message, status="error", index=index, error=message)

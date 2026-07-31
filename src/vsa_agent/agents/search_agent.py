@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from vsa_agent.observability.live_trace import write_live_trace_event
+from vsa_agent.privacy.schemas import RemoteSafeSearchQuery
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.incidents import incidents_to_tagged_json, search_output_to_incidents
 from vsa_agent.tools.search import (
@@ -28,6 +29,28 @@ from vsa_agent.tools.vss_summarize import summarize_search_incidents
 from vsa_agent.video_analytics.nvschema import Incident
 
 logger = logging.getLogger(__name__)
+
+
+def _search_trace_payload(*, path: str, query: str, result_count: int = 0, error: Exception | None = None) -> dict:
+    """Emit only query metadata and result counts to the persistent trace."""
+
+    try:
+        safe_query = RemoteSafeSearchQuery(query=query)
+        query_hash = safe_query.query_sha256
+        query_length = len(safe_query.query)
+    except ValueError:
+        query_hash = "rejected"
+        query_length = len(query)
+    payload: dict[str, str | int] = {
+        "path": path,
+        "query_sha256": query_hash,
+        "query_length": query_length,
+        "result_count": result_count,
+    }
+    if error is not None:
+        payload["error_type"] = type(error).__name__
+    return payload
+
 
 # ===== Agent Input Model =====
 
@@ -211,10 +234,10 @@ async def _run_search_critic(
             videos_json=json.dumps(videos_data),
         )
         metadata["critic_applied"] = True
-        logger.info("Critic verification completed: %s", str(critic_result)[:200])
+        logger.info("Critic verification completed result_length=%d", len(str(critic_result)))
     except Exception as exc:
         metadata["critic_error"] = str(exc)
-        logger.warning("Critic verification failed: %s", exc)
+        logger.warning("Critic verification failed error_type=%s", type(exc).__name__)
 
     return metadata
 
@@ -246,7 +269,7 @@ async def _execute_search_with_metadata(
     decomposed = _apply_request_constraints(search_input, decomposed)
     write_live_trace_event(
         "search_agent.decompose_query",
-        {"input_query": search_input.query, "decomposed": decomposed},
+        _search_trace_payload(path="decompose", query=search_input.query),
     )
 
     has_attributes = bool(decomposed.attributes)
@@ -270,7 +293,11 @@ async def _execute_search_with_metadata(
             results = await attribute_search()
             write_live_trace_event(
                 "search_agent.attribute_search",
-                {"path": "attribute-only", "attributes": decomposed.attributes, "results": results},
+                _search_trace_payload(
+                    path="attribute-only",
+                    query=search_input.query,
+                    result_count=len(getattr(results, "data", results or [])),
+                ),
             )
             if isinstance(results, SearchOutput):
                 result = results
@@ -280,10 +307,10 @@ async def _execute_search_with_metadata(
                 result = SearchOutput(data=getattr(results, "data", []))
         except Exception as e:
             _propagate_search_dependency(e)
-            logger.error("Attribute search failed: %s", e)
+            logger.error("Attribute search failed error_type=%s", type(e).__name__)
             write_live_trace_event(
                 "search_agent.attribute_search",
-                {"path": "attribute-only", "attributes": decomposed.attributes, "error": str(e)},
+                _search_trace_payload(path="attribute-only", query=search_input.query, error=e),
             )
 
     elif not has_attributes and embed_search is not None:
@@ -292,9 +319,16 @@ async def _execute_search_with_metadata(
             results = await embed_search()
             write_live_trace_event(
                 "search_agent.embed_search",
-                {"path": "embed-only", "query": decomposed.query, "results": results},
+                _search_trace_payload(
+                    path="embed-only",
+                    query=search_input.query,
+                    result_count=len(getattr(results, "data", results or [])),
+                ),
             )
-            logger.info("search_agent.embed_search path=embed-only query=%r", decomposed.query)
+            logger.info(
+                "search_agent.embed_search path=embed-only result_count=%s",
+                len(getattr(results, "data", results or [])),
+            )
             if isinstance(results, SearchOutput):
                 result = results
             elif hasattr(results, "data"):
@@ -303,12 +337,12 @@ async def _execute_search_with_metadata(
                 result = SearchOutput(data=results if isinstance(results, list) else [])
         except Exception as e:
             _propagate_search_dependency(e)
-            logger.error("Embed search failed: %s", e)
+            logger.error("Embed search failed error_type=%s", type(e).__name__)
             write_live_trace_event(
                 "search_agent.embed_search",
-                {"path": "embed-only", "query": decomposed.query, "error": str(e)},
+                _search_trace_payload(path="embed-only", query=search_input.query, error=e),
             )
-            logger.info("search_agent.embed_search path=embed-only status=error query=%r", decomposed.query)
+            logger.info("search_agent.embed_search path=embed-only status=error error_type=%s", type(e).__name__)
 
     elif has_action and has_attributes:
         logger.info("Path 3: fusion search")
@@ -319,22 +353,30 @@ async def _execute_search_with_metadata(
                 r = await embed_search()
                 write_live_trace_event(
                     "search_agent.embed_search",
-                    {"path": "fusion", "query": decomposed.query, "results": r},
+                    _search_trace_payload(
+                        path="fusion",
+                        query=search_input.query,
+                        result_count=len(getattr(r, "data", r or [])),
+                    ),
                 )
                 embed_results = list(r.data) if hasattr(r, "data") else list(r) if isinstance(r, list) else []
             except Exception as e:
                 _propagate_search_dependency(e)
-                logger.error("Embed search in fusion failed: %s", e)
+                logger.error("Embed search in fusion failed error_type=%s", type(e).__name__)
                 write_live_trace_event(
                     "search_agent.embed_search",
-                    {"path": "fusion", "query": decomposed.query, "error": str(e)},
+                    _search_trace_payload(path="fusion", query=search_input.query, error=e),
                 )
         if attribute_search is not None:
             try:
                 r = await attribute_search()
                 write_live_trace_event(
                     "search_agent.attribute_search",
-                    {"path": "fusion", "attributes": decomposed.attributes, "results": r},
+                    _search_trace_payload(
+                        path="fusion",
+                        query=search_input.query,
+                        result_count=len(getattr(r, "data", r or [])),
+                    ),
                 )
                 if isinstance(r, SearchOutput):
                     attr_results = r.data
@@ -344,10 +386,10 @@ async def _execute_search_with_metadata(
                     attr_results = r.data
             except Exception as e:
                 _propagate_search_dependency(e)
-                logger.error("Attribute search in fusion failed: %s", e)
+                logger.error("Attribute search in fusion failed error_type=%s", type(e).__name__)
                 write_live_trace_event(
                     "search_agent.attribute_search",
-                    {"path": "fusion", "attributes": decomposed.attributes, "error": str(e)},
+                    _search_trace_payload(path="fusion", query=search_input.query, error=e),
                 )
         merged: dict[str, SearchResult] = {}
         for r in embed_results + attr_results:
@@ -415,12 +457,7 @@ async def execute_search_agent_flow(
     text_answer = await summarize_search_incidents(incidents, search_input.query)
     write_live_trace_event(
         "search_agent.answer",
-        {
-            "input_query": search_input.query,
-            "text_answer": text_answer,
-            "metadata": metadata,
-            "search_output": search_output,
-        },
+        _search_trace_payload(path="answer", query=search_input.query, result_count=len(search_output.data)),
     )
     return SearchAgentExecutionResult(
         search_output=search_output,

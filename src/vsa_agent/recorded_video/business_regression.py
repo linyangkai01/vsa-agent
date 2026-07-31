@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -443,12 +444,12 @@ def _chat_trace_evidence(
     }
     event_types = payload.get("event_types")
     if (
-        payload.get("schema_version") != 1
+        payload.get("schema_version") != 2
         or payload.get("trace_id") != trace_id
-        or payload.get("conversation_id") != conversation_id
-        or payload.get("user_message_id") != message_id
-        or payload.get("selected_asset_id") != asset_id
-        or payload.get("selected_segment_id") != segment_id
+        or payload.get("conversation_id_sha256") != hashlib.sha256(conversation_id.encode()).hexdigest()
+        or payload.get("user_message_id_sha256") != hashlib.sha256(message_id.encode()).hexdigest()
+        or payload.get("selected_asset_id_sha256") != hashlib.sha256(asset_id.encode()).hexdigest()
+        or payload.get("selected_segment_id_sha256") != hashlib.sha256(segment_id.encode()).hexdigest()
         or not isinstance(event_types, list)
         or not required_events.issubset(event_types)
         or payload.get("missing_event_types") != []

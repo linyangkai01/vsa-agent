@@ -8,6 +8,16 @@ from pathlib import Path
 from typing import Any
 
 SENSITIVE_KEY_PARTS = {"authorization", "secret", "password", "token"}
+_PRIVACY_TRACE_PREFIXES = (
+    "lvs_video_understanding.",
+    "model.astream.",
+    "model.invoke.",
+    "original_ui.",
+    "report_agent.",
+    "search_agent.",
+    "top_agent.",
+    "video_understanding.",
+)
 _TRACE_PATH_CONTEXT: ContextVar[str | None] = ContextVar("vsa_live_trace_path", default=None)
 _ARTIFACT_DIR_CONTEXT: ContextVar[str | None] = ContextVar("vsa_live_artifact_dir", default=None)
 
@@ -47,8 +57,9 @@ def write_live_text_artifact(name: str, content: str) -> str | None:
     if base_dir is None:
         return None
     path = _resolve_artifact_path(base_dir, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     path.write_text(content, encoding="utf-8")
+    _ensure_private_file(path)
     return str(path)
 
 
@@ -57,11 +68,12 @@ def write_live_json_artifact(name: str, payload: dict[str, Any] | list[Any]) -> 
     if base_dir is None:
         return None
     path = _resolve_artifact_path(base_dir, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     path.write_text(
         json.dumps(serialize_live_trace_value(payload), ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    _ensure_private_file(path)
     return str(path)
 
 
@@ -70,8 +82,9 @@ def write_live_binary_artifact(name: str, content: bytes) -> str | None:
     if base_dir is None:
         return None
     path = _resolve_artifact_path(base_dir, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     path.write_bytes(content)
+    _ensure_private_file(path)
     return str(path)
 
 
@@ -115,14 +128,87 @@ def write_live_trace_event(event_type: str, payload: dict[str, Any]) -> None:
         return
 
     path = Path(trace_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     event = {
         "timestamp": datetime.now(UTC).isoformat(),
         "event_type": event_type,
-        "payload": serialize_live_trace_value(payload),
+        "payload": _privacy_safe_trace_payload(event_type, payload),
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    _ensure_private_file(path)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
+def _ensure_private_file(path: Path) -> None:
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+def _privacy_safe_trace_payload(event_type: str, payload: dict[str, Any]) -> Any:
+    """Keep search/agent traces useful without persisting provider inputs."""
+
+    serialized = serialize_live_trace_value(payload)
+    if not event_type.startswith(_PRIVACY_TRACE_PREFIXES):
+        return serialized
+    if not isinstance(serialized, dict):
+        return {"redacted": True}
+
+    allowed = {
+        key: value
+        for key, value in serialized.items()
+        if key
+        in {
+            "iteration",
+            "tool_count",
+            "tool_name",
+            "tool_call_id",
+            "result_length",
+            "cached",
+            "has_tool_calls",
+            "adapter",
+            "model",
+            "path",
+            "critic_requested",
+            "critic_applied",
+            "query_sha256",
+            "query_length",
+            "result_count",
+            "error_type",
+            "cached_result_length",
+            "context_item_count",
+            "chunk_count",
+            "chunk_duration_sec",
+            "chunk_index",
+            "duration_sec",
+            "elapsed_sec",
+            "event_count",
+            "fps",
+            "final_answer_length",
+            "frame_count",
+            "has_local_video_context",
+            "has_selected_video",
+            "has_segment",
+            "raw_output_length",
+            "max_frames",
+            "max_frames_per_chunk",
+            "markdown_length",
+            "source_type",
+            "summary_length",
+            "total_frames",
+            "validation_passed",
+            "window_duration_sec",
+            "window_end_sec",
+            "window_start_sec",
+        }
+    }
+    allowed["redacted_fields"] = sorted(key for key in serialized if key not in allowed)
+    return allowed
 
 
 def _is_sensitive_key(key: str) -> bool:

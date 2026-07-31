@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -12,12 +13,7 @@ from pydantic import BaseModel, Field
 
 from vsa_agent.config import VideoUnderstandingConfig, get_config
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.observability.live_trace import (
-    write_live_binary_artifact,
-    write_live_json_artifact,
-    write_live_text_artifact,
-    write_live_trace_event,
-)
+from vsa_agent.observability.live_trace import write_live_trace_event
 from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.video_understanding_normalization import (
@@ -29,6 +25,7 @@ from vsa_agent.tools.video_understanding_normalization import (
     _normalize_timestamp as _normalize_timestamp,
 )
 from vsa_agent.utils.frame_select import frames_for_timestamp_range
+from vsa_agent.utils.image_resize import resize_frame_to_pixel_budget
 from vsa_agent.utils.time_measure import async_measure_time
 from vsa_agent.utils.url_translation import is_remote_url, translate_url
 from vsa_agent.utils.video_file import ensure_local_video_path
@@ -54,7 +51,7 @@ class VideoUnderstandingInput(BaseModel):
     end_timestamp: str = Field(default="", description="End time (ISO 8601)")
     user_prompt: str = Field(default="", description="User query about the video")
     video_path: str = Field(default="", description="Path to video file")
-    max_frames: int = Field(default=10, description="Maximum frames to extract")
+    max_frames: int = Field(default=10, ge=1, le=24, description="Maximum frames to extract")
 
 
 def _require_cv2() -> None:
@@ -96,6 +93,7 @@ def _extract_frames(
     max_frames: int,
     start_timestamp: float = 0.0,
     end_timestamp: float | None = None,
+    max_pixels: int = 448 * 448,
 ) -> tuple[list[str], float, float, int]:
     """Extract evenly-spaced frames from a video file."""
     _require_cv2()
@@ -117,12 +115,9 @@ def _extract_frames(
         write_live_trace_event(
             "video_understanding.video_metadata",
             {
-                "video_path": video_path,
                 "fps": fps,
                 "total_frames": total_frames,
                 "duration_sec": duration_sec,
-                "start_timestamp": start_timestamp,
-                "end_timestamp": end_timestamp,
             },
         )
 
@@ -146,29 +141,20 @@ def _extract_frames(
         import base64
 
         base64_frames = []
-        frame_paths: list[str] = []
         for frame_idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 raise RuntimeError(f"Could not read frame {frame_idx}")
+            frame = resize_frame_to_pixel_budget(frame, max_pixels, cv2_module=cv2)
             _, buffer = cv2.imencode(".jpg", frame)
             buffer_bytes = buffer.tobytes()
             base64_frames.append(base64.b64encode(buffer_bytes).decode("utf-8"))
-            frame_artifact_path = write_live_binary_artifact(
-                f"frames/frame-{frame_idx:06d}.jpg",
-                buffer_bytes,
-            )
-            if frame_artifact_path:
-                frame_paths.append(frame_artifact_path)
 
         write_live_trace_event(
             "video_understanding.extract_frames",
             {
-                "video_path": video_path,
                 "frame_count": len(base64_frames),
-                "frame_indices": frame_indices,
-                "frame_paths": frame_paths,
             },
         )
 
@@ -210,14 +196,17 @@ async def _analyze_frames(
         except Exception as exc:  # pragma: no cover - exercised in integration paths
             last_error = exc
             logger.warning(
-                "VLM call attempt %d/%d failed for query '%s': %s",
+                "VLM call attempt %d/%d failed query_sha256=%s query_length=%d error_type=%s",
                 attempt,
                 tool_config.max_retries,
-                prompt_text[:60],
-                exc,
+                hashlib.sha256(prompt_text.encode()).hexdigest(),
+                len(prompt_text),
+                type(exc).__name__,
             )
 
-    raise RuntimeError(f"VLM call failed for query '{prompt_text[:60]}...': {last_error}") from last_error
+    raise RuntimeError(
+        f"VLM call failed after {tool_config.max_retries} attempts: {type(last_error).__name__}"
+    ) from None
 
 
 def _prepare_video_path(
@@ -289,10 +278,7 @@ async def _resolve_video_source(
                     write_live_trace_event(
                         "video_understanding.resolve_source",
                         {
-                            "video_path": video_path,
-                            "sensor_id": sensor_id,
                             "source_type": source_type,
-                            "resolved_source": clip.local_path,
                         },
                     )
                     return clip.local_path
@@ -300,10 +286,7 @@ async def _resolve_video_source(
                     write_live_trace_event(
                         "video_understanding.resolve_source",
                         {
-                            "video_path": video_path,
-                            "sensor_id": sensor_id,
                             "source_type": source_type,
-                            "resolved_source": clip.clip_url,
                         },
                     )
                     return clip.clip_url
@@ -315,10 +298,7 @@ async def _resolve_video_source(
             write_live_trace_event(
                 "video_understanding.resolve_source",
                 {
-                    "video_path": video_path,
-                    "sensor_id": sensor_id,
                     "source_type": source_type,
-                    "resolved_source": resolved_source,
                 },
             )
             return resolved_source
@@ -327,10 +307,7 @@ async def _resolve_video_source(
     write_live_trace_event(
         "video_understanding.resolve_source",
         {
-            "video_path": video_path,
-            "sensor_id": sensor_id,
             "source_type": source_type,
-            "resolved_source": video_path,
         },
     )
     return video_path
@@ -358,6 +335,10 @@ async def analyze_video_segment(
 ) -> UnderstandingResult:
     """Analyze a single short video or bounded segment and return structured output."""
     tool_config = _get_video_understanding_config(config)
+    if not 1 <= max_frames <= tool_config.max_frames:
+        raise ValueError(f"max_frames must be within 1..{tool_config.max_frames}")
+    if frames is not None and len(frames) > tool_config.max_frames:
+        raise ValueError(f"frame input exceeds configured limit of {tool_config.max_frames}")
     prompt_text = prompt_used or await generate_understanding_prompt(
         query,
         context={"source_type": source_type},
@@ -387,6 +368,7 @@ async def analyze_video_segment(
             max_frames,
             start_timestamp=start_offset or 0.0,
             end_timestamp=end_offset,
+            max_pixels=tool_config.max_pixels,
         )
 
     raw_output = await _analyze_frames(
@@ -397,10 +379,9 @@ async def analyze_video_segment(
     )
     thinking, _ = _parse_thinking_from_content(raw_output)
 
-    raw_artifact_path = write_live_text_artifact("tool-results/video-understanding-raw.txt", raw_output)
     write_live_trace_event(
         "video_understanding.vlm_result",
-        {"raw_output_length": len(raw_output), "artifact_path": raw_artifact_path},
+        {"raw_output_length": len(raw_output)},
     )
 
     result = _normalize_model_response(
@@ -419,20 +400,12 @@ async def analyze_video_segment(
     result.metadata.update(
         {
             "frame_count": len(frames or []),
-            "raw_artifact_path": raw_artifact_path,
         }
     )
-    result_artifact_path = write_live_json_artifact(
-        "tool-results/video-understanding-result.json",
-        result.model_dump(),
-    )
-    result.metadata["result_artifact_path"] = result_artifact_path
     write_live_trace_event(
         "video_understanding.result",
         {
-            "summary_text": result.summary_text,
             "event_count": len(result.events),
-            "artifact_path": result_artifact_path,
         },
     )
     return result
@@ -501,8 +474,7 @@ async def analyze_video(
     duration_sec = total_frames / fps if fps > 0 else 0
 
     logger.info(
-        "Video: %s, duration: %.1fs, fps: %.1f, frames: %d",
-        resolved_video_path,
+        "Video metadata: duration=%.1fs fps=%.1f frames=%d",
         duration_sec,
         fps,
         total_frames,
@@ -585,6 +557,7 @@ async def _analyze_chunked(
             FRAMES_PER_CHUNK,
             start_timestamp=start,
             end_timestamp=end,
+            max_pixels=tool_config.max_pixels,
         )
 
         if frames:
@@ -647,7 +620,6 @@ async def video_understanding_tool(
         summary = await summarize_understanding_result(
             result,
             query,
-            model_adapter,
         )
         return summary.text_output
     return result.summary_text

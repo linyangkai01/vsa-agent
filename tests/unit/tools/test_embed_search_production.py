@@ -145,6 +145,27 @@ async def test_production_embedding_failure_is_controlled_and_never_generates_mo
 
 
 @pytest.mark.asyncio
+async def test_sensitive_query_is_rejected_before_remote_embedding(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class EmbedClient:
+        async def embed_query(self, query: str):
+            calls.append(query)
+            return [0.1]
+
+    monkeypatch.setattr(embed_search, "_create_default_embed_client", lambda **_: EmbedClient())
+    config = SearchBackendConfig(enabled=True, allow_mock_fallback=False)
+
+    with pytest.raises(embed_search.SearchDependencyError, match="privacy policy"):
+        await embed_search._embed_query(
+            embed_search.QueryInput(params={"query": "camera-77 near worker"}),
+            config,
+        )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_production_search_passes_fail_closed_policy_to_default_embed_client(monkeypatch) -> None:
     fake_es = FakeES([])
     received_policy: list[bool] = []

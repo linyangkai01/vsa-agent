@@ -306,7 +306,8 @@ async def test_tool_node_streams_rich_tool_call_and_result_steps(monkeypatch):
     tool_result = chunks[1]
     assert tool_call.type == AgentMessageChunkType.TOOL_CALL
     assert "Calling: video_understanding" in tool_call.content
-    assert "video_path: /data/project/lyk/video/1597042367-1-192.mp4" in tool_call.content
+    assert "video_path: <redacted>" in tool_call.content
+    assert "/data/project/lyk/video/1597042367-1-192.mp4" not in tool_call.content
     assert "query: identify safety risks" in tool_call.content
     assert "secret-value" not in tool_call.content
     assert "api_key: <redacted>" in tool_call.content

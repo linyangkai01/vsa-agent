@@ -352,7 +352,9 @@ async def test_manifest_records_versions_checksums_and_deterministic_projection(
             "model": "embedding-model-v1",
             "provider": "fake-openai-embedding",
         },
+        "canonical_mapping_version": "safety-event-map-v1",
         "expected_embedding_dims": 3,
+        "privacy_policy_version": "remote-egress-v1",
         "prompt_version": "prompt-v1",
         "representative_frames": 2,
         "segmenter": {

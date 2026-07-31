@@ -225,12 +225,12 @@ class _BusinessApi:
             if self.incomplete_chat_trace:
                 event_types.remove("video_understanding.result")
             self.chat_traces[trace_id] = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "trace_id": trace_id,
-                "conversation_id": request.headers["Conversation-Id"],
-                "user_message_id": request.headers["User-Message-ID"],
-                "selected_asset_id": context["assetId"],
-                "selected_segment_id": context["segmentId"],
+                "conversation_id_sha256": hashlib.sha256(request.headers["Conversation-Id"].encode()).hexdigest(),
+                "user_message_id_sha256": hashlib.sha256(request.headers["User-Message-ID"].encode()).hexdigest(),
+                "selected_asset_id_sha256": hashlib.sha256(context["assetId"].encode()).hexdigest(),
+                "selected_segment_id_sha256": hashlib.sha256(context["segmentId"].encode()).hexdigest(),
                 "event_types": event_types,
                 "missing_event_types": (["video_understanding.result"] if self.incomplete_chat_trace else []),
                 "video_tool_call_count": 1,

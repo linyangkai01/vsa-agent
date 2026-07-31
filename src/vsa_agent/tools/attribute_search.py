@@ -134,7 +134,7 @@ async def _perform_frame_lookups(
                 )
                 result = result.model_copy(update={"metadata": metadata})
         except Exception as exc:
-            logger.debug("Frame lookup failed for %s/%s: %s", metadata.sensor_id, metadata.object_id, exc)
+            logger.debug("Frame lookup failed error_type=%s", type(exc).__name__)
 
         enriched.append(result)
 
@@ -285,7 +285,7 @@ async def search_single_attribute(
 
         return await _perform_frame_lookups(results, es_client, frames_index)
     except Exception as exc:
-        logger.warning("ES attribute search failed, using mock: %s", exc)
+        logger.warning("ES attribute search failed; using mock error_type=%s", type(exc).__name__)
         return await _mock_attribute_search(query_text, search_input)
     finally:
         if close_client:
@@ -322,7 +322,7 @@ async def search_by_attributes(
                 search_config.frames_index,
             )
     except Exception as exc:
-        logger.warning("ES search_by_attributes failed: %s", exc)
+        logger.warning("ES search_by_attributes failed error_type=%s", type(exc).__name__)
     finally:
         if es_client is not None:
             await es_client.close()
@@ -396,7 +396,7 @@ async def attribute_search_tool(attributes: list[str], store=None, top_k: int = 
         if results:
             return SearchOutput(data=results[:top_k])
     except Exception as exc:
-        logger.warning("ES attribute search path failed, falling back to store: %s", exc)
+        logger.warning("ES attribute search path failed; falling back error_type=%s", type(exc).__name__)
 
     if store is None:
         from vsa_agent.tools.vector_store import get_default_store
@@ -416,5 +416,5 @@ async def attribute_search_tool(attributes: list[str], store=None, top_k: int = 
         deduped.sort(key=lambda item: item.similarity, reverse=True)
         return SearchOutput(data=deduped[:top_k])
     except Exception as exc:
-        logger.error("Attribute search failed: %s", exc)
+        logger.error("Attribute search failed error_type=%s", type(exc).__name__)
         return SearchOutput(data=[])

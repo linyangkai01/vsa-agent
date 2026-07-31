@@ -1,4 +1,4 @@
-active_profile: dashscope_remote
+active_profile: local_vlm_hybrid
 backends:
   dashscope:
     provider: openai_compatible
@@ -6,8 +6,7 @@ backends:
     api_key_env: DASHSCOPE_API_KEY
   local_vllm:
     provider: vllm
-    base_url: http://localhost:8000/v1
-    api_key_env: VLLM_API_KEY
+    base_url: http://127.0.0.1:8001/v1
     api_key_required: false
   test_openai:
     provider: openai_compatible
@@ -24,13 +23,16 @@ profiles:
     embedding:
       backend: dashscope
       model: text-embedding-v4
-  hybrid_dashscope_llm_local_vlm:
+  local_vlm_hybrid:
     llm:
       backend: dashscope
       model: qwen-turbo
     vlm:
       backend: local_vllm
-      model: Qwen3-VL-8B-Instruct
+      model: qwen2.5-vl-local
+    embedding:
+      backend: dashscope
+      model: text-embedding-v4
   test:
     llm:
       backend: test_openai
@@ -43,6 +45,27 @@ runtime:
   video_path: /data/project/lyk/video/1597042367-1-192.mp4
   trace_dir: artifacts/live-video-runs
   qa_query: Describe what happened in this video and identify any safety risks.
+local_vllm:
+  enabled: true
+  conda_env: vsa-vllm
+  model_repository: Qwen/Qwen2.5-VL-7B-Instruct-AWQ
+  model_revision: 536a35794df8831aa814970ee8f89eff577e7718
+  served_model_name: qwen2.5-vl-local
+  model_root: /data/project/lyk/models/vsa-agent
+  host: 127.0.0.1
+  port: 8001
+  gpu_memory_utilization: 0.70
+  gpu_safety_reserve_mib: 4096
+  min_available_ram_gib: 24
+  warn_available_ram_gib: 32
+  max_model_len: 16384
+  max_num_seqs: 1
+  max_num_batched_tokens: 16384
+  max_images: 24
+  min_pixels: 3136
+  max_pixels: 200704
+  dtype: half
+  quantization: awq
 agent:
   max_iterations: 15
 tools:
@@ -96,8 +119,9 @@ prompts:
   vlm_format_instruction: DON'T MAKE UP ANYTHING NOT FROM THE VIDEO. DON'T HALLUCINATE.
 video_understanding:
   max_fps: 2.0
-  min_pixels: 50176
-  max_pixels: 921600
+  max_frames: 24
+  min_pixels: 3136
+  max_pixels: 200704
   reasoning_effort: medium
   filter_thinking: true
   max_retries: 3

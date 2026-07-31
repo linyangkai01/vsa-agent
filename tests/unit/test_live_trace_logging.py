@@ -289,8 +289,10 @@ async def test_openai_adapter_logs_model_request_and_response(trace_dir, monkeyp
         "model.invoke.request",
         "model.invoke.response",
     ]
-    assert events[0]["payload"]["messages"][0]["content"] == "hello model"
-    assert events[1]["payload"]["response"]["content"] == "real model answer"
+    assert "messages" not in events[0]["payload"]
+    assert "response" not in events[1]["payload"]
+    assert "hello model" not in trace_path.read_text(encoding="utf-8")
+    assert "real model answer" not in trace_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -318,5 +320,7 @@ async def test_vllm_adapter_logs_model_request_and_response(trace_dir, monkeypat
         "model.invoke.response",
     ]
     assert events[0]["payload"]["adapter"] == "vllm"
-    assert events[0]["payload"]["messages"][0]["content"] == "hello vllm"
-    assert events[1]["payload"]["response"]["content"] == "local vllm answer"
+    assert "messages" not in events[0]["payload"]
+    assert "response" not in events[1]["payload"]
+    assert "hello vllm" not in trace_path.read_text(encoding="utf-8")
+    assert "local vllm answer" not in trace_path.read_text(encoding="utf-8")

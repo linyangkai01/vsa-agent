@@ -77,4 +77,7 @@ async def test_search_agent_logs_decomposition_tool_calls_and_answer(trace_dir, 
     assert "search_agent.attribute_search" in event_types
     assert "search_agent.answer" in event_types
     answer_event = events[event_types.index("search_agent.answer")]
-    assert answer_event["payload"]["text_answer"] == "person walking near forklift"
+    assert answer_event["payload"]["result_count"] == 1
+    assert answer_event["payload"]["query_length"] == len("find a person walking near a forklift")
+    assert "text_answer" not in answer_event["payload"]
+    assert "person walking near forklift" not in trace_path.read_text(encoding="utf-8")

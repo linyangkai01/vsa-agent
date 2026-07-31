@@ -1,12 +1,12 @@
 # Development Status
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 ## Current State
 
 - Active development track: local vLLM video privacy, resource admission and full remote-provider egress control.
-- Integration target: local and remote `master`; the Chinese design is accepted and implementation planning is the next gate. No local-vLLM implementation is claimed complete yet.
-- Phase: the existing real recorded-video and original-UI business path is proven. The next change moves visual understanding to an official local AWQ model while retaining DashScope text LLM and embedding behind a strict privacy gateway.
+- Integration target: local and remote `master`; the accepted design is implemented on `codex/local-vllm-video-privacy` and is awaiting final Ubuntu bootstrap and runtime acceptance before merge.
+- Phase: local implementation and automated verification are complete. The remaining gate is the real Ubuntu vLLM bootstrap, resource/warm-up validation, original-UI business flow and shutdown evidence.
 - Goal: keep video pixels and identifying metadata on the Ubuntu server, reject unsafe startup when GPU/RAM/disk/process ownership is insufficient, and preserve the complete original-UI upload, processing, search, playback and Q&A flow.
 - Confirmed first-stage runtime: one RTX 4090 D, `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` on local vLLM, single VLM concurrency, DashScope LLM/embedding, local ES/SQLite/files and one supervised stack launcher.
 - Out of scope for this change: multi-GPU, remote visual fallback, automatic model downgrade, GPU process preemption, public-network serving and administrator-only installation.
@@ -21,6 +21,26 @@ Last updated: 2026-07-30
 - All DashScope LLM/embedding calls pass through one `RemoteProviderGateway` using closed `RemoteSafe*` DTOs. Raw VLM descriptions, paths, filenames, sensor IDs, absolute timestamps and local search results cannot cross the boundary.
 - Privacy projection is persistent and versioned; segment-level checkpoints support safe recovery without promising impossible provider exactly-once semantics.
 - Accepted Chinese specification: `docs/specs/local-vllm-video-privacy/spec.md`.
+
+## Local vLLM Privacy Implementation
+
+Implemented on the current feature branch:
+
+- Added the fixed-revision, hash-verified user-level bootstrap and offline preflight for `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`, including GPU, effective RAM, `/dev/shm`, per-filesystem disk and dependency-manifest checks.
+- Integrated supervised local vLLM startup, health/model/single-frame probes, strong process identity, unknown-listener rejection, fan-out shutdown and selected-GPU release verification into the one-command runtime stack.
+- Added the `local_vlm_hybrid` profile: local loopback VLM, DashScope `qwen-turbo` LLM and `text-embedding-v4` embedding.
+- Added closed `RemoteSafe*` DTOs, canonical enum-only ingest embedding, query screening and the single `RemoteProviderGateway` used by production remote LLM/embedding calls.
+- Kept selected video path, filename, sensor, absolute time, local evidence, tool results and history outside remote TopAgent messages. The original UI now carries server-validated video context in local agent state and the local tool node injects it only at execution time.
+- Removed request, frame, raw VLM output and local tool-result trace artifacts; logs and traces retain hashes, lengths, counts, model identity and error types instead of sensitive values.
+- Removed the arbitrary model-adapter hook from `vss_summarize`; video summaries remain local until a typed `RemoteSafeSearchContext` protocol is implemented.
+
+Local verification on 2026-07-31:
+
+- Effective Windows unit set: `1525 passed, 1 skipped` (Linux Bash lifecycle and two invalid local subprocess/encoding harnesses excluded).
+- Local-vLLM bootstrap/preflight/launcher contracts: `65 passed`.
+- Privacy/UI/TopAgent/video focused contracts: `86 passed`; full selected-video context focused contracts: `41 passed`.
+- Ruff, `compileall`, `git diff --check` and Ubuntu `bash -n` for `es-runtime-stack.sh` pass.
+- Server read-only resource snapshot: RTX 4090 D, 24,564 MiB total, 24,211 MiB free, 0% utilization, no compute process. Bootstrap is not yet installed.
 
 ## Previous Accepted Design
 
@@ -204,4 +224,4 @@ Server validation status: Ubuntu fake-provider browser E2E and the 2026-07-24 re
 
 ## Next Recommended Work
 
-完成 schema v2 / dataset `1.1.0` 的本地验证、提交和服务器同步；随后在 Ubuntu 执行无下载固定身份复核，并在全新隔离 data-root/ES namespace 中依次重跑 quick、release、full 和原版 UI 真实叉车门禁。四项均通过、失败路径和最终清理证据完整后再归档；旧 dataset 结果不得替代本次验收。归档完成后继续长期运行监控、容量与保留策略。
+提交并合并当前 local-vLLM 隐私实现，推送 `master` 后在 Ubuntu 执行首次 bootstrap 与幂等复跑。随后运行单脚本启动、单帧和 24 帧压力、真实 DashScope LLM/embedding、原版 UI 上传/搜索/播放/问答、全链路 canary、未知资源拒绝与退出后 60 秒显存恢复验证。全部通过后再把规格标记为已验收，并恢复 dataset `1.1.0` 的 quick/release/full 业务基线。

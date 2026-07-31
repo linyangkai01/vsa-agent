@@ -220,3 +220,16 @@ async def test_search_tool_uses_registered_embed_search_when_store_not_injected(
     output = await search_tool("forklift near worker", top_k=3)
 
     assert output.data[0].video_name == "es-hit.mp4"
+
+
+@pytest.mark.asyncio
+async def test_sensitive_query_is_not_sent_to_remote_decomposer():
+    from vsa_agent.tools.search import decompose_query
+
+    class Adapter:
+        async def invoke(self, messages):
+            raise AssertionError(f"remote adapter must not be called: {messages!r}")
+
+    result = await decompose_query("camera-77 near worker", Adapter())
+
+    assert result.query == "camera-77 near worker"

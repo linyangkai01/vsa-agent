@@ -3,7 +3,7 @@ import json
 import logging
 from typing import get_type_hints
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field, create_model
 from vsa_agent.agents.data_models import AgentDecision, AgentMessageChunk, AgentMessageChunkType, AgentState
 from vsa_agent.config import get_config
 from vsa_agent.observability.live_trace import write_live_text_artifact, write_live_trace_event
+from vsa_agent.privacy.gateway import RemoteProviderGateway
+from vsa_agent.privacy.schemas import PrivacyPolicyError, RemoteSafeSearchQuery, opaque_result_ref
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,32 @@ _INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter", "kwa
 _MAX_TOOL_RESULT_CHARS = 800
 _MAX_VIDEO_TOOL_RESULT_CHARS = 3200
 _VIDEO_RESULT_TOOL_NAMES = {"video_understanding", "lvs_video_understanding"}
+_LOCAL_METADATA_TOOL_NAMES = {
+    "attribute_search",
+    "critic_agent",
+    "embed_search",
+    "find_video",
+    "find_video_by_name",
+    "fov_counts_with_chart",
+    "frame_extract",
+    "geolocation",
+    "incidents",
+    "lvs_video_understanding",
+    "multi_incident_formatter",
+    "multi_report_agent",
+    "report_agent",
+    "report_gen",
+    "search",
+    "search_agent",
+    "template_report_gen",
+    "video_caption",
+    "video_detailed_caption",
+    "video_frame_timestamp",
+    "video_report_gen",
+    "video_skim_caption",
+    "video_understanding",
+    "vss_summarize",
+}
 _PRIMARY_VIDEO_RESULT_KEYWORDS = (
     "risk",
     "hazard",
@@ -94,6 +122,14 @@ _VIDEO_RISK_CATEGORIES = (
     ),
 )
 _SENSITIVE_ARG_MARKERS = ("key", "token", "secret", "password", "credential")
+_LOCAL_ONLY_ARG_NAMES = {
+    "asset_id",
+    "end_timestamp",
+    "segment_id",
+    "sensor_id",
+    "start_timestamp",
+    "video_path",
+}
 _UNRECOVERABLE_TOOL_ERROR_MARKERS = (
     "AllocationQuota.FreeTierOnly",
     "free quota has been exhausted",
@@ -158,20 +194,12 @@ def _build_langchain_tools() -> list[StructuredTool]:
 
 
 def _sanitize_tool_result(name: str, result: str) -> str:
-    if name == "frame_extract":
-        try:
-            data = json.loads(result)
-            if "frames" in data:
-                frame_count = len(data["frames"])
-                data["frames"] = f"[{frame_count} base64 frames - use frame_key to access]"
-                return json.dumps(data, ensure_ascii=False)
-        except (json.JSONDecodeError, TypeError):
-            pass
+    if name in _LOCAL_METADATA_TOOL_NAMES:
+        return "Local media operation completed. Its details are available only in the local UI."
     return result
 
 
 def _truncate_result(name: str, result: str) -> str:
-    result = _sanitize_tool_result(name, result)
     if len(result) <= _MAX_TOOL_RESULT_CHARS:
         return result
     if name in _VIDEO_RESULT_TOOL_NAMES:
@@ -312,7 +340,7 @@ def _format_unrecoverable_tool_error_answer(tool_name: str, result: str) -> str:
 
 def _redact_tool_arg(name: str, value) -> str:
     lowered = name.lower()
-    if any(marker in lowered for marker in _SENSITIVE_ARG_MARKERS):
+    if lowered in _LOCAL_ONLY_ARG_NAMES or any(marker in lowered for marker in _SENSITIVE_ARG_MARKERS):
         return "<redacted>"
     if isinstance(value, str):
         return _truncate_text(value, 300)
@@ -384,6 +412,10 @@ def _normalize_tool_args(state: AgentState, name: str, args: dict) -> dict:
     current_content = getattr(state.current_message, "content", "")
     if isinstance(current_content, str) and current_content.strip():
         normalized["query"] = current_content.strip()
+    for key in ("video_path", "sensor_id", "start_timestamp", "end_timestamp"):
+        value = state.local_video_context.get(key)
+        if value is not None and value != "":
+            normalized[key] = value
     return normalized
 
 
@@ -413,14 +445,19 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
     logger.debug("Starting agent node")
 
     cfg = get_config()
-    prompt: list[BaseMessage] = [SystemMessage(content=cfg.prompts.default_system)]
-
-    if state.conversation_history:
-        prompt.extend(state.conversation_history)
-    if state.current_message:
-        prompt.append(state.current_message)
-    if state.agent_scratchpad:
-        prompt.extend(state.agent_scratchpad)
+    current_content = getattr(state.current_message, "content", "")
+    if not isinstance(current_content, str) or not current_content.strip():
+        state.final_answer = "The request is empty."
+        return state
+    try:
+        safe_query = RemoteSafeSearchQuery(query=current_content)
+    except (PrivacyPolicyError, ValueError):
+        state.final_answer = (
+            "The request contains local identifiers or other sensitive details. "
+            "Use the local search controls, or rewrite it without paths, camera IDs, "
+            "absolute times, locations, or personal identifiers."
+        )
+        return state
 
     adapter = create_model_adapter()
     lc_tools = _build_langchain_tools()
@@ -441,11 +478,16 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
         "top_agent.agent.request",
         {
             "iteration": state.iteration_count + 1,
-            "messages": prompt,
+            "query_sha256": safe_query.query_sha256,
+            "query_length": len(safe_query.query),
             "tool_count": len(lc_tools),
         },
     )
-    response = await adapter.invoke(prompt)
+    response = await RemoteProviderGateway().invoke_agent(
+        safe_query,
+        adapter,
+        system_prompt=cfg.prompts.default_system,
+    )
     state.iteration_count += 1
     write_live_trace_event(
         "top_agent.agent.response",
@@ -493,7 +535,7 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
         )
         write_live_trace_event(
             "top_agent.tool.call",
-            {"tool_name": name, "tool_args": args, "tool_call_id": call_id},
+            {"tool_name": name, "tool_args": _summarize_tool_args(args), "tool_call_id": call_id},
         )
 
         cached_result = _find_cached_tool_result(state, name, args)
@@ -528,10 +570,12 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
             result = f"Error: {e}"
 
         result_str = str(result)
-        truncated = _truncate_result(name, result_str)
-        artifact_path = write_live_text_artifact(
-            f"tool-results/{call_id}-{name}.txt",
-            result_str,
+        remote_safe_result = _sanitize_tool_result(name, result_str)
+        truncated = _truncate_result(name, remote_safe_result)
+        artifact_path = (
+            None
+            if name in _LOCAL_METADATA_TOOL_NAMES
+            else write_live_text_artifact(f"tool-results/{call_id}-{name}.txt", result_str)
         )
         write_live_trace_event(
             "top_agent.tool.result",
@@ -569,7 +613,18 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> AgentState:
                 },
             )
         )
-        state.agent_scratchpad.append(ToolMessage(content=truncated, tool_call_id=call_id))
+        state.agent_scratchpad.append(
+            ToolMessage(
+                content=(
+                    f"{truncated} Local result reference: {opaque_result_ref(name, call_id)}."
+                    if name in _LOCAL_METADATA_TOOL_NAMES
+                    else truncated
+                ),
+                tool_call_id=call_id,
+            )
+        )
+        if name in _LOCAL_METADATA_TOOL_NAMES:
+            state.final_answer = result_str
 
     return state
 
@@ -579,7 +634,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig) -> AgentState
     writer(AgentMessageChunk(type=AgentMessageChunkType.FINAL, content=state.final_answer))
     write_live_trace_event(
         "top_agent.final",
-        {"final_answer": state.final_answer},
+        {"final_answer_length": len(state.final_answer)},
     )
 
     if state.current_message:

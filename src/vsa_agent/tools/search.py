@@ -10,9 +10,10 @@ Design Pattern: #13 Three-Path Search Strategy.
 import json
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from vsa_agent.privacy.gateway import RemoteProviderGateway
+from vsa_agent.privacy.schemas import RemoteSafeSearchQuery
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.search_pipeline import (
     filter_rejected_sensors,
@@ -159,7 +160,7 @@ async def execute_core_search(
                     content=f"Attribute search returned {len(search_results)} results",
                 )
             except Exception as e:
-                logger.error("Attribute search failed: %s", e)
+                logger.error("Attribute search failed error_type=%s", type(e).__name__)
 
         elif route == "embed":
             logger.info("Path 2: embed-only search")
@@ -177,7 +178,7 @@ async def execute_core_search(
                             content=f"Embed confidence {max_score:.3f} below threshold",
                         )
             except Exception as e:
-                logger.error("Embed search failed: %s", e)
+                logger.error("Embed search failed error_type=%s", type(e).__name__)
 
         elif route == "fusion":
             logger.info("Path 3: fusion search")
@@ -186,12 +187,12 @@ async def execute_core_search(
             try:
                 embed_results = normalize_search_results(await embed_search())
             except Exception as e:
-                logger.error("Embed in fusion failed: %s", e)
+                logger.error("Embed in fusion failed error_type=%s", type(e).__name__)
             if attribute_search_fn is not None:
                 try:
                     attr_results_list = normalize_search_results(await attribute_search_fn())
                 except Exception as e:
-                    logger.error("Attribute in fusion failed: %s", e)
+                    logger.error("Attribute in fusion failed error_type=%s", type(e).__name__)
             search_results = select_fusion_results(
                 embed_results,
                 attr_results_list,
@@ -237,7 +238,7 @@ async def execute_core_search(
                 )
                 search_results = filter_rejected_sensors(search_results, rejected_results)
             except Exception as e:
-                logger.error("Critic verification failed: %s", e)
+                logger.error("Critic verification failed error_type=%s", type(e).__name__)
 
         if not should_apply_critic(
             enable_critic=config.enable_critic,
@@ -282,13 +283,16 @@ User query: __USER_QUERY__"""
 
 async def decompose_query(user_query: str, model_adapter) -> DecomposedQuery:
     """Decompose a natural language query into structured search parameters."""
-    user_prompt = DECOMPOSITION_USER_TEMPLATE.replace("__USER_QUERY__", user_query)
-    messages = [
-        SystemMessage(content=DECOMPOSITION_SYSTEM_PROMPT),
-        HumanMessage(content=user_prompt),
-    ]
     try:
-        response = await model_adapter.invoke(messages)
+        safe_query = RemoteSafeSearchQuery(query=user_query)
+    except Exception as error:
+        logger.warning(
+            "Search query was not sent to the remote decomposer error_type=%s",
+            type(error).__name__,
+        )
+        return DecomposedQuery(query=user_query)
+    try:
+        response = await RemoteProviderGateway().decompose_search(safe_query, model_adapter)
         content = str(response.content) if response.content is not None else ""
         content = content.replace(chr(92) + "n", chr(10))
         text = content.strip()
@@ -301,8 +305,10 @@ async def decompose_query(user_query: str, model_adapter) -> DecomposedQuery:
             end = text.find("```", start)
             text = text[start:end].strip() if end != -1 else text[start:].strip()
         extracted = json.loads(text)
+        # The remote model may not introduce a new, unvalidated query.  Keep the
+        # locally-screened user query and use the model only for structure.
         return DecomposedQuery(
-            query=extracted.get("query", user_query),
+            query=safe_query.query,
             video_sources=extracted.get("video_sources", []) or [],
             source_type=extracted.get("source_type", "video_file") or "video_file",
             timestamp_start=extracted.get("timestamp_start"),
@@ -313,7 +319,7 @@ async def decompose_query(user_query: str, model_adapter) -> DecomposedQuery:
             min_cosine_similarity=extracted.get("min_cosine_similarity"),
         )
     except Exception as e:
-        logger.warning("Failed to decompose query, using raw input: %s", e)
+        logger.warning("Failed to decompose query, using raw input error_type=%s", type(e).__name__)
         return DecomposedQuery(query=user_query)
 
 
@@ -624,7 +630,7 @@ async def search_tool(
         try:
             return await _run_attribute_search(attributes, top_k, attr_store)
         except Exception as e:
-            logger.error("Attribute-only search failed: %s", e)
+            logger.error("Attribute-only search failed error_type=%s", type(e).__name__)
             return SearchOutput(data=[])
 
     if not attributes:
@@ -632,7 +638,7 @@ async def search_tool(
         try:
             return await _run_embed_search(query, top_k, embed_store)
         except Exception as e:
-            logger.error("Embed-only search failed: %s", e)
+            logger.error("Embed-only search failed error_type=%s", type(e).__name__)
             return SearchOutput(data=[])
 
     logger.info("Path 3: fusion search (embed + attribute rerank)")
@@ -643,13 +649,13 @@ async def search_tool(
         embed_output = await _run_embed_search(query, top_k, embed_store)
         embed_results = normalize_search_results(embed_output)
     except Exception as e:
-        logger.error("Embed search in fusion failed: %s", e)
+        logger.error("Embed search in fusion failed error_type=%s", type(e).__name__)
 
     try:
         attr_output = await _run_attribute_search(attributes, top_k, attr_store)
         attr_results = normalize_search_results(attr_output)
     except Exception as e:
-        logger.error("Attribute search in fusion failed: %s", e)
+        logger.error("Attribute search in fusion failed error_type=%s", type(e).__name__)
 
     combined = rank_unique_results([*embed_results, *attr_results])
     return SearchOutput(data=trim_search_results(combined, top_k))

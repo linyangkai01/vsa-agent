@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 
+from vsa_agent.privacy.gateway import RemoteProviderGateway
+from vsa_agent.privacy.schemas import RemoteSafeIngestEvent
 from vsa_agent.recorded_video.errors import ErrorCode, RecordedVideoError
 from vsa_agent.recorded_video.models import Segment
 from vsa_agent.recorded_video.ports import Embedding, VisionDescription
@@ -249,7 +251,34 @@ class OpenAIVisionProvider(_OpenAIProvider):
 class OpenAIEmbeddingProvider(_OpenAIProvider):
     """Generate one validated vector through the embeddings endpoint."""
 
+    def __init__(self, *args: Any, gateway: RemoteProviderGateway | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._gateway = gateway or RemoteProviderGateway()
+
     async def embed(
+        self,
+        event: RemoteSafeIngestEvent,
+        *,
+        expected_dims: int,
+        asset_id: str,
+        job_id: str,
+    ) -> Embedding:
+        expected_dims = _positive_int(expected_dims, "expected_dims")
+        asset_id = _normalize_context_id(asset_id, "asset_id")
+        job_id = _normalize_context_id(job_id, "job_id")
+        if not isinstance(event, RemoteSafeIngestEvent):
+            raise _schema_error("MODEL_INPUT: embedding requires a RemoteSafe DTO")
+        return await self._gateway.embed_ingest(
+            event,
+            lambda text: self._embed_text(
+                text,
+                expected_dims=expected_dims,
+                asset_id=asset_id,
+                job_id=job_id,
+            ),
+        )
+
+    async def _embed_text(
         self,
         text: str,
         *,
@@ -260,8 +289,6 @@ class OpenAIEmbeddingProvider(_OpenAIProvider):
         expected_dims = _positive_int(expected_dims, "expected_dims")
         asset_id = _normalize_context_id(asset_id, "asset_id")
         job_id = _normalize_context_id(job_id, "job_id")
-        if not text.strip():
-            raise _schema_error("MODEL_INPUT: embedding text must not be blank")
 
         response = await self._post(
             "embeddings",

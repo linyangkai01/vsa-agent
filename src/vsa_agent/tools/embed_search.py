@@ -14,9 +14,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from elasticsearch import AsyncElasticsearch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from vsa_agent.config import SearchBackendConfig
+from vsa_agent.privacy.gateway import RemoteProviderGateway
+from vsa_agent.privacy.schemas import PrivacyPolicyError, RemoteSafeSearchQuery
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.search import SearchOutput
 
@@ -88,7 +90,11 @@ async def _generate_query_embedding(query_input: QueryInput, embed_client=None) 
     # If embed_client is provided, use it for real embeddings
     if embed_client is not None:
         try:
-            return await embed_client.embed_query(query_text)
+            safe_query = RemoteSafeSearchQuery(query=query_text)
+        except (PrivacyPolicyError, ValidationError) as error:
+            raise SearchDependencyError("query rejected by privacy policy") from error
+        try:
+            return await RemoteProviderGateway().embed_search(safe_query, embed_client.embed_query)
         except Exception as error:
             logger.warning("Embedding generation failed; mock fallback enabled error_type=%s", type(error).__name__)
 
@@ -110,7 +116,11 @@ async def _embed_query(query_input: QueryInput, search_config: SearchBackendConf
             return await _generate_query_embedding(query_input)
         raise SearchDependencyError("production query embedding is unavailable")
     try:
-        vector = await embed_client.embed_query(query_input.params.get("query", ""))
+        safe_query = RemoteSafeSearchQuery(query=query_input.params.get("query", ""))
+    except (PrivacyPolicyError, ValidationError) as error:
+        raise SearchDependencyError("query rejected by privacy policy") from error
+    try:
+        vector = await RemoteProviderGateway().embed_search(safe_query, embed_client.embed_query)
     except Exception:
         if search_config.allow_mock_fallback:
             return await _generate_query_embedding(query_input)

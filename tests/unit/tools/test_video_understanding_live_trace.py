@@ -65,11 +65,12 @@ def test_extract_frames_logs_metadata_without_base64_payloads(trace_dir, monkeyp
     assert "video_understanding.video_metadata" in event_types
     assert "video_understanding.extract_frames" in event_types
     frame_event = events[event_types.index("video_understanding.extract_frames")]
-    assert len(frame_event["payload"]["frame_paths"]) == 3
-    for frame_path in frame_event["payload"]["frame_paths"]:
-        assert Path(frame_path).exists()
+    assert frame_event["payload"]["frame_count"] == 3
+    assert "frame_paths" not in frame_event["payload"]
+    assert not (trace_dir / "frames").exists()
     serialized = trace_path.read_text(encoding="utf-8")
     assert "data:image/jpeg;base64" not in serialized
+    assert "video.mp4" not in serialized
 
 
 @pytest.mark.asyncio
@@ -102,5 +103,6 @@ async def test_analyze_video_segment_logs_vlm_and_normalized_result(trace_dir, m
     event_types = [event["event_type"] for event in events]
     assert "video_understanding.vlm_result" in event_types
     assert "video_understanding.result" in event_types
-    assert (trace_dir / "tool-results" / "video-understanding-raw.txt").exists()
-    assert (trace_dir / "tool-results" / "video-understanding-result.json").exists()
+    assert not (trace_dir / "tool-results" / "video-understanding-raw.txt").exists()
+    assert not (trace_dir / "tool-results" / "video-understanding-result.json").exists()
+    assert "person walks through the scene" not in trace_path.read_text(encoding="utf-8")

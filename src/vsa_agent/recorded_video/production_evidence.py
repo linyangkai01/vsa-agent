@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -552,8 +553,9 @@ def scan_runtime_logs(handles: Sequence[RunHandle], business: BusinessEvidence |
             matching = [
                 trace_dir
                 for payload, trace_dir in requests
-                if payload.get("selected_asset_id") == case.asset_id
-                and payload.get("selected_segment_id") in case.segment_ids
+                if payload.get("selected_asset_id_sha256") == hashlib.sha256(case.asset_id.encode()).hexdigest()
+                and payload.get("selected_segment_id_sha256")
+                in {hashlib.sha256(segment_id.encode()).hexdigest() for segment_id in case.segment_ids}
             ]
             if len(matching) != 1:
                 _fail("qa", f"asset {case.asset_id} has no unique server-resolved chat trace")

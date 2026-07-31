@@ -434,10 +434,17 @@ class TestAnalyzeVideoSegment:
     async def test_forwards_segment_bounds_to_extract_frames(self, monkeypatch):
         captured = {}
 
-        def fake_extract_frames(video_path, max_frames, start_timestamp=0.0, end_timestamp=None):
+        def fake_extract_frames(
+            video_path,
+            max_frames,
+            start_timestamp=0.0,
+            end_timestamp=None,
+            max_pixels=None,
+        ):
             captured["video_path"] = video_path
             captured["start_timestamp"] = start_timestamp
             captured["end_timestamp"] = end_timestamp
+            captured["max_pixels"] = max_pixels
             return ["frame-a"], 30.0, 30.0, 900
 
         async def fake_analyze_frames(frames, query, model_adapter=None, config=None):
@@ -458,6 +465,7 @@ class TestAnalyzeVideoSegment:
         assert captured["video_path"] == "video.mp4"
         assert captured["start_timestamp"] == 5.0
         assert captured["end_timestamp"] == 12.0
+        assert captured["max_pixels"] == 448 * 448
         assert isinstance(result, UnderstandingResult)
 
     @pytest.mark.asyncio

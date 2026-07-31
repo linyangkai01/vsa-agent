@@ -1,5 +1,6 @@
 """Original VSS Search API adapter."""
 
+import hashlib
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -18,8 +19,9 @@ async def original_ui_search(request: SearchInput) -> SearchOutput:
     """Serve the response shape consumed by the original VSS Search UI."""
     top_k = request.top_k or 10
     logger.info(
-        "original_ui.search.request query=%r top_k=%d agent_mode=%s",
-        request.query,
+        "original_ui.search.request query_sha256=%s query_length=%d top_k=%d agent_mode=%s",
+        hashlib.sha256(request.query.encode()).hexdigest(),
+        len(request.query),
         top_k,
         request.agent_mode,
     )

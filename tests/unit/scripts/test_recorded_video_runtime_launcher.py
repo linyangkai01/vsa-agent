@@ -668,9 +668,13 @@ def test_bash_cleanup_fans_out_term_before_waiting_for_any_supervisor():
     cleanup = _bash_function("cleanup")
 
     requests = [
-        cleanup.index(f"request_managed_process_stop {component}") for component in ("ui", "worker", "api", "es")
+        cleanup.index(f"request_managed_process_stop {component}")
+        for component in ("ui", "worker", "api", "vllm", "es")
     ]
-    waits = [cleanup.index(f'run_cleanup_stage "stop {component}"') for component in ("ui", "worker", "api", "es")]
+    waits = [
+        cleanup.index(f'run_cleanup_stage "{label}"')
+        for label in ("stop ui", "stop worker", "stop api", "stop local vLLM", "stop es")
+    ]
     assert requests == sorted(requests)
     assert max(requests) < min(waits)
 
@@ -4976,13 +4980,12 @@ def test_validation_targets_the_legacy_smoke_index_created_by_the_ingest_api():
     assert '"$esEndpoint/$validationResource"' in powershell
 
 
-def test_launchers_only_reclaim_listeners_verified_as_current_user():
+def test_launchers_fail_closed_for_unproven_listeners():
     bash = _bash()
     powershell = _powershell()
 
-    assert "assert_current_user_pid" in bash
-    assert "ps -p" in bash and "-o uid=" in bash
-    assert "FOREIGN_LISTENER" in bash
+    assert "assert_current_user_pid" not in bash
+    assert "UNKNOWN_LISTENER" in bash
     assert "sudo" not in bash
 
     assert "Assert-CurrentUserProcess" in powershell

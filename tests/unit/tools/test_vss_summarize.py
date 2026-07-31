@@ -1,5 +1,7 @@
 """Tests for tools/vss_summarize.py."""
 
+import inspect
+
 import pytest
 
 from vsa_agent.data_models.understanding import DetectedEvent, SummaryResult, UnderstandingResult
@@ -23,42 +25,10 @@ async def test_summarize_understanding_result_returns_summary_result():
     assert summary.text_output == "person walking"
 
 
-@pytest.mark.anyio
-async def test_summarize_uses_model_adapter_when_provided():
+def test_summarize_has_no_arbitrary_model_adapter_bypass():
     from vsa_agent.tools.vss_summarize import summarize_understanding_result
 
-    calls = []
-
-    class FakeAdapter:
-        async def invoke(self, messages):
-            calls.append(messages)
-            return type("Response", (), {"content": "LLM summary about forklift activity"})()
-
-    result = UnderstandingResult(
-        query="what happened",
-        source_type="video_file",
-        summary_text="",
-        chunks=[],
-        events=[
-            DetectedEvent(
-                event_id="e1",
-                label="walking",
-                description="person walking near forklift",
-                start_timestamp="00:00:05",
-                end_timestamp="00:00:09",
-            )
-        ],
-    )
-    summary = await summarize_understanding_result(
-        result,
-        "what happened",
-        model_adapter=FakeAdapter(),
-    )
-
-    assert summary.text_output == "LLM summary about forklift activity"
-    assert calls
-    prompt_text = calls[0][1].content
-    assert "Structured summary" in prompt_text
+    assert list(inspect.signature(summarize_understanding_result).parameters) == ["result", "query"]
 
 
 @pytest.mark.anyio
@@ -156,15 +126,8 @@ async def test_summarize_renders_structured_risk_digest_grounding_fields():
 
 
 @pytest.mark.anyio
-async def test_summarize_model_adapter_receives_risk_digest_when_available():
+async def test_summarize_keeps_risk_digest_local_without_adapter_hook():
     from vsa_agent.tools.vss_summarize import summarize_understanding_result
-
-    calls = []
-
-    class FakeAdapter:
-        async def invoke(self, messages):
-            calls.append(messages)
-            return type("Response", (), {"content": "digest summary"})()
 
     result = UnderstandingResult(
         query="identify safety risks",
@@ -183,11 +146,10 @@ async def test_summarize_model_adapter_receives_risk_digest_when_available():
         },
     )
 
-    summary = await summarize_understanding_result(result, "identify safety risks", model_adapter=FakeAdapter())
+    summary = await summarize_understanding_result(result, "identify safety risks")
 
-    assert summary.text_output == "digest summary"
-    assert "Risk digest by chunk" in calls[0][1].content
-    assert "Safety vests are not clearly visible" in calls[0][1].content
+    assert "Risk digest by chunk" in summary.text_output
+    assert "Safety vests are not clearly visible" in summary.text_output
 
 
 @pytest.mark.anyio

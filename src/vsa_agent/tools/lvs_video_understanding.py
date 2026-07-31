@@ -366,8 +366,6 @@ async def _analyze_long_video_window(
     write_live_trace_event(
         "lvs_video_understanding.started",
         {
-            "video_path": video_path,
-            "query": query,
             "source_type": source_type,
             "duration_sec": duration_sec,
             "window_start_sec": start_sec,
@@ -394,8 +392,6 @@ async def _analyze_long_video_window(
         write_live_trace_event(
             "lvs_video_understanding.chunk.started",
             {
-                "video_path": video_path,
-                "query": query,
                 "chunk_index": index,
                 "chunk_count": len(chunks),
                 "start_timestamp": absolute_start_sec,
@@ -434,8 +430,6 @@ async def _analyze_long_video_window(
         write_live_trace_event(
             "lvs_video_understanding.chunk.completed",
             {
-                "video_path": video_path,
-                "query": query,
                 "chunk_index": index,
                 "chunk_count": len(chunks),
                 "start_timestamp": absolute_start_sec,
@@ -463,8 +457,6 @@ async def _analyze_long_video_window(
     write_live_trace_event(
         "lvs_video_understanding.completed",
         {
-            "video_path": video_path,
-            "query": query,
             "chunk_count": len(chunk_results),
             "event_count": len(merged_result.events),
             "summary_length": len(merged_result.summary_text),

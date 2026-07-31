@@ -54,12 +54,12 @@ class RuntimeEvidence(BaseModel):
 
 
 class ChatTraceEvidence(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 2
     trace_id: str
-    conversation_id: str
-    user_message_id: str
-    selected_asset_id: str
-    selected_segment_id: str
+    conversation_id_sha256: str
+    user_message_id_sha256: str
+    selected_asset_id_sha256: str
+    selected_segment_id_sha256: str
     event_types: tuple[str, ...]
     missing_event_types: tuple[str, ...]
     video_tool_call_count: int
@@ -206,23 +206,21 @@ async def chat_trace_evidence(trace_id: str) -> ChatTraceEvidence:
         and isinstance(event.get("payload"), dict)
         and event["payload"].get("tool_name") == "video_understanding"
     ]
-    call_payloads = [event["payload"] for event in video_tool_calls]
-    call_ids = [payload.get("tool_call_id") for payload in call_payloads]
+    call_ids = [event["payload"].get("tool_call_id") for event in video_tool_calls]
     cached_call_ids = [event["payload"].get("tool_call_id") for event in video_tool_cached_results]
-    first_args = call_payloads[0].get("tool_args") if call_payloads else None
     video_tool_calls_consistent = (
-        isinstance(first_args, dict)
-        and all(payload.get("tool_args") == first_args for payload in call_payloads)
+        bool(call_ids)
         and all(isinstance(call_id, str) and call_id for call_id in call_ids)
         and len(set(call_ids)) == len(call_ids)
         and all(isinstance(call_id, str) and call_id in call_ids for call_id in cached_call_ids)
         and len(set(cached_call_ids)) == len(cached_call_ids)
     )
     final_events = [event for event in events if event.get("event_type") == "top_agent.final"]
-    final_nonempty = len(final_events) == 1 and bool(
-        str(final_events[0].get("payload", {}).get("final_answer", "")).strip()
-        if isinstance(final_events[0].get("payload"), dict)
-        else False
+    final_nonempty = (
+        len(final_events) == 1
+        and isinstance(final_events[0].get("payload"), dict)
+        and isinstance(final_events[0]["payload"].get("final_answer_length"), int)
+        and final_events[0]["payload"]["final_answer_length"] > 0
     )
     error_event_types = tuple(event_type for event_type in event_types if re.search(r"(?:^|[._])error$", event_type))
     request_ids: set[str] = set()
@@ -230,10 +228,10 @@ async def chat_trace_evidence(trace_id: str) -> ChatTraceEvidence:
         request_ids.update(_provider_request_ids(event.get("payload")))
     return ChatTraceEvidence(
         trace_id=trace_id,
-        conversation_id=str(request_payload.get("conversation_id", "")),
-        user_message_id=str(request_payload.get("user_message_id", "")),
-        selected_asset_id=str(request_payload.get("selected_asset_id", "")),
-        selected_segment_id=str(request_payload.get("selected_segment_id", "")),
+        conversation_id_sha256=str(request_payload.get("conversation_id_sha256", "")),
+        user_message_id_sha256=str(request_payload.get("user_message_id_sha256", "")),
+        selected_asset_id_sha256=str(request_payload.get("selected_asset_id_sha256", "")),
+        selected_segment_id_sha256=str(request_payload.get("selected_segment_id_sha256", "")),
         event_types=event_types,
         missing_event_types=missing,
         video_tool_call_count=len(video_tool_calls),

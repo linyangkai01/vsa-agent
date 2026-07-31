@@ -380,6 +380,9 @@ async def test_analyze_long_video_writes_chunk_trace_events(monkeypatch):
     assert events[0]["payload"]["chunk_count"] == 3
     assert events[0]["payload"]["max_frames_per_chunk"] == 8
     assert events[-1]["payload"]["chunk_count"] == 3
+    serialized = trace_path.read_text(encoding="utf-8")
+    assert "video.mp4" not in serialized
+    assert "what happened" not in serialized
     trace_path.unlink(missing_ok=True)
 
 

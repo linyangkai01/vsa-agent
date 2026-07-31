@@ -344,26 +344,27 @@ def test_windows_stack_waits_for_ui_readiness_and_reports_failures():
         assert required in text
 
 
-def test_linux_stack_reclaims_selected_ports_and_starts_original_ui():
+def test_linux_stack_reclaims_only_manifest_owned_processes_and_starts_original_ui():
     text = _bash_script_text()
     for required in (
         "port_listener_pids",
         "kill -TERM",
-        "wait_for_port_free",
         "run_original_ui_vss.sh",
         "UI_PID",
         "NEXT_PUBLIC_ENABLE_SEARCH_TAB",
         "NEXT_PUBLIC_AGENT_API_URL_BASE",
         "SMOKE_ONLY",
-        "reclaim_stale_project_ui_processes",
-        "stale_project_ui_pids",
+        "reclaim_previous_run",
+        "verified_previous_processes",
+        "supervisor_identity",
+        "workload_identity",
+        "UNKNOWN_LISTENER",
     ):
         assert required in text
-    assert 'root "/frontend/original-ui"' in text
-    assert "current_uid" in text
-    assert text.index("reclaim_stale_project_ui_processes\n") < text.index(
+    assert text.index("reclaim_previous_run\n") < text.index(
         'for port in "$API_PORT" "$UI_PORT"; do reclaim_port "$port"; done'
     )
+    assert "reclaim_stale_project_ui_processes\n" not in text
 
 
 def test_linux_stack_waits_for_ui_and_reports_ui_logs_on_failure():
@@ -394,9 +395,17 @@ def test_linux_stack_uses_port_discovery_fallbacks_without_killing_es_proxy():
     assert 'for port in "$API_PORT" "$UI_PORT"' in text
     assert 'pids="$(port_listener_pids "$port")" || return 1' in text
     assert "PORT_TERMINATION_GRACE_SEC=5" in text
-    assert "assert_current_user_pid" in text
-    assert "FOREIGN_LISTENER" in text
-    assert 'kill -0 "$pid"' in text
+    assert "assert_current_user_pid" not in text
+    assert "UNKNOWN_LISTENER" in text
+    reclaim_port = text[text.index("reclaim_port()") : text.index("start_es_log_stream()")]
+    assert 'kill -KILL "$pid"' not in reclaim_port
+
+
+def test_linux_stack_only_waits_for_compute_processes_on_selected_gpu():
+    text = _bash_script_text()
+
+    assert 'gpu["uuid"]' in text
+    assert 'awk -F, -v uuid="$gpu_uuid"' in text
 
 
 def test_linux_stack_preflights_python_and_reports_each_service_failure():
