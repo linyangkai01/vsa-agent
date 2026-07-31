@@ -96,12 +96,16 @@ if ! environment_ready; then
     echo "ERROR: offline mode cannot install a missing or incompatible vLLM environment." >&2
     exit 1
   fi
-  "${ENV_DIR}/bin/python" -m pip install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cu124 \
-    "vllm==${VLLM_VERSION}" \
+  # Keep the PyTorch wheel index out of general dependency resolution: some
+  # of its pure-Python links redirect to files.pythonhosted.org.
+  "${ENV_DIR}/bin/python" -m pip install \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    --no-deps \
     "torch==${TORCH_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
-    "torchaudio==${TORCHAUDIO_VERSION}" \
+    "torchaudio==${TORCHAUDIO_VERSION}"
+  "${ENV_DIR}/bin/python" -m pip install \
+    "vllm==${VLLM_VERSION}" \
     "transformers==${TRANSFORMERS_VERSION}" \
     "huggingface-hub[hf_xet]==${HUGGINGFACE_HUB_VERSION}" \
     "compressed-tensors==${COMPRESSED_TENSORS_VERSION}" \

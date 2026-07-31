@@ -29,6 +29,18 @@ def test_bootstrap_supports_strict_offline_verification_without_download():
     assert "verify-model --model-manifest" in text
 
 
+def test_bootstrap_isolates_pytorch_index_from_general_dependency_resolution():
+    text = BOOTSTRAP.read_text(encoding="utf-8")
+
+    assert "--extra-index-url" not in text
+    assert "--index-url https://download.pytorch.org/whl/cu124" in text
+    assert "--no-deps" in text
+    assert text.count('"${ENV_DIR}/bin/python" -m pip install') == 2
+    torch_install, general_install = text.split('"${ENV_DIR}/bin/python" -m pip install')[1:]
+    assert '"torch==${TORCH_VERSION}"' in torch_install
+    assert '"vllm==${VLLM_VERSION}"' in general_install
+
+
 def test_runtime_contains_exact_official_weight_hashes_and_preflight_contract():
     text = RUNTIME.read_text(encoding="utf-8")
 
