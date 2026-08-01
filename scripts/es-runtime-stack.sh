@@ -740,6 +740,7 @@ start_local_vllm() {
       TRANSFORMERS_OFFLINE=1 \
       HF_HUB_DISABLE_TELEMETRY=1 \
       DO_NOT_TRACK=1 \
+      PYTHONNOUSERSITE=1 \
       VLLM_LOGGING_LEVEL=INFO \
       "$VSA_LOCAL_VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
       "$VLLM_MODEL_PATH" \
@@ -757,7 +758,7 @@ start_local_vllm() {
       --mm-processor-kwargs '{"min_pixels":3136,"max_pixels":200704}' \
       --swap-space 0 \
       --cpu-offload-gb 0 \
-      --mm-processor-cache-gb 0 \
+      --disable-mm-preprocessor-cache \
       --enforce-eager \
       --disable-log-requests
   VLLM_PID="$STARTED_SUPERVISOR_PID"

@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 umask 077
+export PYTHONNOUSERSITE=1
 
 MODEL_ID="Qwen/Qwen2.5-VL-7B-Instruct-AWQ"
 MODEL_REVISION="536a35794df8831aa814970ee8f89eff577e7718"
@@ -75,6 +76,7 @@ fi
 environment_ready() {
   [[ -x "${ENV_DIR}/bin/python" ]] || return 1
   [[ -r "$ENVIRONMENT_MANIFEST_PATH" ]] || return 1
+  "${ENV_DIR}/bin/python" -m pip check >/dev/null 2>&1 || return 1
   "${ENV_DIR}/bin/python" "$RUNTIME_HELPER" verify-environment \
     --manifest "$ENVIRONMENT_MANIFEST_PATH" >/dev/null 2>&1
 }
@@ -110,6 +112,7 @@ if ! environment_ready; then
     "huggingface-hub[hf_xet]==${HUGGINGFACE_HUB_VERSION}" \
     "compressed-tensors==${COMPRESSED_TENSORS_VERSION}" \
     "xformers==${XFORMERS_VERSION}"
+  rm -f "$ENVIRONMENT_MANIFEST_PATH"
   "${ENV_DIR}/bin/python" "$RUNTIME_HELPER" environment-manifest \
     --output "$ENVIRONMENT_MANIFEST_PATH" >/dev/null
   chmod 400 "$ENVIRONMENT_MANIFEST_PATH"
@@ -129,7 +132,7 @@ verify_vllm_cli_contract() {
     --served-model-name --host --port --tensor-parallel-size --quantization --dtype \
     --max-model-len --max-num-seqs --max-num-batched-tokens --gpu-memory-utilization \
     --limit-mm-per-prompt --mm-processor-kwargs --swap-space --cpu-offload-gb \
-    --mm-processor-cache-gb --enforce-eager --disable-log-requests; do
+    --disable-mm-preprocessor-cache --enforce-eager --disable-log-requests; do
     if ! grep -F -- "$option" <<<"$help_text" >/dev/null; then
       echo "ERROR: pinned vLLM ${VLLM_VERSION} does not support required option ${option}." >&2
       return 1
@@ -167,6 +170,7 @@ path = snapshot_download(
 print(path)
 PY
 )"
+  rm -f "$MANIFEST_PATH"
   "${ENV_DIR}/bin/python" "$RUNTIME_HELPER" model-manifest --snapshot "$snapshot_path" --output "$MANIFEST_PATH" >/dev/null
   "${ENV_DIR}/bin/python" "$RUNTIME_HELPER" verify-model --model-manifest "$MANIFEST_PATH" >/dev/null
   chmod 400 "$MANIFEST_PATH"
@@ -183,6 +187,7 @@ chmod 400 "$MANIFEST_PATH" "$ENVIRONMENT_MANIFEST_PATH"
   printf 'export TRANSFORMERS_OFFLINE=1\n'
   printf 'export HF_HUB_DISABLE_TELEMETRY=1\n'
   printf 'export DO_NOT_TRACK=1\n'
+  printf 'export PYTHONNOUSERSITE=1\n'
 } >"$RUNTIME_ENV_PATH"
 chmod 600 "$RUNTIME_ENV_PATH"
 

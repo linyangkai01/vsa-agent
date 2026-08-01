@@ -108,7 +108,7 @@ AWQ format: W4A16, group_size=128, zero_point=true, version=gemm
 bootstrap 要求：
 
 1. 只使用当前普通用户权限，创建独立 `vsa-vllm` Conda 环境。
-2. 首版固定 `vLLM 0.8.5`、`Torch 2.6/cu124` 和兼容的 Transformers/AWQ 依赖，生成包含包哈希的 lock manifest；服务器驱动 `550.163.01` 的 CUDA capability 为 12.4，禁止安装默认要求 CUDA 12.8 的 wheel。
+2. 首版固定 `vLLM 0.8.5`、`Torch 2.6/cu124` 和兼容的 Transformers/AWQ 依赖，生成包含包哈希的 lock manifest；独立环境必须设置 `PYTHONNOUSERSITE=1` 并通过 `pip check`，不得借用用户级 site-packages；服务器驱动 `550.163.01` 的 CUDA capability 为 12.4，禁止安装默认要求 CUDA 12.8 的 wheel。
 3. 下载到项目外的模型目录，例如 `/data/project/lyk/models/vsa-agent/`。
 4. 先下载临时 snapshot，完成大小和 SHA-256 校验后再原子发布。
 5. 生成只读模型 manifest，记录仓库、revision、许可证、文件哈希和依赖指纹。
@@ -285,7 +285,7 @@ Elasticsearch 若仍由 Docker Compose 管理，只能通过固定 Compose proje
 vLLM 只监听 `127.0.0.1:8001`，served model 使用稳定别名 `qwen2.5-vl-local`。配置包括：
 
 - 单卡、FP16 activation、eager mode、16K 上下文、单序列、16K batched-token 上限、24 图像硬上限和 200,704 pixels 单图上限。
-- `limit_mm_per_prompt` 禁止原生 video 输入，只允许最多 24 张已经过本地抽取和缩放的 image；多模态 processor cache 设为 0，避免形成未计算的内存副本。
+- `limit_mm_per_prompt` 禁止原生 video 输入，只允许最多 24 张已经过本地抽取和缩放的 image；vLLM 0.8.5 使用 `--disable-mm-preprocessor-cache` 完全禁用多模态预处理缓存，避免形成未计算的内存副本。
 - 禁止请求 body logging，关闭 Hugging Face、Transformers 和 vLLM telemetry。
 - 模型路径指向已校验的本地 snapshot，不使用可变化的模型名称解析。
 - 本地 adapter 配置只允许 loopback URL；非 loopback 配置验证失败。
@@ -308,7 +308,7 @@ vLLM 只监听 `127.0.0.1:8001`，served model 使用稳定别名 `qwen2.5-vl-lo
 --mm-processor-kwargs {"min_pixels":3136,"max_pixels":200704}
 --swap-space 0
 --cpu-offload-gb 0
---mm-processor-cache-gb 0
+--disable-mm-preprocessor-cache
 --enforce-eager
 --disable-log-requests
 ```
