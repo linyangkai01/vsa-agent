@@ -297,6 +297,44 @@ class TestVLLMModelAdapter:
         assert adapter is not None
         assert hasattr(adapter, "llm")
 
+    @pytest.mark.parametrize(
+        ("configured_key", "expected_key"),
+        [
+            (None, "local-vllm-no-auth"),
+            ("", "local-vllm-no-auth"),
+            ("explicit-local-key", "explicit-local-key"),
+        ],
+    )
+    @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+    def test_api_key_satisfies_client_without_requiring_local_service_auth(
+        self,
+        chat_openai_cls,
+        monkeypatch,
+        configured_key,
+        expected_key,
+    ):
+        from vsa_agent.config import AppConfig, ModelConfig, ModelProdConfig
+        from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+        chat_openai_cls.return_value = MagicMock()
+        monkeypatch.setattr(
+            "vsa_agent.model_adapter.vllm_adapter.get_config",
+            lambda: AppConfig(
+                model=ModelConfig(
+                    mode="prod",
+                    prod=ModelProdConfig(
+                        provider="vllm",
+                        base_url="http://127.0.0.1:8001/v1",
+                        api_key="",
+                    ),
+                )
+            ),
+        )
+
+        VLLMModelAdapter(model_name="local-vlm", api_key=configured_key)
+
+        assert chat_openai_cls.call_args.kwargs["api_key"] == expected_key
+
     @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
     def test_bind_tools_delegates_to_underlying_llm(self, chat_openai_cls, monkeypatch):
         from vsa_agent.config import AppConfig, ModelConfig, ModelProdConfig

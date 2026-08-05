@@ -30,6 +30,8 @@
 当前 profile 的本地 vLLM 声明 `api_key_required: false`。readiness 探针必须允许这种
 loopback provider 在省略 Authorization 时完成 OpenAI-compatible 请求，不能把无密钥
 本地服务误判为配置错误。需要密钥的远程 provider 仍必须 fail-closed。
+`ChatOpenAI` 客户端自身要求非空 key 时，vLLM 专用适配器使用固定非敏感占位值满足
+客户端构造；该值不是凭据，不会启用服务端鉴权，也不得用于远程 provider。
 
 ## 验收标准
 

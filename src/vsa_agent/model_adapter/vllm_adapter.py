@@ -8,6 +8,8 @@ from vsa_agent.model_adapter.base import (
 )
 from vsa_agent.observability.live_trace import write_live_trace_event
 
+_NO_AUTH_API_KEY = "local-vllm-no-auth"
+
 
 class VLLMModelAdapter(BaseModelAdapter):
     """Adapter using a vLLM OpenAI-compatible endpoint."""
@@ -26,7 +28,7 @@ class VLLMModelAdapter(BaseModelAdapter):
         self.llm = ChatOpenAI(
             model=self.model_name,
             base_url=self.base_url,
-            api_key=resolved_api_key if resolved_api_key else None,
+            api_key=resolved_api_key or _NO_AUTH_API_KEY,
             temperature=0,
             max_retries=0,
             timeout=MODEL_REQUEST_TIMEOUT_SEC,
