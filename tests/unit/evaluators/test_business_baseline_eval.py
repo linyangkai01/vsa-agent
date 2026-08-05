@@ -271,6 +271,18 @@ def test_answer_evaluation_treats_hyphen_and_space_as_equivalent() -> None:
     assert result.passed is True
 
 
+def test_answer_evaluation_rejects_visibility_qualified_negation() -> None:
+    result = evaluate_business_answer(
+        "There is no visible dust-control equipment.",
+        required_concept_groups=(_required("dust_control", ("dust-control equipment",), ("no dust control",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
 def test_answer_evaluation_preserves_properly_worn_negation_after_normalization() -> None:
     result = evaluate_business_answer(
         "The required PPE is properly worn.",

@@ -7,7 +7,7 @@ from openai import PermissionDeniedError
 
 from vsa_agent.config import AppConfig
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.tools.video_understanding import (
     VideoUnderstandingConfig,
     VideoUnderstandingInput,
@@ -396,14 +396,10 @@ class TestAnalyzeVideoSegment:
         async def fail_if_called(*args, **kwargs):
             raise AssertionError("_resolve_video_source should not run when frames are provided")
 
-        async def fake_prompt(query, intent=None, context=None):
-            return "generated prompt"
-
         async def fake_analyze_frames(frames, query, model_adapter=None, config=None):
             return "plain answer"
 
         monkeypatch.setattr("vsa_agent.tools.video_understanding._resolve_video_source", fail_if_called)
-        monkeypatch.setattr("vsa_agent.tools.video_understanding.generate_understanding_prompt", fake_prompt)
         monkeypatch.setattr("vsa_agent.tools.video_understanding._analyze_frames", fake_analyze_frames)
 
         result = await analyze_video_segment(
@@ -423,13 +419,12 @@ class TestAnalyzeVideoSegment:
             lambda *args, **kwargs: (["frame-a"], 30.0, 30.0, 900),
         )
 
-        async def fake_prompt(query, intent=None, context=None):
-            return "generated prompt"
+        captured = {}
 
         async def fake_analyze_frames(frames, query, model_adapter=None, config=None):
+            captured["prompt"] = query
             return "plain answer"
 
-        monkeypatch.setattr("vsa_agent.tools.video_understanding.generate_understanding_prompt", fake_prompt)
         monkeypatch.setattr("vsa_agent.tools.video_understanding._analyze_frames", fake_analyze_frames)
 
         result = await analyze_video_segment(
@@ -438,7 +433,9 @@ class TestAnalyzeVideoSegment:
             config=VideoUnderstandingConfig(filter_thinking=True),
         )
 
-        assert result.chunks[0].prompt_used == "generated prompt"
+        expected_prompt = VLM_HUMAN_PROMPT_TEMPLATE.format(query="what happened")
+        assert captured["prompt"] == expected_prompt
+        assert result.chunks[0].prompt_used == expected_prompt
 
     @pytest.mark.asyncio
     async def test_forwards_segment_bounds_to_extract_frames(self, monkeypatch):
@@ -625,21 +622,13 @@ class TestAnalyzeFramesRetry:
 
 class TestUnifiedAnalyzeVideoFlow:
     @pytest.mark.asyncio
-    async def test_analyze_video_segment_passes_generated_prompt_to_model(self, monkeypatch):
+    async def test_analyze_video_segment_passes_single_checklist_prompt_to_model(self):
         captured = {}
-
-        async def fake_prompt(query, intent=None, context=None):
-            return "generated prompt"
 
         class FakeAdapter:
             async def invoke(self, messages):
                 captured["messages"] = messages
                 return type("Resp", (), {"content": "plain answer"})()
-
-        monkeypatch.setattr(
-            "vsa_agent.tools.video_understanding.generate_understanding_prompt",
-            fake_prompt,
-        )
 
         result = await analyze_video_segment(
             frames=["frame-a"],
@@ -649,9 +638,11 @@ class TestUnifiedAnalyzeVideoFlow:
 
         human_message = captured["messages"][1]
         text_part = next(part["text"] for part in human_message.content if part["type"] == "text")
-        assert "generated prompt" in text_part
-        assert "raw query" not in text_part
-        assert result.chunks[0].prompt_used == "generated prompt"
+        expected_prompt = VLM_HUMAN_PROMPT_TEMPLATE.format(query="raw query")
+        assert text_part == expected_prompt
+        assert text_part.count("raw query") == 1
+        assert human_message.content[0]["type"] == "image_url"
+        assert result.chunks[0].prompt_used == expected_prompt
 
     @pytest.mark.asyncio
     async def test_module_exposes_unified_analyze_video_for_structured_results(self, monkeypatch):

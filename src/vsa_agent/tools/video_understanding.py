@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from vsa_agent.config import VideoUnderstandingConfig, get_config
 from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.observability.live_trace import write_live_trace_event
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.video_understanding_normalization import (
     _normalize_model_response,
@@ -310,13 +310,6 @@ async def _resolve_video_source(
     return video_path
 
 
-async def generate_understanding_prompt(*args, **kwargs):
-    """Lazy wrapper to avoid hard coupling to prompt_gen import paths in tests."""
-    from vsa_agent.tools.prompt_gen import generate_understanding_prompt as _generate_prompt
-
-    return await _generate_prompt(*args, **kwargs)
-
-
 async def analyze_video_segment(
     video_path: str | None = None,
     frames: list[str] | None = None,
@@ -336,10 +329,7 @@ async def analyze_video_segment(
         raise ValueError(f"max_frames must be within 1..{tool_config.max_frames}")
     if frames is not None and len(frames) > tool_config.max_frames:
         raise ValueError(f"frame input exceeds configured limit of {tool_config.max_frames}")
-    prompt_text = prompt_used or await generate_understanding_prompt(
-        query,
-        context={"source_type": source_type},
-    )
+    prompt_text = prompt_used or VLM_HUMAN_PROMPT_TEMPLATE.format(query=query)
     resolved_video_path = None
 
     if frames is None:
@@ -544,10 +534,7 @@ async def _analyze_chunked(
         CHUNK_DURATION_SEC,
     )
 
-    chunk_prompt = await generate_understanding_prompt(
-        query,
-        context={"source_type": "video_file"},
-    )
+    chunk_prompt = VLM_HUMAN_PROMPT_TEMPLATE.format(query=query)
     captions = []
     for i in range(num_chunks):
         start = i * CHUNK_DURATION_SEC

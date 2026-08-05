@@ -81,16 +81,9 @@ async def test_analyze_video_segment_logs_vlm_and_normalized_result(trace_dir, m
     monkeypatch.setenv("VSA_LIVE_TRACE_PATH", str(trace_path))
     monkeypatch.setenv("VSA_LIVE_ARTIFACT_DIR", str(trace_dir))
 
-    async def fake_generate_understanding_prompt(query, context=None):
-        return "prompt"
-
     async def fake_analyze_frames(frames, prompt_text, model_adapter=None, config=None):
         return "person walks through the scene"
 
-    monkeypatch.setattr(
-        "vsa_agent.tools.video_understanding.generate_understanding_prompt",
-        fake_generate_understanding_prompt,
-    )
     monkeypatch.setattr(
         "vsa_agent.tools.video_understanding._analyze_frames",
         fake_analyze_frames,

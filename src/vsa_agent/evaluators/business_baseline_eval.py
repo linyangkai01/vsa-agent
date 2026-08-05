@@ -82,11 +82,13 @@ def _normalize_text(value: str) -> str:
     normalized = normalized.replace("-", " ")
     for pattern, replacement in _CANONICAL_PHRASE_ALIASES:
         normalized = pattern.sub(replacement, normalized)
+    normalized = _NEGATION_VISIBILITY_QUALIFIER.sub(r"\1", normalized)
     return _CANONICAL_TOKEN_PATTERN.sub(lambda match: _CANONICAL_TOKEN_ALIASES[match.group(1)], normalized)
 
 
 _CLAUSE_BOUNDARY = re.compile(r"[.!?;|\n\r\u3002\uff01\uff1f\uff1b]+")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_NEGATION_VISIBILITY_QUALIFIER = re.compile(r"(?<![a-z0-9_])(no|not)\s+(?:clearly\s+)?visible(?![a-z0-9_])")
 
 
 def _split_clauses(value: str) -> tuple[str, ...]:
