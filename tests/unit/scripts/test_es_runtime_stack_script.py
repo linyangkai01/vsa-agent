@@ -138,6 +138,14 @@ def test_stack_preserves_conda_subprocess_logs_for_api_observability():
     assert 'export PATH="$CONDA_BIN_DIR:$PATH"' in linux
 
 
+def test_linux_local_vllm_uses_version_compatible_model_and_gpu_release_arguments():
+    linux = _bash_script_text()
+
+    assert '--model "$VLLM_MODEL_PATH"' in linux
+    assert '-v gpu_index="$LOCAL_VLLM_GPU_INDEX"' in linux
+    assert '-v index="$LOCAL_VLLM_GPU_INDEX"' not in linux
+
+
 def test_es_runtime_stack_generates_temporary_search_config():
     text = _script_text()
 

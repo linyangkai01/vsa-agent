@@ -52,8 +52,10 @@ def test_bootstrap_and_launcher_isolate_user_packages_and_disable_mm_cache():
     assert 'rm -f "$ENVIRONMENT_MANIFEST_PATH"' in bootstrap
     assert 'rm -f "$MANIFEST_PATH"' in bootstrap
     assert "--disable-mm-preprocessor-cache" in bootstrap
+    assert "--model --served-model-name" in bootstrap
     assert "PYTHONNOUSERSITE=1" in stack
     assert "--disable-mm-preprocessor-cache" in stack
+    assert '--model "$VLLM_MODEL_PATH"' in stack
     assert "--mm-processor-cache-gb" not in bootstrap
     assert "--mm-processor-cache-gb" not in stack
 

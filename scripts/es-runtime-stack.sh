@@ -745,7 +745,7 @@ start_local_vllm() {
       PYTHONNOUSERSITE=1 \
       VLLM_LOGGING_LEVEL=INFO \
       "$VSA_LOCAL_VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
-      "$VLLM_MODEL_PATH" \
+      --model "$VLLM_MODEL_PATH" \
       --served-model-name "$LOCAL_VLLM_SERVED_MODEL" \
       --host 127.0.0.1 \
       --port "$LOCAL_VLLM_PORT" \
@@ -1235,7 +1235,7 @@ PY
   [[ "$baseline" =~ ^[0-9]+$ && -n "$gpu_uuid" ]] || return 1
   while (( SECONDS < deadline )); do
     current="$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null |
-      awk -F, -v index="$LOCAL_VLLM_GPU_INDEX" '$1 + 0 == index {gsub(/ /, "", $2); print $2; exit}')"
+      awk -F, -v gpu_index="$LOCAL_VLLM_GPU_INDEX" '$1 + 0 == gpu_index {gsub(/ /, "", $2); print $2; exit}')"
     process_rows="$(
       nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits 2>/dev/null |
         awk -F, -v uuid="$gpu_uuid" '{gsub(/ /, "", $1); if ($1 == uuid) print}'

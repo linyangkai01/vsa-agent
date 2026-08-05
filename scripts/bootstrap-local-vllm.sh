@@ -129,7 +129,7 @@ verify_vllm_cli_contract() {
     return 1
   }
   for option in \
-    --served-model-name --host --port --tensor-parallel-size --quantization --dtype \
+    --model --served-model-name --host --port --tensor-parallel-size --quantization --dtype \
     --max-model-len --max-num-seqs --max-num-batched-tokens --gpu-memory-utilization \
     --limit-mm-per-prompt --mm-processor-kwargs --swap-space --cpu-offload-gb \
     --disable-mm-preprocessor-cache --enforce-eager --disable-log-requests; do
