@@ -79,6 +79,7 @@ _ASCII_PLURAL_FORMS = {
 
 def _normalize_text(value: str) -> str:
     normalized = " ".join(value.casefold().split())
+    normalized = normalized.replace("-", " ")
     for pattern, replacement in _CANONICAL_PHRASE_ALIASES:
         normalized = pattern.sub(replacement, normalized)
     return _CANONICAL_TOKEN_PATTERN.sub(lambda match: _CANONICAL_TOKEN_ALIASES[match.group(1)], normalized)

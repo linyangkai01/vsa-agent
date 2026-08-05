@@ -19,21 +19,34 @@ class VLLMModelAdapter(BaseModelAdapter):
         model_name: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        role: str = "llm",
     ):
         config = get_config()
         prod = config.model.prod
         self.model_name = model_name or prod.llm_model
         self.base_url = base_url or prod.base_url
         resolved_api_key = api_key if api_key is not None else prod.api_key
+        model_kwargs = {"temperature": 0}
+        if role == "vlm":
+            model_kwargs = {
+                "max_tokens": 512,
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "seed": 0,
+                "extra_body": {
+                    "top_k": 20,
+                    "repetition_penalty": 1.05,
+                },
+            }
         self.llm = ChatOpenAI(
             model=self.model_name,
             base_url=self.base_url,
             api_key=resolved_api_key or _NO_AUTH_API_KEY,
-            temperature=0,
             max_retries=0,
             timeout=MODEL_REQUEST_TIMEOUT_SEC,
             http_client=httpx.Client(timeout=MODEL_REQUEST_TIMEOUT_SEC, trust_env=False),
             http_async_client=httpx.AsyncClient(timeout=MODEL_REQUEST_TIMEOUT_SEC, trust_env=False),
+            **model_kwargs,
         )
 
     async def invoke(self, messages):

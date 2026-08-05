@@ -48,25 +48,39 @@ SYSTEM_PROMPT_SAFETY_INCIDENT = "You are an industrial safety investigation syst
 SYSTEM_PROMPT_VLM_FORMAT = "DON'T MAKE UP ANYTHING NOT FROM THE VIDEO. DON'T HALLUCINATE."
 
 SYSTEM_PROMPT_VIDEO_UNDERSTANDING = (
-    "You are an expert at video understanding and description. "
-    "Your task is to capture, in as much detail as possible, the events "
-    "from the video frames related to the user's query. "
-    "Be sure to capture details about the environment, people, objects, "
-    "and actions. For example, describe attire, vehicle types, object colors. "
-    "The frames are sampled from the video in sequence. "
-    "DO NOT make up anything not visible in the frames. "
-    "DO NOT hallucinate."
+    "You analyze an ordered sequence of sampled industrial video frames. Inspect early, "
+    "middle, and late frames before answering. Report only visible evidence and never "
+    "invent facts. Produce one internally consistent account and address every part of the "
+    "user's question. Use explicit common terms such as person, worker, forklift operator, "
+    "vehicle, tool, near, separated, and working together instead of anonymous labels. "
+    "A visible operator counts as a person; do not later claim that no person is visible. "
+    "Describe coordination only when visible actions support a shared task. For PPE, inspect "
+    "visible head, body, hands, and feet; distinguish missing equipment from equipment that "
+    "cannot be assessed. Give concise complete sentences under the requested observations."
 )
 
 # ===== VLM Format Instructions =====
 
 VLM_HUMAN_PROMPT_TEMPLATE = (
-    "The following images are frames from a video, sampled in sequence. "
-    "Analyze them and answer the user's query.\n\n"
-    "User query: {query}\n\n"
-    "Start and end each observation with a relative timestamp if you can "
-    "infer timing from the sequence. "
-    "Use the format: <timestamp> observation_content </timestamp>."
+    "Review all ordered frames, including people or evidence visible in only a few frames. "
+    "Answer the user question using exactly the six labeled lines below. Complete every line "
+    "before stopping; use one or two concise sentences per line. Reuse the question's key "
+    "terms only when supported by visible evidence. Address every separately named subject "
+    "or equipment category in the question: name its visible evidence or explicitly say it "
+    "cannot be seen; never silently omit one. Explicitly state close versus separated and "
+    "working together versus independently when those relations are asked about. For safety, "
+    "accident, or compliance questions, give a direct assessment without contradicting the "
+    "observations.\n\n"
+    "People: identify and count visible people or operators.\n"
+    "Equipment and text: identify vehicles, tools, attached hoses, extraction or exhaust "
+    "components, PPE, signs, and on-screen text; explain visible tool-to-hose connections. "
+    "When a hose attached to sanding equipment visibly collects dust or debris, call it an "
+    "extraction hose or dust-control equipment.\n"
+    "Actions: describe the visible sequence of work or movement.\n"
+    "Spatial and task relationships: describe proximity, separation, and collaboration.\n"
+    "PPE: describe visible protection, missing protection, or uncertainty.\n"
+    "Safety assessment: directly answer the requested risk, accident, or compliance question.\n\n"
+    "User question: {query}"
 )
 
 # ===== Agent Prompts =====

@@ -336,6 +336,35 @@ class TestVLLMModelAdapter:
         assert chat_openai_cls.call_args.kwargs["api_key"] == expected_key
 
     @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
+    def test_vlm_role_sets_deterministic_multiframe_generation_contract(self, chat_openai_cls, monkeypatch):
+        from vsa_agent.config import AppConfig, ModelConfig, ModelProdConfig
+        from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter
+
+        chat_openai_cls.return_value = MagicMock()
+        monkeypatch.setattr(
+            "vsa_agent.model_adapter.vllm_adapter.get_config",
+            lambda: AppConfig(
+                model=ModelConfig(
+                    mode="prod",
+                    prod=ModelProdConfig(
+                        provider="vllm",
+                        base_url="http://127.0.0.1:8001/v1",
+                        api_key="",
+                    ),
+                )
+            ),
+        )
+
+        VLLMModelAdapter(model_name="local-vlm", role="vlm")
+
+        kwargs = chat_openai_cls.call_args.kwargs
+        assert kwargs["max_tokens"] == 512
+        assert kwargs["temperature"] == 0.2
+        assert kwargs["top_p"] == 0.9
+        assert kwargs["seed"] == 0
+        assert kwargs["extra_body"] == {"top_k": 20, "repetition_penalty": 1.05}
+
+    @patch("vsa_agent.model_adapter.vllm_adapter.ChatOpenAI")
     def test_bind_tools_delegates_to_underlying_llm(self, chat_openai_cls, monkeypatch):
         from vsa_agent.config import AppConfig, ModelConfig, ModelProdConfig
         from vsa_agent.model_adapter.vllm_adapter import VLLMModelAdapter

@@ -257,6 +257,20 @@ def test_answer_evaluation_normalizes_work_word_forms_and_negation() -> None:
     assert result.passed is True
 
 
+def test_answer_evaluation_treats_hyphen_and_space_as_equivalent() -> None:
+    result = evaluate_business_answer(
+        "The worker uses visible dust control equipment while sanding.",
+        required_concept_groups=(
+            _required("dust_control", ("dust-control equipment",), ("no dust-control equipment",)),
+        ),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("dust_control",)
+    assert result.passed is True
+
+
 def test_answer_evaluation_preserves_properly_worn_negation_after_normalization() -> None:
     result = evaluate_business_answer(
         "The required PPE is properly worn.",

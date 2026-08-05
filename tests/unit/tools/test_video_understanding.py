@@ -7,7 +7,7 @@ from openai import PermissionDeniedError
 
 from vsa_agent.config import AppConfig
 from vsa_agent.data_models.understanding import UnderstandingResult
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
 from vsa_agent.tools.video_understanding import (
     VideoUnderstandingConfig,
     VideoUnderstandingInput,
@@ -58,7 +58,17 @@ class TestBuildVlmMessages:
         messages = _build_vlm_messages(["frame-a"], "what happened")
         assert messages[0].content == SYSTEM_PROMPT_VIDEO_UNDERSTANDING
         text_part = next(part["text"] for part in messages[1].content if part["type"] == "text")
-        assert text_part == VLM_HUMAN_PROMPT_TEMPLATE.format(query="what happened")
+        assert text_part == "what happened"
+        assert messages[1].content[0]["type"] == "image_url"
+
+    def test_keeps_formatted_prompt_once_after_all_frames(self):
+        prompt = "Checklist\n\nUser question: what happened"
+
+        messages = _build_vlm_messages(["frame-a", "frame-b"], prompt)
+
+        assert [part["type"] for part in messages[1].content] == ["image_url", "image_url", "text"]
+        assert messages[1].content[-1]["text"] == prompt
+        assert messages[1].content[-1]["text"].count("what happened") == 1
 
 
 class TestExtractFrames:

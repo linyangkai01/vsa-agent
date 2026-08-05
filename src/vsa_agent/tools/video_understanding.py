@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from vsa_agent.config import VideoUnderstandingConfig, get_config
 from vsa_agent.data_models.understanding import UnderstandingResult
 from vsa_agent.observability.live_trace import write_live_trace_event
-from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING, VLM_HUMAN_PROMPT_TEMPLATE
+from vsa_agent.prompt import SYSTEM_PROMPT_VIDEO_UNDERSTANDING
 from vsa_agent.registry import register_tool
 from vsa_agent.tools.video_understanding_normalization import (
     _normalize_model_response,
@@ -78,10 +78,7 @@ def _get_runtime_vlm_model_name() -> str:
 def _build_vlm_messages(frames, query, system_prompt=None):
     """Build VLM messages from frames and query. Independent, testable function."""
     image_parts = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}} for frame in frames]
-    human_prompt_parts = [
-        {"type": "text", "text": VLM_HUMAN_PROMPT_TEMPLATE.format(query=query)},
-        *image_parts,
-    ]
+    human_prompt_parts = [*image_parts, {"type": "text", "text": query}]
     return [
         SystemMessage(content=system_prompt or SYSTEM_PROMPT_VIDEO_UNDERSTANDING),
         HumanMessage(content=human_prompt_parts),
@@ -547,6 +544,10 @@ async def _analyze_chunked(
         CHUNK_DURATION_SEC,
     )
 
+    chunk_prompt = await generate_understanding_prompt(
+        query,
+        context={"source_type": "video_file"},
+    )
     captions = []
     for i in range(num_chunks):
         start = i * CHUNK_DURATION_SEC
@@ -563,7 +564,7 @@ async def _analyze_chunked(
         if frames:
             caption = await _analyze_frames(
                 frames,
-                query,
+                chunk_prompt,
                 model_adapter,
                 config=tool_config,
             )

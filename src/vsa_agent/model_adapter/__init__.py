@@ -34,5 +34,6 @@ def create_model_adapter(
                 model_name=resolved_model,
                 base_url=role_config.base_url,
                 api_key=role_config.api_key,
+                role=role,
             )
         raise ValueError(f"Unknown model provider for role '{role}': {role_config.provider}")
