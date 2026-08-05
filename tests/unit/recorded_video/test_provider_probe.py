@@ -56,6 +56,47 @@ def test_probe_succeeds_for_valid_embedding_and_vlm(tmp_path: Path, monkeypatch:
     assert _SECRET not in json.dumps([result.to_dict() for result in results])
 
 
+def test_probe_allows_local_vlm_without_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VSA_PROFILE", raising=False)
+    monkeypatch.setenv("TEST_PROVIDER_API_KEY", _SECRET)
+    config = AppConfig(
+        active_profile="hybrid",
+        backends={
+            "remote": {
+                "provider": "openai_compatible",
+                "base_url": "https://provider.test/v1",
+                "api_key_env": "TEST_PROVIDER_API_KEY",
+            },
+            "local": {
+                "provider": "vllm",
+                "base_url": "http://127.0.0.1:8001/v1",
+                "api_key_required": False,
+            },
+        },
+        profiles={
+            "hybrid": {
+                "llm": {"backend": "remote", "model": "llm-model"},
+                "vlm": {"backend": "local", "model": "local-vlm"},
+                "embedding": {"backend": "remote", "model": "embedding-model"},
+            }
+        },
+        search={"allow_mock_fallback": False, "force_mock_embedding": False},
+        recorded_video={"enabled": True, "data_root": tmp_path},
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "127.0.0.1":
+            assert "authorization" not in request.headers
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        assert request.headers["authorization"] == f"Bearer {_SECRET}"
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    results = probe_recorded_video_providers(config, transport=httpx.MockTransport(handler))
+
+    assert all(result.ok for result in results)
+    assert probe_exit_code(results) == 0
+
+
 @pytest.mark.parametrize(
     ("status", "payload", "outcome", "exit_code"),
     [

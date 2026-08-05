@@ -126,6 +126,7 @@ class ResolvedRoleConfig(BaseModel):
     model: str
     api_key: str | None = None
     api_key_env: str | None = None
+    api_key_required: bool = True
 
 
 class RuntimeResolvedConfig(BaseModel):
@@ -357,6 +358,7 @@ def _resolve_role(
         model=binding.model,
         api_key=_resolve_api_key(backend),
         api_key_env=backend.api_key_env,
+        api_key_required=backend.api_key_required,
     )
 
 

@@ -12,7 +12,8 @@
 
 ## 路由契约
 
-1. `local_video_context` 非空表示 API 已验证并选择了一个本地视频或录播片段。
+1. API 只有在通过 repository 和 asset store 验证录播片段后，才设置显式
+   `selected_recorded_video` 状态位；普通 `local_video_context` 不触发该路由。
 2. TopAgent 仍调用当前 profile 的真实远程 LLM，使 provider、认证和工具调用接口保持
    在正式链路内。
 3. 首轮模型响应必须由编排层规范化为且仅为一次 `video_understanding` 调用：
@@ -27,7 +28,7 @@
 ## Provider 探针契约
 
 当前 profile 的本地 vLLM 声明 `api_key_required: false`。readiness 探针必须允许这种
-loopback provider 使用非敏感占位 Bearer 值完成 OpenAI-compatible 请求，不能把无密钥
+loopback provider 在省略 Authorization 时完成 OpenAI-compatible 请求，不能把无密钥
 本地服务误判为配置错误。需要密钥的远程 provider 仍必须 fail-closed。
 
 ## 验收标准

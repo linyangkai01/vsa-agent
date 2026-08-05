@@ -328,6 +328,7 @@ async def stream_original_ui_chat(
             state = AgentState(
                 current_message=HumanMessage(content=user_text),
                 local_video_context=local_video_context,
+                selected_recorded_video=selected_video is not None,
             )
             config = RunnableConfig(
                 configurable={

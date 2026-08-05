@@ -1,6 +1,7 @@
 import inspect
 import json
 import logging
+import uuid
 from typing import get_type_hints
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -25,6 +26,7 @@ _INJECTION_PARAMS = {"store", "embed_store", "attr_store", "model_adapter", "kwa
 _MAX_TOOL_RESULT_CHARS = 800
 _MAX_VIDEO_TOOL_RESULT_CHARS = 3200
 _VIDEO_RESULT_TOOL_NAMES = {"video_understanding", "lvs_video_understanding"}
+_SELECTED_VIDEO_TOOL_NAME = "video_understanding"
 _LOCAL_METADATA_TOOL_NAMES = {
     "attribute_search",
     "critic_agent",
@@ -406,17 +408,39 @@ def _normalize_tool_args(state: AgentState, name: str, args: dict) -> dict:
         return normalized
 
     query = normalized.get("query")
-    if isinstance(query, str) and query.strip():
-        return normalized
-
-    current_content = getattr(state.current_message, "content", "")
-    if isinstance(current_content, str) and current_content.strip():
-        normalized["query"] = current_content.strip()
+    if not isinstance(query, str) or not query.strip():
+        current_content = getattr(state.current_message, "content", "")
+        if isinstance(current_content, str) and current_content.strip():
+            normalized["query"] = current_content.strip()
     for key in ("video_path", "sensor_id", "start_timestamp", "end_timestamp"):
         value = state.local_video_context.get(key)
         if value is not None and value != "":
             normalized[key] = value
     return normalized
+
+
+def _route_selected_video_response(response: object, query: str) -> tuple[AIMessage, str]:
+    """Guarantee one local video-analysis call for server-validated context."""
+    if (
+        isinstance(response, AIMessage)
+        and len(response.tool_calls) == 1
+        and response.tool_calls[0].get("name") == _SELECTED_VIDEO_TOOL_NAME
+    ):
+        return response, "model_confirmed"
+
+    return (
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": _SELECTED_VIDEO_TOOL_NAME,
+                    "args": {"query": query},
+                    "id": f"selected-video-{uuid.uuid4().hex}",
+                }
+            ],
+        ),
+        "runtime_enforced",
+    )
 
 
 def _find_cached_tool_result(state: AgentState, name: str, args: dict) -> str | None:
@@ -461,6 +485,9 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
 
     adapter = create_model_adapter()
     lc_tools = _build_langchain_tools()
+    has_selected_video = state.selected_recorded_video
+    if has_selected_video:
+        lc_tools = [tool for tool in lc_tools if tool.name == _SELECTED_VIDEO_TOOL_NAME]
     if lc_tools:
         adapter.bind_tools(lc_tools)
 
@@ -483,11 +510,29 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> AgentState:
             "tool_count": len(lc_tools),
         },
     )
+    system_prompt = cfg.prompts.default_system
+    if has_selected_video:
+        system_prompt += (
+            "\n\nRUNTIME CONTEXT:\n"
+            "A server-validated recorded-video clip is selected. Call video_understanding exactly once. "
+            "The runtime injects its private path and time range; do not call discovery tools."
+        )
     response = await RemoteProviderGateway().invoke_agent(
         safe_query,
         adapter,
-        system_prompt=cfg.prompts.default_system,
+        system_prompt=system_prompt,
     )
+    if has_selected_video:
+        response, route_source = _route_selected_video_response(response, safe_query.query)
+        write_live_trace_event(
+            "top_agent.selected_video.route",
+            {
+                "tool_name": _SELECTED_VIDEO_TOOL_NAME,
+                "tool_count": 1,
+                "has_tool_calls": True,
+                "source_type": route_source,
+            },
+        )
     state.iteration_count += 1
     write_live_trace_event(
         "top_agent.agent.response",

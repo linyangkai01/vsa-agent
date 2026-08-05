@@ -97,7 +97,7 @@ def _probe_role(
         return _result(role_name, "configuration")
 
     identity = _safe_identity(role)
-    if not role.api_key:
+    if role.api_key_required and not role.api_key:
         return _result(role_name, "configuration", **identity)
     endpoint = "/embeddings" if role_name == "embedding" else "/chat/completions"
     try:
@@ -117,11 +117,10 @@ def _probe_role(
     )
     started = time.monotonic()
     try:
-        response = client.post(
-            url,
-            headers={"Authorization": f"Bearer {role.api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
+        headers = {"Content-Type": "application/json"}
+        if role.api_key:
+            headers["Authorization"] = f"Bearer {role.api_key}"
+        response = client.post(url, headers=headers, json=payload)
     except httpx.TimeoutException:
         return _result(role_name, "timeout", duration_ms=_elapsed_ms(started), **identity)
     except httpx.RequestError:

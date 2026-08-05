@@ -50,6 +50,7 @@ class AgentState(BaseModel):
     iteration_count: int = Field(default=0)
     final_answer: str = Field(default="")
     local_video_context: dict[str, object] = Field(default_factory=dict)
+    selected_recorded_video: bool = Field(default=False)
 
     # --- Reserved for future features ---
     plan: str = Field(default="")

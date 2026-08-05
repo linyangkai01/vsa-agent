@@ -325,6 +325,7 @@ async def test_stream_original_ui_chat_injects_configured_video_path():
     assert fake_graph.received_state.local_video_context == {
         "video_path": "/data/project/lyk/video/1597042367-1-192.mp4"
     }
+    assert fake_graph.received_state.selected_recorded_video is False
 
 
 @pytest.mark.asyncio
@@ -376,6 +377,7 @@ async def test_stream_original_ui_chat_resolves_search_context_before_graph_exec
         "start_timestamp": 0.0,
         "end_timestamp": 5.0,
     }
+    assert fake_graph.received_state.selected_recorded_video is True
 
 
 @pytest.mark.asyncio
