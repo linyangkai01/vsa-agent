@@ -165,6 +165,8 @@ if [[ -n "$CONDA_ENV" ]]; then
     echo "ERROR: unable to resolve Python for conda environment '$CONDA_ENV'" >&2
     exit 127
   fi
+  CONDA_BIN_DIR="$(dirname "$CONDA_PYTHON")"
+  export PATH="$CONDA_BIN_DIR:$PATH"
   PYTHON_COMMAND=("$CONDA_PYTHON")
 else
   if ! command -v python >/dev/null 2>&1; then

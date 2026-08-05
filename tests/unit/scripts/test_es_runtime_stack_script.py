@@ -134,6 +134,8 @@ def test_stack_preserves_conda_subprocess_logs_for_api_observability():
 
     assert '"--no-capture-output"' in windows
     assert "conda run --no-capture-output -n" in linux
+    assert 'CONDA_BIN_DIR="$(dirname "$CONDA_PYTHON")"' in linux
+    assert 'export PATH="$CONDA_BIN_DIR:$PATH"' in linux
 
 
 def test_es_runtime_stack_generates_temporary_search_config():
