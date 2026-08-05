@@ -1,7 +1,7 @@
 # 本地 VLM 视频隐私与资源准入设计
 
-状态：本地实施与自动化验证完成，待 Ubuntu 真实验收
-确认日期：2026-07-30
+状态：本地实施完成，Ubuntu 单脚本与真实 quick 已通过，完整验收进行中
+确认日期：2026-08-06
 目标平台：Ubuntu 单机，NVIDIA GeForce RTX 4090 D 24GB，无管理员权限
 
 ## 1. 目标
@@ -468,6 +468,18 @@ embedding model + dimensions
 12. 真实 asset 删除后，本地文件、SQLite、ES 和媒体访问全部完成级联清理。
 
 首版性能门槛为无 OOM、可连续处理、可恢复和可观测。真实延迟与吞吐记录为后续优化基线，在取得实测数据前不承诺人为指定的 p95。
+
+### 21.3 2026-08-06 阶段验收记录
+
+当前提交 `e7e7a80519453c78c6144dac49d6dc18255e3e27` 已在 Ubuntu 服务器完成以下真实验证：
+
+- 固定 revision、模型完整哈希、独立运行环境和离线资源 preflight 通过；RTX 4090 D 为 24,564 MiB，总启动门槛为 21,291 MiB，启动前空闲 24,211 MiB且无未知 compute process。
+- 单脚本 run `1a884ac5-ae22-47d1-a396-abce522bb031` 成功监管本地 vLLM、API、Worker 和原版 UI。provider evidence 确认 VLM 为本地 `qwen2.5-vl-local`，远程角色仅为 DashScope `qwen-turbo` LLM 与 `text-embedding-v4` embedding，所有角色均为非 mock。
+- dataset `1.1.0` quick run `quick-local-vllm-quality-gate-20260806-012454` 六个真实业务视频全部通过；每个用例 required-concept coverage 为 100%，无 forbidden 命中，搜索/媒体/Chat/trace 和逐资产清理均通过。
+- 六份 Chat trace 各含完整 15 事件、恰好一次 TopAgent 工具调用、一次本地 VLM 结果和唯一 final。API、ES、stack、UI、vLLM、Worker 日志无 error/traceback；trace 未保存服务器/Windows 路径或原始帧 payload，运行产物未命中 secrets 文件中的真实密钥值。
+- 验收结束后六个资产均返回删除 `204`、媒体复核 `404`，`cleanup_failures=0`。受管 launcher 收到 `TERM` 后端口 3000/8000/8001 关闭，无 GPU compute process，空闲显存恢复到 24,211 MiB；Elasticsearch 按启动策略保留。
+
+这是一项阶段性 quick 验收，不等于完成定义。仍需在隔离 data-root/ES namespace 完成 release 与 full，执行真实浏览器驱动的原版 UI 门禁、24 帧最大负载连续压力、TLS 前 canary observer，以及低资源、未知 GPU 进程和未知端口拒绝场景。上述缺口关闭前，本规格状态不得改为“最终已验收”。
 
 ## 22. 并发实施边界
 

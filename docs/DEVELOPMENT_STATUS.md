@@ -1,12 +1,12 @@
 # Development Status
 
-Last updated: 2026-07-31
+Last updated: 2026-08-06
 
 ## Current State
 
 - Active development track: local vLLM video privacy, resource admission and full remote-provider egress control.
-- Integration target: local and remote `master`; the accepted design is implemented on `codex/local-vllm-video-privacy` and is awaiting final Ubuntu bootstrap and runtime acceptance before merge.
-- Phase: local implementation and automated verification are complete. The remaining gate is the real Ubuntu vLLM bootstrap, resource/warm-up validation, original-UI business flow and shutdown evidence.
+- Integration target: local, origin and Ubuntu server `master` are aligned at `e7e7a80519453c78c6144dac49d6dc18255e3e27`.
+- Phase: implementation, real Ubuntu startup/preflight, the six-case `quick` business flow and supervised shutdown have passed. Release/full regression, browser-driven original-UI acceptance and the remaining stress/privacy rejection scenarios are still required before final acceptance.
 - Goal: keep video pixels and identifying metadata on the Ubuntu server, reject unsafe startup when GPU/RAM/disk/process ownership is insufficient, and preserve the complete original-UI upload, processing, search, playback and Q&A flow.
 - Confirmed first-stage runtime: one RTX 4090 D, `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` on local vLLM, single VLM concurrency, DashScope LLM/embedding, local ES/SQLite/files and one supervised stack launcher.
 - Out of scope for this change: multi-GPU, remote visual fallback, automatic model downgrade, GPU process preemption, public-network serving and administrator-only installation.
@@ -24,7 +24,7 @@ Last updated: 2026-07-31
 
 ## Local vLLM Privacy Implementation
 
-Implemented on the current feature branch:
+Implemented on `master`:
 
 - Added the fixed-revision, hash-verified user-level bootstrap and offline preflight for `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`, including GPU, effective RAM, `/dev/shm`, per-filesystem disk and dependency-manifest checks.
 - Integrated supervised local vLLM startup, health/model/single-frame probes, strong process identity, unknown-listener rejection, fan-out shutdown and selected-GPU release verification into the one-command runtime stack.
@@ -34,13 +34,14 @@ Implemented on the current feature branch:
 - Removed request, frame, raw VLM output and local tool-result trace artifacts; logs and traces retain hashes, lengths, counts, model identity and error types instead of sensitive values.
 - Removed the arbitrary model-adapter hook from `vss_summarize`; video summaries remain local until a typed `RemoteSafeSearchContext` protocol is implemented.
 
-Local verification on 2026-07-31:
+Local verification on 2026-07-31 and initial Ubuntu acceptance on 2026-08-06:
 
 - Effective Windows unit set: `1525 passed, 1 skipped` (Linux Bash lifecycle and two invalid local subprocess/encoding harnesses excluded).
 - Local-vLLM bootstrap/preflight/launcher contracts: `65 passed`.
 - Privacy/UI/TopAgent/video focused contracts: `86 passed`; full selected-video context focused contracts: `41 passed`.
 - Ruff, `compileall`, `git diff --check` and Ubuntu `bash -n` for `es-runtime-stack.sh` pass.
-- Server read-only resource snapshot: RTX 4090 D, 24,564 MiB total, 24,211 MiB free, 0% utilization, no compute process. Bootstrap is not yet installed.
+- Ubuntu offline model/environment verification and resource preflight passed for the pinned AWQ revision. The RTX 4090 D baseline was 24,564 MiB total and 24,211 MiB free; startup required 21,291 MiB free and found no unknown compute process.
+- The one-command stack run `1a884ac5-ae22-47d1-a396-abce522bb031` brought up local vLLM, API, Worker and original UI. After `TERM`, ports 3000/8000/8001 closed, no compute process remained, and GPU memory returned exactly to 24,211 MiB free; Elasticsearch remained running by policy.
 
 ## Previous Accepted Design
 
@@ -74,7 +75,7 @@ Local verification on 2026-07-31:
 
 `real-business-video-regression-baseline` manifest schema v2 / dataset `1.1.0`
 
-Implemented locally; final `1.1.0` Ubuntu reruns are pending:
+Implemented on `master`; `quick` has passed on Ubuntu while release/full/browser gates remain pending:
 
 - 固定 manifest 升级为严格 schema v2、dataset `1.1.0`，继续固定三个 CC BY 3.0 来源、三个源文件和六个派生片段的身份、许可与哈希；required groups 新增同 clause 的 `negated_alternatives`，forbidden conclusions 改为稳定分组。
 - 数据准备器对已有文件同时验证大小和 SHA-256；下载使用临时文件和原子替换，默认总 deadline 为 30 分钟；每次 ffprobe/FFmpeg 调用默认 deadline 为 10 分钟，超时会终止工具进程组并删除未完成片段。
@@ -89,13 +90,14 @@ Implemented locally; final `1.1.0` Ubuntu reruns are pending:
 - evaluator 修复后的 quick 已 6/6 通过；release 的 18 次真实 Chat 中仅 `ppe-respiratory-controls` 为 1/3，其三次均正确识别 respirator 与 dust control，但两次回答未显式提到佩戴设备的人员。生产 TopAgent 提示现要求画面存在人员时先明确识别 people/workers 及其动作，再给出设备与安全结论；固定 dataset manifest 和 80% 门禁保持不变，仍需新 commit/stamp 全量重跑。
 - 主体明确化提示使 `ppe-respiratory-controls` quick 通过，但 `ppe-noncompliant` 回答使用 `absent/not worn/complete absence`，旧 evaluator 只识别 `missing/not wearing`。通用归一化现统一这些明确词形，并同步归一化 `properly worn` 等否定/合规短语，避免错误放行；manifest 与门禁仍不变。
 - evaluator 修复后的最终候选 quick 6/6 通过，release 前 17 个 attempt 均正常，但最后一次文本 LLM 调用使 `qwen-plus` 返回 `403 AllocationQuota.FreeTierOnly`；所有 6 个资产仍完成 `204/404` 清理。`qwen-vl-plus` 不会生成 TopAgent 所需工具调用，不能兼任 LLM；`qwen-turbo` 已分别通过恰好一次 function-calling 探测和完整真实 API `6 passed`，因此生产 profile 改为 `qwen-turbo` + `qwen-vl-plus`。
+- 当前提交 `e7e7a80` 的正式 Ubuntu quick run `quick-local-vllm-quality-gate-20260806-012454` 已通过。六个真实用例均为 100% required-concept coverage、无 forbidden 命中；角色证据为本地 `qwen2.5-vl-local` VLM、DashScope `qwen-turbo` LLM 和 `text-embedding-v4` embedding，mock fallback 关闭。每个 Chat trace 都有完整 15 事件、恰好一次工具调用/本地 VLM 结果和唯一 final；六类组件日志无 error/traceback，trace 无路径或原始帧 payload，产物未命中密钥值。六个资产均完成 HTTP `204` 删除和媒体 `404` 复核，`cleanup_failures=0`。
 
 Pending final verification:
 
 - 对 dataset `1.1.0` 重新执行无下载固定身份复核；旧 dataset 的 quick/release/full/UI 结果不得作为本版本验收结果。
-- 在全新隔离 data-root 和 Elasticsearch namespace 上依次执行 quick、release 和 full，检查 JSON、JUnit、逐 attempt、provider evidence、精确身份以及成功/失败路径清理。
+- 在全新隔离 data-root 和 Elasticsearch namespace 上执行 release 和 full，检查 JSON、JUnit、逐 attempt、provider evidence、精确身份以及成功/失败路径清理；当前 quick PASS 不替代这两个稳定性/长视频门禁。
 - 使用真实叉车片段执行原版 UI Playwright，归档宿主机可写的独立 output directory、chat traces、页面/网络诊断和删除证据。
-- 完成上述验证后才能把设计状态改为已验收并形成正式归档；目前不得记录 `1.1.0` PASS。
+- 完成上述验证后才能把设计状态改为最终已验收并形成正式归档；目前只记录 dataset `1.1.0` 的 quick PASS。
 
 ## Previous Verified Runtime Baseline
 
@@ -220,8 +222,8 @@ Current command for normal production interaction:
 
 Production operational guide: `docs/recorded-video-runtime.md`. The earlier ES-only smoke guide remains at `docs/es-video-search-runtime.md` for focused diagnostics.
 
-Server validation status: Ubuntu fake-provider browser E2E and the 2026-07-24 real-provider three-video production acceptance both passed. The final gate used an isolated data-root and ES alias, completed cleanup, left the acceptance alias at zero documents, and left no acceptance process running. Current code synchronization policy is Git: merge completed local work to `master`, push `master`, then fast-forward the server checkout. Do not copy `.runtime` video binaries through Git.
+Server validation status: the 2026-08-06 local-vLLM hybrid quick gate passed all six dataset `1.1.0` cases on commit `e7e7a80`, completed asset cleanup and returned GPU memory to baseline. Earlier fake-provider browser E2E and the 2026-07-24 remote-VLM three-video production acceptance remain historical path evidence. Current code synchronization policy is Git: merge completed local work to `master`, push `master`, then fast-forward the server checkout. Do not copy `.runtime` video binaries through Git.
 
 ## Next Recommended Work
 
-提交并合并当前 local-vLLM 隐私实现，推送 `master` 后在 Ubuntu 执行首次 bootstrap 与幂等复跑。随后运行单脚本启动、单帧和 24 帧压力、真实 DashScope LLM/embedding、原版 UI 上传/搜索/播放/问答、全链路 canary、未知资源拒绝与退出后 60 秒显存恢复验证。全部通过后再把规格标记为已验收，并恢复 dataset `1.1.0` 的 quick/release/full 业务基线。
+使用全新隔离 data-root/ES namespace 执行 dataset `1.1.0` 的 release 与 full，再运行真实原版 UI 浏览器门禁。并行补齐 24 帧最大负载连续压力、全链路 canary、低资源/未知进程/未知端口拒绝场景；这些证据全部通过后，才能把本地 VLM 隐私规格标记为最终已验收。
