@@ -447,6 +447,15 @@ def calculate_vram_requirement(
     }
 
 
+def _merge_gpu_memory_evidence(
+    gpu: Mapping[str, Any],
+    vram: Mapping[str, Any],
+) -> dict[str, Any]:
+    if gpu.get("total_mib") != vram.get("total_mib"):
+        raise PreflightError("GPU sample and VRAM budget total memory do not match")
+    return {**gpu, **vram}
+
+
 def parse_gpu_csv(text: str) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     for row in csv.reader(line for line in text.splitlines() if line.strip()):
@@ -909,6 +918,7 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
         calibration_reserve_mib=CALIBRATION_RESERVE_MIB,
     )
     enough_vram = gpu["minimum_free_mib"] >= vram["required_free_mib"]
+    gpu_memory_evidence = _merge_gpu_memory_evidence(gpu, vram)
     checks.append(
         _check(
             "gpu_memory",
@@ -917,8 +927,7 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
             "GPU free memory satisfies the vLLM budget."
             if enough_vram
             else "GPU free memory is below the vLLM budget.",
-            **gpu,
-            **vram,
+            **gpu_memory_evidence,
             deficit_mib=max(0, int(vram["required_free_mib"]) - gpu["minimum_free_mib"]),
             calibration_status=calibration_status,
         )

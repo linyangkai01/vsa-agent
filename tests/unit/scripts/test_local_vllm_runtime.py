@@ -31,6 +31,20 @@ def test_vram_budget_uses_total_fraction_and_calibration_max():
     assert calibrated["required_free_mib"] == 22_048
 
 
+def test_gpu_memory_evidence_merges_shared_total_and_rejects_mismatch():
+    runtime = _load_module()
+    gpu = {"uuid": "GPU-1", "total_mib": 24_564, "minimum_free_mib": 24_211}
+    vram = runtime.calculate_vram_requirement(24_564, 0.70)
+
+    evidence = runtime._merge_gpu_memory_evidence(gpu, vram)
+
+    assert evidence["uuid"] == "GPU-1"
+    assert evidence["total_mib"] == 24_564
+    assert evidence["required_free_mib"] == 21_291
+    with pytest.raises(runtime.PreflightError, match="total memory do not match"):
+        runtime._merge_gpu_memory_evidence(gpu, {**vram, "total_mib": 16_384})
+
+
 def test_gpu_samples_use_minimum_free_and_maximum_utilization():
     runtime = _load_module()
     rows = [
