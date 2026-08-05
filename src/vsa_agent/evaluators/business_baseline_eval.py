@@ -82,6 +82,7 @@ def _normalize_text(value: str) -> str:
     normalized = normalized.replace("-", " ")
     for pattern, replacement in _CANONICAL_PHRASE_ALIASES:
         normalized = pattern.sub(replacement, normalized)
+    normalized = _NO_EVIDENCE_PREFIX.sub("no ", normalized)
     normalized = _NEGATION_VISIBILITY_QUALIFIER.sub(r"\1", normalized)
     return _CANONICAL_TOKEN_PATTERN.sub(lambda match: _CANONICAL_TOKEN_ALIASES[match.group(1)], normalized)
 
@@ -89,6 +90,10 @@ def _normalize_text(value: str) -> str:
 _CLAUSE_BOUNDARY = re.compile(r"[.!?;|\n\r\u3002\uff01\uff1f\uff1b]+")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _NEGATION_VISIBILITY_QUALIFIER = re.compile(r"(?<![a-z0-9_])(no|not)\s+(?:clearly\s+)?visible(?![a-z0-9_])")
+_NO_EVIDENCE_PREFIX = re.compile(
+    r"(?<![a-z0-9_])no\s+(?:(?:clear|visible|specific)\s+)?"
+    r"(?:evidence|indication)\s+(?:of|that)\s+"
+)
 
 
 def _split_clauses(value: str) -> tuple[str, ...]:
@@ -116,9 +121,18 @@ def _contains_phrase(text: str, phrase: str) -> bool:
 
 def _required_group_matches(clauses: tuple[str, ...], group: RequiredConceptGroup) -> bool:
     for clause in clauses:
-        if not any(_contains_phrase(clause, alternative) for alternative in group.alternatives):
+        matching_alternatives = tuple(
+            alternative for alternative in group.alternatives if _contains_phrase(clause, alternative)
+        )
+        if not matching_alternatives:
             continue
         if any(_contains_phrase(clause, negated) for negated in group.negated_alternatives):
+            continue
+        if any(
+            _contains_phrase(clause, f"{prefix} {alternative}")
+            for alternative in matching_alternatives
+            for prefix in ("no", "not", "without")
+        ):
             continue
         return True
     return False

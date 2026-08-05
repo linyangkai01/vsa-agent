@@ -283,6 +283,18 @@ def test_answer_evaluation_rejects_visibility_qualified_negation() -> None:
     assert result.passed is False
 
 
+def test_answer_evaluation_rejects_no_evidence_of_required_concept() -> None:
+    result = evaluate_business_answer(
+        "There is no clear evidence of missing PPE.",
+        required_concept_groups=(_required("noncompliance", ("missing",), ("nothing is missing",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ()
+    assert result.passed is False
+
+
 def test_answer_evaluation_preserves_properly_worn_negation_after_normalization() -> None:
     result = evaluate_business_answer(
         "The required PPE is properly worn.",
