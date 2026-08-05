@@ -136,6 +136,9 @@ def test_stack_preserves_conda_subprocess_logs_for_api_observability():
     assert "conda run --no-capture-output -n" in linux
     assert 'CONDA_BIN_DIR="$(dirname "$CONDA_PYTHON")"' in linux
     assert 'export PATH="$CONDA_BIN_DIR:$PATH"' in linux
+    assert "export PYTHONNOUSERSITE=1" in linux
+    assert "python_cmd -m pip check" in linux
+    assert "import fastapi" in linux
 
 
 def test_linux_local_vllm_uses_version_compatible_model_and_gpu_release_arguments():

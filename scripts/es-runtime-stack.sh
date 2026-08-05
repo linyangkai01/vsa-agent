@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
+export PYTHONNOUSERSITE=1
 
 API_PORT=8000
 ES_PORT=9200
@@ -790,13 +791,20 @@ python_cmd() {
 }
 
 verify_python_runtime() {
+  python_cmd -m pip check >/dev/null 2>&1 || return 1
   python_cmd - <<'PY'
 from importlib.metadata import PackageNotFoundError, version
 
 try:
     import aiohttp  # noqa: F401
+    import aiosqlite  # noqa: F401
     import elasticsearch  # noqa: F401
+    import fastapi  # noqa: F401
+    import httpx  # noqa: F401
+    import multipart  # noqa: F401
+    import pydantic  # noqa: F401
     import uvicorn  # noqa: F401
+    import yaml  # noqa: F401
     client_version = version("elasticsearch")
 except (ImportError, PackageNotFoundError) as exc:
     raise SystemExit(f"missing Python runtime dependency: {exc}")

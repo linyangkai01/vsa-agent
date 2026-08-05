@@ -207,6 +207,19 @@ def test_static_doctor_checks_recorded_video_python_dependencies(tmp_path: Path)
     assert {"python:aiosqlite", "python:httpx", "python:multipart"} <= components
 
 
+def test_default_python_module_check_requires_a_successful_import(monkeypatch):
+    doctor = _load_doctor()
+
+    monkeypatch.setattr(doctor.importlib, "import_module", lambda _name: object())
+    assert doctor._default_python_module_exists("healthy")
+
+    def broken_import(_name: str):
+        raise ModuleNotFoundError("missing transitive dependency")
+
+    monkeypatch.setattr(doctor.importlib, "import_module", broken_import)
+    assert not doctor._default_python_module_exists("broken")
+
+
 def test_cli_reports_missing_packages_without_import_traceback(tmp_path: Path):
     completed = subprocess.run(
         [

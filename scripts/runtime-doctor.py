@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
-import importlib.util
+import importlib
 import json
 import os
 import re
@@ -135,8 +135,9 @@ def _default_command_exists(name: str) -> bool:
 
 def _default_python_module_exists(name: str) -> bool:
     try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, AttributeError, ValueError):
+        importlib.import_module(name)
+        return True
+    except Exception:
         return False
 
 
