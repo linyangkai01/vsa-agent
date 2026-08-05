@@ -295,6 +295,31 @@ def test_answer_evaluation_rejects_no_evidence_of_required_concept() -> None:
     assert result.passed is False
 
 
+def test_answer_evaluation_normalizes_no_clear_accident_as_no_clear_incident() -> None:
+    result = evaluate_business_answer(
+        "The worker continues surveying; no clear accident is occurring.",
+        required_concept_groups=(_required("routine", ("no clear incident",), ("a clear incident is occurring",)),),
+        forbidden_concept_groups=(),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("routine",)
+    assert result.passed is True
+
+
+def test_answer_evaluation_does_not_treat_named_exception_as_absolute_absence() -> None:
+    result = evaluate_business_answer(
+        "There is no visible dust-control equipment other than the extraction hose.",
+        required_concept_groups=(_required("dust_control", ("extraction hose",), ("no extraction hose",)),),
+        forbidden_concept_groups=(_forbidden("no_dust_control", ("there is no dust-control equipment",)),),
+        minimum_coverage=1.0,
+    )
+
+    assert result.matched_group_ids == ("dust_control",)
+    assert result.forbidden_matches == ()
+    assert result.passed is True
+
+
 def test_answer_evaluation_preserves_properly_worn_negation_after_normalization() -> None:
     result = evaluate_business_answer(
         "The required PPE is properly worn.",

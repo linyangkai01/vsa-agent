@@ -67,6 +67,13 @@ _CANONICAL_PHRASE_ALIASES = (
         ),
         "missing ppe",
     ),
+    (
+        re.compile(
+            r"(?<![a-z0-9_])no\s+(?:clear\s+)?(?:accident|incident)\s+"
+            r"(?:is\s+)?(?:visible|occurring)(?![a-z0-9_])"
+        ),
+        "no clear incident",
+    ),
 )
 _ASCII_PLURAL_FORMS = {
     "operator": "operators",
@@ -140,9 +147,21 @@ def _required_group_matches(clauses: tuple[str, ...], group: RequiredConceptGrou
 
 def _forbidden_group_matches(clauses: tuple[str, ...], group: ForbiddenConceptGroup) -> bool:
     for clause in clauses:
-        if not any(_contains_phrase(clause, alternative) for alternative in group.alternatives):
+        matched_alternatives = tuple(
+            alternative for alternative in group.alternatives if _contains_phrase(clause, alternative)
+        )
+        if not matched_alternatives:
             continue
         if any(_contains_phrase(clause, negated) for negated in group.negated_alternatives):
+            continue
+        if all(
+            re.search(
+                rf"(?<![a-z0-9_]){re.escape(_normalize_text(alternative))}"
+                r"\s+(?:other than|except for|apart from)(?![a-z0-9_])",
+                clause,
+            )
+            for alternative in matched_alternatives
+        ):
             continue
         return True
     return False
